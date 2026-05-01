@@ -16,8 +16,9 @@ paths:
       description: >
         Logs into rec.us, navigates to Foster City pickleball, and checks
         court availability for the requested dates. Use mode=sync for a
-        browser-friendly JSON response, or omit mode to keep the legacy
-        async SMS behavior.
+        browser-friendly JSON response. Sync requests may be redirected to a
+        direct Lambda URL so they can outlive API Gateway's timeout. Omit mode
+        to keep the legacy async SMS behavior.
       parameters:
         - in: query
           name: mode
@@ -69,6 +70,8 @@ paths:
                     type: object
                   days:
                     type: array
+        "307":
+          description: Redirect to the direct Lambda sync endpoint
         "202":
           description: Scan started — results will be sent via SMS when complete
           content:

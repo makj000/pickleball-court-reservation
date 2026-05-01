@@ -10,11 +10,14 @@ rec.us Foster City reservation availability scanner.
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode, urljoin
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -38,11 +41,14 @@ def load_config() -> dict:
 
 
 BASE_URL      = load_config()["base_url"]
+SYNC_SCAN_URL = load_config().get("sync_scan_url", "")
 HEADLESS      = True
 DEFAULT_TIME_FILTER = "8:00 AM"
 NOTIFY_NUMBER = "+14154380400"
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
 STATE_KEY     = "state.json"
+SYNC_TOKEN_TTL_SECONDS = 300
+SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -57,6 +63,7 @@ SLOT_TIMES = [
 ]
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
+COURT_RE = re.compile(r"^court\s+\d+", re.IGNORECASE)
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
@@ -163,6 +170,77 @@ def build_scan_payload(*, targets, target_time, results):
     }
 
 
+def _is_lambda_url_request(event) -> bool:
+    domain = ((event or {}).get("requestContext") or {}).get("domainName", "")
+    return ".lambda-url." in domain
+
+
+def _sync_token_payload(path: str, params: dict[str, str], expires: str) -> str:
+    filtered = {
+        key: value
+        for key, value in params.items()
+        if key not in {"sync_token", "sync_expires"}
+    }
+    query = urlencode(sorted(filtered.items()))
+    return f"{path}\n{expires}\n{query}"
+
+
+def _sign_sync_token(path: str, params: dict[str, str], expires: str) -> str:
+    if not SYNC_SIGNING_SECRET:
+        raise RuntimeError("SYNC_SIGNING_SECRET or API_PASSWORD must be configured")
+    payload = _sync_token_payload(path, params, expires)
+    return hmac.new(
+        SYNC_SIGNING_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _has_valid_sync_token(event) -> bool:
+    params = parse_query_params(event)
+    token = (params.get("sync_token") or "").strip()
+    expires = (params.get("sync_expires") or "").strip()
+    if not token or not expires:
+        return False
+    try:
+        expires_at = int(expires)
+    except ValueError:
+        return False
+    now = int(datetime.now(tz=timezone.utc).timestamp())
+    if expires_at < now:
+        return False
+    expected = _sign_sync_token(get_path(event), params, expires)
+    return hmac.compare_digest(token, expected)
+
+
+def _build_sync_redirect(event) -> dict:
+    if not SYNC_SCAN_URL:
+        return {
+            "statusCode": 500,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": "sync_scan_url is not configured"}),
+        }
+    if not SYNC_SIGNING_SECRET:
+        return {
+            "statusCode": 500,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": "sync signing secret is not configured"}),
+        }
+
+    params = parse_query_params(event).copy()
+    target_path = "/scan"
+    expires = str(int(datetime.now(tz=timezone.utc).timestamp()) + SYNC_TOKEN_TTL_SECONDS)
+    params["sync_expires"] = expires
+    params["sync_token"] = _sign_sync_token(target_path, params, expires)
+    target_url = urljoin(SYNC_SCAN_URL, target_path.lstrip("/"))
+    location = f"{target_url}?{urlencode(sorted(params.items()))}"
+    return {
+        "statusCode": 307,
+        "headers": {**CORS_HEADERS, "Location": location, "Cache-Control": "no-store"},
+        "body": "",
+    }
+
+
 # ── SMS ───────────────────────────────────────────────────────────────────────
 
 def send_sms(to: str, message: str) -> None:
@@ -180,11 +258,12 @@ def ordinal(n: int) -> str:
 
 def _empty_state() -> dict:
     return {
-        "watched_slots":   [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
-        "my_reservations": [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
-        "availability":    {},   # {"YYYY-MM-DD": {"H:MM AM": true/false}}
-        "notified_slots":  [],   # ["YYYY-MM-DD|H:MM AM"] — already SMS'd, avoids repeat texts
-        "last_scanned":    None,
+        "watched_slots":       [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
+        "my_reservations":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
+        "availability":        {},   # {"YYYY-MM-DD": {"H:MM AM": true/false}}
+        "notified_slots":      [],   # ["YYYY-MM-DD|H:MM AM"] — already SMS'd, avoids repeat texts
+        "last_scanned":        None,
+        "scan_interval_hours": 1.0,
     }
 
 
@@ -300,12 +379,32 @@ async def get_courts_from_modal(page) -> list[str]:
         dialog = page.locator('[role="dialog"]').first
         await dialog.wait_for(timeout=5_000)
         await page.wait_for_timeout(300)
-        raw = await dialog.inner_text()
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        court_re = re.compile(r"^court\s+\d+", re.IGNORECASE)
-        for line in lines:
-            if court_re.match(line):
-                courts.append(line)
+        court_combo = dialog.locator('button[role="combobox"]').last
+        if await court_combo.count() > 0:
+            selected = (await court_combo.inner_text()).strip()
+            if selected and COURT_RE.match(selected):
+                courts.append(selected)
+            try:
+                await court_combo.click(timeout=2_000)
+                await page.wait_for_timeout(250)
+                option_texts = await page.locator('[role="option"]').all_inner_texts()
+                combo_courts = []
+                for text in option_texts:
+                    label = text.strip()
+                    if label and COURT_RE.match(label) and label not in combo_courts:
+                        combo_courts.append(label)
+                if combo_courts:
+                    courts = combo_courts
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(150)
+            except PwTimeout:
+                pass
+        if not courts:
+            raw = await dialog.inner_text()
+            lines = [l.strip() for l in raw.splitlines() if l.strip()]
+            for line in lines:
+                if COURT_RE.match(line) and line not in courts:
+                    courts.append(line)
     except PwTimeout:
         pass
     try:
@@ -453,13 +552,21 @@ def _is_within_scan_window() -> bool:
     return 8 <= datetime.now(tz=PT).hour <= 22  # 8 AM – 10 PM PT inclusive
 
 
-def _run_scheduled_worker() -> None:
+def _run_scheduled_worker(*, force: bool = False) -> None:
     """Hourly scan of all 15 days in the window."""
     if not _is_within_scan_window():
         print("Outside scan window (8 AM – 10 PM PT). Skipping.")
         return
 
     state = load_state()
+    interval_hours = state.get("scan_interval_hours", 1.0)
+    if not force and state.get("last_scanned"):
+        last = datetime.fromisoformat(state["last_scanned"].rstrip("Z")).replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(tz=timezone.utc) - last).total_seconds() / 3600
+        if elapsed < interval_hours:
+            print(f"Last scan {elapsed:.1f}h ago, interval {interval_hours}h. Skipping.")
+            return
+
     today = date.today()
     targets = [today + timedelta(days=i) for i in range(15)]
 
@@ -500,8 +607,12 @@ def _run_scheduled_worker() -> None:
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _check_auth(event) -> bool:
-    expected_user = os.environ.get("API_USERNAME", "test1")
-    expected_pass = os.environ.get("API_PASSWORD", "clouderocks!")
+    if _has_valid_sync_token(event):
+        return True
+    expected_user = os.environ.get("API_USERNAME", "")
+    expected_pass = os.environ.get("API_PASSWORD", "")
+    if not expected_user or not expected_pass:
+        return False
     auth_header = get_header(event, "authorization")
     if not auth_header.lower().startswith("basic "):
         return False
@@ -546,9 +657,10 @@ def handle_state(event) -> dict:
         "statusCode": 200,
         "headers": CORS_HEADERS,
         "body": json.dumps({
-            "grid":         grid,
-            "slot_times":   SLOT_TIMES,
-            "last_scanned": state.get("last_scanned"),
+            "grid":                grid,
+            "slot_times":          SLOT_TIMES,
+            "last_scanned":        state.get("last_scanned"),
+            "scan_interval_hours": state.get("scan_interval_hours", 1.0),
         }),
     }
 
@@ -584,6 +696,19 @@ def handle_my_reservations(event) -> dict:
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(slots)})}
 
 
+def handle_scan_interval(event) -> dict:
+    body = get_body(event)
+    hours = body.get("hours")
+    valid = [0.5, 1, 2, 3, 6, 24]
+    if hours not in valid:
+        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"hours must be one of {valid}"})}
+
+    state = load_state()
+    state["scan_interval_hours"] = hours
+    save_state(state)
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "scan_interval_hours": hours})}
+
+
 # ── Legacy async worker ───────────────────────────────────────────────────────
 
 def _run_async_worker() -> None:
@@ -612,7 +737,7 @@ def handler(event, context):
 
     # Internal: direct scheduled invocation (for testing)
     if event.get("_scheduled"):
-        _run_scheduled_worker()
+        _run_scheduled_worker(force=True)
         return
 
     # EventBridge hourly trigger
@@ -642,11 +767,16 @@ def handler(event, context):
     if path == "/my-reservations" and method == "PUT":
         return handle_my_reservations(event)
 
+    if path == "/scan-interval" and method == "PUT":
+        return handle_scan_interval(event)
+
     if path in ("/scan", "/prod/scan"):
         params = parse_query_params(event)
         mode   = (params.get("mode") or "async").strip().lower()
 
         if mode == "sync":
+            if not _is_lambda_url_request(event):
+                return _build_sync_redirect(event)
             try:
                 targets     = parse_requested_dates(event)
                 target_time = parse_time_filter(event, default=None)

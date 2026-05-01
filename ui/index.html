@@ -11,12 +11,20 @@
     /* ── Header ── */
     header {
       background: white; border-bottom: 1px solid #e5e7eb;
-      padding: 10px 20px; display: flex; align-items: center; gap: 10px;
+      padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
       position: sticky; top: 0; z-index: 10;
     }
     header h1 { font-size: 1rem; font-weight: 700; white-space: nowrap; }
-    .spacer { flex: 1; }
+    .spacer { flex: 1 1 12px; }
     #last-scanned { font-size: 0.72rem; color: #9ca3af; white-space: nowrap; }
+    #freq-label {
+      font-size: 0.72rem; color: #6b7280; white-space: nowrap;
+      display: flex; align-items: center; gap: 5px;
+    }
+    #freq-select {
+      font-size: 0.72rem; border: 1px solid #d1d5db; border-radius: 5px;
+      padding: 3px 6px; background: white; color: #374151; cursor: pointer;
+    }
 
     /* ── Mode toggle ── */
     .mode-toggle { display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden; }
@@ -142,6 +150,11 @@
       border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 720px) {
+      header, .legend { padding-left: 14px; padding-right: 14px; }
+      .grid-wrapper { padding-left: 14px; padding-right: 14px; }
+    }
   </style>
 </head>
 <body>
@@ -151,6 +164,17 @@
   <h1>🏓 Pickleball Monitor</h1>
   <div class="spacer"></div>
   <span id="last-scanned"></span>
+  <label id="freq-label">
+    Scan every
+    <select id="freq-select" onchange="setFrequency(this.value)">
+      <option value="0.5">30 mins</option>
+      <option value="1">1 hr</option>
+      <option value="2">2 hr</option>
+      <option value="3">3 hr</option>
+      <option value="6">6 hr</option>
+      <option value="24">daily</option>
+    </select>
+  </label>
   <div class="mode-toggle">
     <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁 Watch</button>
     <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
@@ -192,12 +216,41 @@
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const API_BASE   = 'https://example.execute-api.us-west-2.amazonaws.com/prod';
-const API_CREDS  = btoa('test1:clouderocks!');
+const AUTH_STORAGE_KEY = 'pickleball-basic-auth';
 
-const authHeader = () => 'Basic ' + API_CREDS;
+function readAuthToken() {
+  return localStorage.getItem(AUTH_STORAGE_KEY) || '';
+}
+
+function writeAuthToken(token) {
+  if (token) localStorage.setItem(AUTH_STORAGE_KEY, token);
+}
+
+function clearAuthToken() {
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function authHeader() {
+  const token = readAuthToken();
+  return token ? 'Basic ' + token : '';
+}
+
+function ensureAuthToken() {
+  let token = readAuthToken();
+  if (token) return token;
+
+  const username = window.prompt('API username');
+  if (username === null) throw new Error('Authentication cancelled');
+  const password = window.prompt('API password');
+  if (password === null) throw new Error('Authentication cancelled');
+
+  token = btoa(username + ':' + password);
+  writeAuthToken(token);
+  return token;
+}
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], last_scanned: null };
+let appState  = { grid: [], slot_times: [], last_scanned: null, scan_interval_hours: 1 };
 let clickMode = 'watch';
 let toastTimer = null;
 
@@ -221,10 +274,19 @@ async function apiFetch(path, options = {}) {
   let bodyPreview = '';
 
   try {
-    const r = await fetch(url, {
+    let token = ensureAuthToken();
+    let r = await fetch(url, {
       ...options,
-      headers: { Authorization: authHeader(), ...(options.headers || {}) },
+      headers: { Authorization: 'Basic ' + token, ...(options.headers || {}) },
     });
+    if (r.status === 401) {
+      clearAuthToken();
+      token = ensureAuthToken();
+      r = await fetch(url, {
+        ...options,
+        headers: { Authorization: 'Basic ' + token, ...(options.headers || {}) },
+      });
+    }
     status = r.status;
 
     const text = await r.clone().text();
@@ -294,6 +356,10 @@ async function refreshState() {
     const r = await apiFetch('/state');
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
     appState = await r.json();
+    const freqSelect = document.getElementById('freq-select');
+    if (freqSelect && appState.scan_interval_hours != null) {
+      freqSelect.value = String(appState.scan_interval_hours);
+    }
     renderGrid();
     const ls = appState.last_scanned;
     document.getElementById('last-scanned').textContent = ls
@@ -425,6 +491,32 @@ function toast(msg) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+async function setFrequency(val) {
+  const freqSelect = document.getElementById('freq-select');
+  const prev = String(appState.scan_interval_hours ?? 1);
+  freqSelect.disabled = true;
+  try {
+    const r = await apiFetch('/scan-interval', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hours: parseFloat(val) }),
+    });
+    if (!r.ok) {
+      freqSelect.value = prev;
+      toast('Failed to save frequency (' + r.status + ')');
+      return;
+    }
+    const data = await r.json();
+    appState.scan_interval_hours = data.scan_interval_hours;
+    toast('Scan frequency updated');
+  } catch (e) {
+    freqSelect.value = prev;
+    toast('Error: ' + e.message);
+  } finally {
+    freqSelect.disabled = false;
+  }
 }
 </script>
 </body>
