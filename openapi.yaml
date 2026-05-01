@@ -1,0 +1,94 @@
+openapi: 3.1.0
+info:
+  title: Pickleball Court Monitor
+  description: >
+    Checks rec.us Foster City pickleball court availability and can either
+    return live JSON results or trigger the legacy async SMS scan.
+    Runs a headless Playwright scan (~30s).
+  version: 1.0.0
+servers:
+  - url: https://example.execute-api.us-west-2.amazonaws.com/prod
+paths:
+  /scan:
+    get:
+      operationId: checkPickleballAvailability
+      summary: Check pickleball court availability
+      description: >
+        Logs into rec.us, navigates to Foster City pickleball, and checks
+        court availability for the requested dates. Use mode=sync for a
+        browser-friendly JSON response, or omit mode to keep the legacy
+        async SMS behavior.
+      parameters:
+        - in: query
+          name: mode
+          schema:
+            type: string
+            enum: [sync, async]
+            default: async
+          description: >
+            sync returns JSON immediately; async triggers the background SMS scan.
+        - in: query
+          name: days
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 7
+            default: 3
+          description: Number of consecutive days to scan starting today or start_date.
+        - in: query
+          name: start_date
+          schema:
+            type: string
+            format: date
+          description: Optional starting date for the scan window.
+        - in: query
+          name: dates
+          schema:
+            type: string
+          description: Optional comma-separated explicit dates in YYYY-MM-DD format.
+        - in: query
+          name: time
+          schema:
+            type: string
+          description: Optional exact time filter such as 8:00 AM. Leave blank for all visible slots.
+      security:
+        - basicAuth: []
+      responses:
+        "200":
+          description: Live availability results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generated_at:
+                    type: string
+                  filters:
+                    type: object
+                  summary:
+                    type: object
+                  days:
+                    type: array
+        "202":
+          description: Scan started — results will be sent via SMS when complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Scan started. You will receive an SMS when complete."
+        "401":
+          description: Unauthorized — invalid or missing Basic Auth credentials
+    options:
+      operationId: pickleballAvailabilityOptions
+      summary: CORS preflight
+      responses:
+        "204":
+          description: No content
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic

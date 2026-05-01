@@ -1,0 +1,7 @@
+{
+  "base_url": "https://www.rec.us/foster-city",
+  "scan_api_url": "https://example.execute-api.us-west-2.amazonaws.com/prod/scan",
+  "check_dates": [
+    "2026-03-20"
+  ]
+}

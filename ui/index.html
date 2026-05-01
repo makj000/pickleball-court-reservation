@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pickleball Monitor</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f4f6; color: #111; display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ── Header ── */
+    header {
+      background: white; border-bottom: 1px solid #e5e7eb;
+      padding: 10px 20px; display: flex; align-items: center; gap: 10px;
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 1rem; font-weight: 700; white-space: nowrap; }
+    .spacer { flex: 1; }
+    #last-scanned { font-size: 0.72rem; color: #9ca3af; white-space: nowrap; }
+
+    /* ── Mode toggle ── */
+    .mode-toggle { display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden; }
+    .mode-btn {
+      padding: 5px 13px; font-size: 0.75rem; font-weight: 600;
+      border: none; background: white; cursor: pointer; color: #6b7280;
+      transition: background 0.15s, color 0.15s;
+    }
+    .mode-btn.active-watch { background: #ea580c; color: white; }
+    .mode-btn.active-mine  { background: #2563eb; color: white; }
+
+    /* ── Buttons ── */
+    .btn {
+      padding: 5px 13px; border: 1px solid #d1d5db; border-radius: 7px;
+      background: white; font-size: 0.78rem; font-weight: 500; color: #374151;
+      cursor: pointer; white-space: nowrap;
+    }
+    .btn:hover { background: #f9fafb; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── Legend ── */
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 10px 18px;
+      padding: 10px 20px; background: white;
+      border-bottom: 1px solid #e5e7eb; font-size: 0.72rem; color: #374151;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 2px solid transparent; }
+    .hint { margin-left: auto; color: #9ca3af; font-size: 0.69rem; }
+
+    /* ── Grid wrapper ── */
+    .grid-wrapper { overflow-x: auto; padding: 16px 20px 8px; flex: 1; }
+    .grid {
+      display: grid;
+      grid-template-columns: 90px repeat(var(--slot-cols, 7), minmax(48px, 1fr));
+      gap: 3px;
+      min-width: 600px;
+    }
+
+    /* ── Grid cells ── */
+    .col-header { font-size: 0.62rem; font-weight: 600; color: #6b7280; text-align: center; padding: 3px 2px; white-space: nowrap; }
+    .row-label {
+      font-size: 0.68rem; font-weight: 500; color: #374151;
+      display: flex; align-items: center; gap: 5px; padding-right: 4px;
+      white-space: nowrap;
+    }
+    .cell {
+      height: 36px; border-radius: 5px; cursor: pointer;
+      border: 2px solid transparent;
+      transition: transform 0.1s, box-shadow 0.1s, opacity 0.15s;
+      position: relative;
+    }
+    .cell:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0,0,0,0.18); z-index: 1; }
+    .cell:active { transform: scale(0.95); }
+
+    .s-unknown { background: #e5e7eb; }
+    .s-taken   { background: #d1d5db; }
+    .s-open    { background: #bbf7d0; }
+    .s-mine    { background: #bfdbfe; border-color: #3b82f6; }
+    .s-mine::after { content: ""; position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: #2563eb; }
+
+    .watching { border-color: #ea580c !important; }
+    .watching.s-open { background: #4ade80; animation: pulse-open 2s ease-in-out infinite; }
+    .watching.s-taken { background: #fed7aa; }
+    .watching.s-unknown { background: #fef3c7; }
+
+    @keyframes pulse-open {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0.7); }
+      50%       { box-shadow: 0 0 0 7px rgba(74,222,128,0); }
+    }
+
+    /* ── Log panel ── */
+    #log-panel {
+      background: #111827; color: #d1d5db; font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.72rem; border-top: 1px solid #374151;
+      display: flex; flex-direction: column;
+    }
+    #log-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 12px; border-bottom: 1px solid #374151;
+      background: #1f2937; cursor: pointer; user-select: none;
+    }
+    #log-header span { flex: 1; font-weight: 600; color: #9ca3af; font-size: 0.7rem; letter-spacing: 0.05em; }
+    #log-header .log-controls { display: flex; gap: 6px; }
+    #log-header button {
+      background: none; border: 1px solid #374151; color: #9ca3af;
+      border-radius: 4px; padding: 2px 8px; font-size: 0.65rem; cursor: pointer;
+    }
+    #log-header button:hover { border-color: #6b7280; color: #d1d5db; }
+    #log-entries {
+      overflow-y: auto; max-height: 180px; padding: 4px 0;
+    }
+    #log-panel.collapsed #log-entries { display: none; }
+    .log-entry {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 3px 12px; border-bottom: 1px solid #1f2937;
+      line-height: 1.4;
+    }
+    .log-entry:hover { background: #1f2937; }
+    .log-ts   { color: #6b7280; flex-shrink: 0; font-size: 0.65rem; }
+    .log-req  { color: #93c5fd; flex-shrink: 0; }
+    .log-arrow { color: #4b5563; }
+    .log-status { flex-shrink: 0; font-weight: 600; }
+    .log-status.ok  { color: #4ade80; }
+    .log-status.err { color: #f87171; }
+    .log-body { color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; bottom: 220px; right: 22px;
+      background: #1f2937; color: white;
+      padding: 9px 18px; border-radius: 8px; font-size: 0.8rem;
+      opacity: 0; transform: translateY(6px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none; z-index: 100;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid #d1d5db; border-top-color: #16a34a;
+      border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <h1>🏓 Pickleball Monitor</h1>
+  <div class="spacer"></div>
+  <span id="last-scanned"></span>
+  <div class="mode-toggle">
+    <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁 Watch</button>
+    <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
+  </div>
+  <button class="btn" id="btn-refresh" onclick="refreshState()">Refresh</button>
+</header>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="swatch" style="background:#e5e7eb;"></div>Not scanned</div>
+  <div class="legend-item"><div class="swatch" style="background:#d1d5db;"></div>Taken</div>
+  <div class="legend-item"><div class="swatch" style="background:#bbf7d0;"></div>Open</div>
+  <div class="legend-item"><div class="swatch" style="background:#fed7aa; border-color:#ea580c;"></div>Watching (taken)</div>
+  <div class="legend-item"><div class="swatch" style="background:#4ade80; border-color:#ea580c;"></div>Watching (open!)</div>
+  <div class="legend-item"><div class="swatch" style="background:#bfdbfe; border-color:#3b82f6;"></div>Mine</div>
+  <span class="hint">click cell = watch &nbsp;·&nbsp; shift+click = mine</span>
+</div>
+
+<!-- Grid -->
+<div class="grid-wrapper">
+  <div class="grid" id="grid"></div>
+</div>
+
+<!-- Log panel -->
+<div id="log-panel" class="collapsed">
+  <div id="log-header" onclick="toggleLog()">
+    <span>API LOG</span>
+    <div class="log-controls" onclick="e => e.stopPropagation()">
+      <button onclick="event.stopPropagation(); clearLog()">Clear</button>
+      <button onclick="event.stopPropagation(); toggleLog()">▲ Hide</button>
+    </div>
+  </div>
+  <div id="log-entries"></div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const API_BASE   = 'https://example.execute-api.us-west-2.amazonaws.com/prod';
+const API_CREDS  = btoa('test1:clouderocks!');
+
+const authHeader = () => 'Basic ' + API_CREDS;
+
+// ── App state ─────────────────────────────────────────────────────────────────
+let appState  = { grid: [], slot_times: [], last_scanned: null };
+let clickMode = 'watch';
+let toastTimer = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  refreshState();
+  setInterval(refreshState, 5 * 60 * 1000);
+});
+
+// ── Logged fetch ──────────────────────────────────────────────────────────────
+async function apiFetch(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const url    = API_BASE + path;
+  const ts     = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  // Show log panel on first request
+  document.getElementById('log-panel').classList.remove('collapsed');
+  updateLogToggleBtn();
+
+  let status = '···';
+  let bodyPreview = '';
+
+  try {
+    const r = await fetch(url, {
+      ...options,
+      headers: { Authorization: authHeader(), ...(options.headers || {}) },
+    });
+    status = r.status;
+
+    const text = await r.clone().text();
+    try {
+      const json = JSON.parse(text);
+      // Show meaningful preview: omit large grid arrays
+      const preview = JSON.stringify(json).replace(/"slots":\[.*?\]/g, '"slots":[…]');
+      bodyPreview = preview.length > 160 ? preview.slice(0, 160) + '…' : preview;
+    } catch {
+      bodyPreview = text.slice(0, 160);
+    }
+
+    addLogEntry(ts, method, path, status, bodyPreview);
+    return r;
+  } catch (e) {
+    addLogEntry(ts, method, path, 'ERR', e.message);
+    throw e;
+  }
+}
+
+// ── Log panel ─────────────────────────────────────────────────────────────────
+function addLogEntry(ts, method, path, status, body) {
+  const entries = document.getElementById('log-entries');
+  const row = document.createElement('div');
+  row.className = 'log-entry';
+
+  const ok = typeof status === 'number' && status >= 200 && status < 300;
+  row.innerHTML =
+    `<span class="log-ts">${ts}</span>` +
+    `<span class="log-req">${method} ${path}</span>` +
+    `<span class="log-arrow">→</span>` +
+    `<span class="log-status ${ok ? 'ok' : 'err'}">${status}</span>` +
+    `<span class="log-body">${escHtml(body)}</span>`;
+
+  entries.appendChild(row);
+  entries.scrollTop = entries.scrollHeight;
+
+  // Keep last 50 entries
+  while (entries.children.length > 50) entries.removeChild(entries.firstChild);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function clearLog() {
+  document.getElementById('log-entries').innerHTML = '';
+}
+
+function toggleLog() {
+  document.getElementById('log-panel').classList.toggle('collapsed');
+  updateLogToggleBtn();
+}
+
+function updateLogToggleBtn() {
+  const collapsed = document.getElementById('log-panel').classList.contains('collapsed');
+  const btn = document.querySelector('#log-header .log-controls button:last-child');
+  if (btn) btn.textContent = collapsed ? '▲ Show' : '▲ Hide';
+}
+
+// ── Fetch state ───────────────────────────────────────────────────────────────
+async function refreshState() {
+  const btn = document.getElementById('btn-refresh');
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/state');
+    if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
+    appState = await r.json();
+    renderGrid();
+    const ls = appState.last_scanned;
+    document.getElementById('last-scanned').textContent = ls
+      ? 'Last scan: ' + new Date(ls).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : 'Not yet scanned';
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    btn.textContent = 'Refresh';
+    btn.disabled = false;
+  }
+}
+
+// ── Render grid ───────────────────────────────────────────────────────────────
+function renderGrid() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  grid.style.setProperty('--slot-cols', appState.slot_times.length);
+
+  // Corner cell + time headers
+  grid.appendChild(el('div', ''));
+  for (const t of appState.slot_times) {
+    grid.appendChild(el('div', fmtTime(t), 'col-header'));
+  }
+
+  // Day rows
+  for (const day of appState.grid) {
+    const labelCell = document.createElement('div');
+    labelCell.className = 'row-label';
+    labelCell.appendChild(el('span', day.label));
+    grid.appendChild(labelCell);
+
+    for (const slot of day.slots) {
+      const cell = document.createElement('div');
+      cell.className = 'cell ' + cellClass(slot);
+      cell.title     = day.label + '  ' + slot.time + '\n' + cellLabel(slot);
+      cell.dataset.date = day.date;
+      cell.dataset.time = slot.time;
+      cell.addEventListener('click', onCellClick);
+      cell.addEventListener('contextmenu', onCellRightClick);
+      grid.appendChild(cell);
+    }
+  }
+}
+
+function cellClass(slot) {
+  if (slot.mine) return 's-mine';
+  let base = slot.available === true ? 's-open'
+           : slot.available === false ? 's-taken'
+           : 's-unknown';
+  if (slot.watching) base += ' watching';
+  return base;
+}
+
+function cellLabel(slot) {
+  if (slot.mine) return 'My reservation';
+  const avail = slot.available === true ? 'Open' : slot.available === false ? 'Taken' : 'Not scanned';
+  return avail + (slot.watching ? ' · Watching' : '');
+}
+
+function fmtTime(t) {
+  return t.replace(':00', '').replace(' ', '').toLowerCase();
+}
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+// ── Cell interaction ──────────────────────────────────────────────────────────
+function setMode(m) {
+  clickMode = m;
+  document.getElementById('btn-watch').className = 'mode-btn' + (m === 'watch' ? ' active-watch' : '');
+  document.getElementById('btn-mine').className  = 'mode-btn' + (m === 'mine'  ? ' active-mine'  : '');
+}
+
+function onCellClick(e) {
+  e.preventDefault();
+  const { date, time } = e.currentTarget.dataset;
+  if (e.shiftKey || clickMode === 'mine') toggleMine(date, time);
+  else toggleWatch(date, time);
+}
+
+function onCellRightClick(e) {
+  e.preventDefault();
+  const { date, time } = e.currentTarget.dataset;
+  toggleMine(date, time);
+}
+
+function findSlot(d, t) {
+  const day = appState.grid.find(x => x.date === d);
+  return day ? day.slots.find(s => s.time === t) : null;
+}
+
+async function toggleWatch(date, time) {
+  const slot = findSlot(date, time);
+  if (!slot) return;
+  slot.watching = !slot.watching;
+  renderGrid();
+  toast(slot.watching ? 'Watching ' + time : 'Unwatched');
+  const watched = appState.grid.flatMap(d => d.slots.filter(s => s.watching).map(s => ({ date: d.date, time: s.time })));
+  await apiFetch('/watch', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slots: watched }),
+  });
+}
+
+async function toggleMine(date, time) {
+  const slot = findSlot(date, time);
+  if (!slot) return;
+  slot.mine = !slot.mine;
+  renderGrid();
+  toast(slot.mine ? 'Marked as mine: ' + time : 'Unmarked');
+  const mine = appState.grid.flatMap(d => d.slots.filter(s => s.mine).map(s => ({ date: d.date, time: s.time })));
+  await apiFetch('/my-reservations', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slots: mine }),
+  });
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
+}
+</script>
+</body>
+</html>
