@@ -41,3 +41,11 @@ Send SMS to a hardcoded number via AWS SNS when the async scan completes.
 - `config.json` — base URL and default check dates
 - `openapi.yaml` — OpenAPI 3.1 spec describing the API
 - `static/` — frontend (separate, not part of the Lambda)
+
+## Operational notes
+
+- Do not trust cached `/state` alone when the official rec.us site disagrees with the monitor.
+- Always compare `GET /state` with `GET /scan?mode=sync...` for the same dates before changing scraper logic.
+- Check `last_scanned` from `/state` immediately; an old timestamp usually means stale cache, not broken parsing.
+- For Foster City, court availability comes from the modal's `Select a court` combobox options, not just the currently selected value.
+- Manual/internal scheduled refreshes must bypass `scan_interval_hours`; otherwise a forced refresh can silently preserve stale cache.
