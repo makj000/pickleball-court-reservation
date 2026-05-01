@@ -47,6 +47,7 @@ DEFAULT_TIME_FILTER = "8:00 AM"
 NOTIFY_NUMBER = "+14154380400"
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
 STATE_KEY     = "state.json"
+SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
@@ -290,6 +291,29 @@ def save_state(state: dict) -> None:
         Body=json.dumps(state, indent=2),
         ContentType="application/json",
     )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_utc_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _active_scan_started_at(state: dict) -> datetime | None:
+    started = _parse_utc_iso(state.get("scan_started_at"))
+    if not started:
+        return None
+    age = (datetime.now(tz=timezone.utc) - started).total_seconds()
+    if age < 0 or age > SCAN_LOCK_TTL_SECONDS:
+        return None
+    return started
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
@@ -559,9 +583,16 @@ def _run_scheduled_worker(*, force: bool = False) -> None:
         return
 
     state = load_state()
+    active_scan = _active_scan_started_at(state)
+    if active_scan:
+        print(f"Another scheduled scan started at {active_scan.isoformat()}. Skipping.")
+        return
+
     interval_hours = state.get("scan_interval_hours", 1.0)
     if not force and state.get("last_scanned"):
-        last = datetime.fromisoformat(state["last_scanned"].rstrip("Z")).replace(tzinfo=timezone.utc)
+        last = _parse_utc_iso(state["last_scanned"])
+        if last is None:
+            last = datetime.now(tz=timezone.utc) - timedelta(hours=interval_hours)
         elapsed = (datetime.now(tz=timezone.utc) - last).total_seconds() / 3600
         if elapsed < interval_hours:
             print(f"Last scan {elapsed:.1f}h ago, interval {interval_hours}h. Skipping.")
@@ -569,32 +600,46 @@ def _run_scheduled_worker(*, force: bool = False) -> None:
 
     today = date.today()
     targets = [today + timedelta(days=i) for i in range(15)]
+    started_at = _utc_now_iso()
+
+    state["scan_started_at"] = started_at
+    save_state(state)
 
     print(f"Scanning {len(targets)} date(s)…")
-    new_avail = asyncio.run(_scan_dates_quick(targets))
+    try:
+        new_avail = asyncio.run(_scan_dates_quick(targets))
 
-    availability = state.get("availability", {})
-    availability.update(new_avail)
-    state["availability"] = availability
-    state["last_scanned"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        state = load_state()
+        availability = state.get("availability", {})
+        availability.update(new_avail)
+        state["availability"] = availability
+        state["last_scanned"] = _utc_now_iso()
 
-    # SMS dedup: only notify once per slot opening
-    notified = set(state.get("notified_slots", []))
-    newly_open = []
-    still_open = set()
+        # SMS dedup: only notify once per slot opening
+        notified = set(state.get("notified_slots", []))
+        newly_open = []
+        still_open = set()
 
-    for slot in state.get("watched_slots", []):
-        key = f"{slot['date']}|{slot['time']}"
-        is_open = availability.get(slot["date"], {}).get(slot["time"], False)
-        if is_open:
-            still_open.add(key)
-            if key not in notified:
-                newly_open.append(f"{slot['date']} {slot['time']}")
-                notified.add(key)
+        for slot in state.get("watched_slots", []):
+            key = f"{slot['date']}|{slot['time']}"
+            is_open = availability.get(slot["date"], {}).get(slot["time"], False)
+            if is_open:
+                still_open.add(key)
+                if key not in notified:
+                    newly_open.append(f"{slot['date']} {slot['time']}")
+                    notified.add(key)
 
-    # Clear notifications for slots that are no longer open (so we re-notify if they open again)
-    state["notified_slots"] = list(notified & still_open)
-    save_state(state)
+        # Clear notifications for slots that are no longer open (so we re-notify if they open again)
+        state["notified_slots"] = list(notified & still_open)
+        if state.get("scan_started_at") == started_at:
+            state.pop("scan_started_at", None)
+        save_state(state)
+    except Exception:
+        state = load_state()
+        if state.get("scan_started_at") == started_at:
+            state.pop("scan_started_at", None)
+            save_state(state)
+        raise
 
     if newly_open:
         msg = "Pickleball slot(s) now available:\n" + "\n".join(newly_open)

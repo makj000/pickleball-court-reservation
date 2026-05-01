@@ -10,6 +10,7 @@ FUNCTION_URL_INVOKE_SID="public-function-url-invoke"
 echo "==> Uploading UI to S3..."
 aws s3 cp ui/index.html s3://$UI_BUCKET/index.html \
   --content-type "text/html" \
+  --cache-control "no-store, max-age=0" \
   --region $REGION
 
 echo "==> Ensuring Function URL invoke permission..."
@@ -54,4 +55,13 @@ aws lambda wait function-updated \
   --function-name $FUNCTION \
   --region $REGION
 
-echo "==> Done. Lambda is live."
+echo "==> Triggering forced state refresh..."
+aws lambda invoke \
+  --function-name $FUNCTION \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"_scheduled":true}' \
+  /tmp/pickleball-deploy-refresh.json \
+  --region $REGION >/dev/null
+
+echo "==> Done. Lambda is live and state refresh started."

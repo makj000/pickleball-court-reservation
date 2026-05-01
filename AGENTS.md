@@ -49,3 +49,4 @@ Send SMS to a hardcoded number via AWS SNS when the async scan completes.
 - Check `last_scanned` from `/state` immediately; an old timestamp usually means stale cache, not broken parsing.
 - For Foster City, court availability comes from the modal's `Select a court` combobox options, not just the currently selected value.
 - Manual/internal scheduled refreshes must bypass `scan_interval_hours`; otherwise a forced refresh can silently preserve stale cache.
+- After deploying scraper changes, trigger a forced scheduled refresh so `/state` is rebuilt on the new code instead of serving pre-deploy cache for the next interval.
