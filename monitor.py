@@ -54,7 +54,7 @@ SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("A
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
-    "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
     "Content-Type": "application/json",
 }
 
@@ -63,8 +63,11 @@ SLOT_TIMES = [
     "4:00 PM", "5:00 PM", "6:00 PM",
 ]
 
+COURT_PREFERENCE = ["6", "4", "5"]
+TARGET_COURTS = COURT_PREFERENCE[:]
+
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
-COURT_RE = re.compile(r"^court\s+\d+", re.IGNORECASE)
+COURT_RE = re.compile(r"^court\s+(\d+)", re.IGNORECASE)
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
@@ -166,6 +169,7 @@ def build_scan_payload(*, targets, target_time, results):
     return {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "filters": {"dates": [t.isoformat() for t in targets], "time": target_time},
+        "court_preference": COURT_PREFERENCE,
         "summary": summary,
         "days": days,
     }
@@ -259,13 +263,133 @@ def ordinal(n: int) -> str:
 
 def _empty_state() -> dict:
     return {
-        "watched_slots":       [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
-        "my_reservations":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}]
-        "availability":        {},   # {"YYYY-MM-DD": {"H:MM AM": true/false}}
-        "notified_slots":      [],   # ["YYYY-MM-DD|H:MM AM"] — already SMS'd, avoids repeat texts
+        "watched_slots":       [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
+        "my_reservations":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
+        "availability":        {},   # {"YYYY-MM-DD": {"H:MM AM": {"6": true, "4": false, "5": true}}}
+        "notified_slots":      [],   # ["YYYY-MM-DD|H:MM AM|6"] — already SMS'd, avoids repeat texts
         "last_scanned":        None,
         "scan_interval_hours": 1.0,
     }
+
+
+def _empty_court_availability(default=None) -> dict[str, bool | None]:
+    return {court: default for court in TARGET_COURTS}
+
+
+def _normalize_court_number(value) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if raw in TARGET_COURTS:
+        return raw
+    match = re.search(r"(\d+)", raw)
+    if match and match.group(1) in TARGET_COURTS:
+        return match.group(1)
+    return None
+
+
+def _preferred_open_court(court_availability: dict[str, bool | None]) -> str | None:
+    for court in COURT_PREFERENCE:
+        if court_availability.get(court) is True:
+            return court
+    return None
+
+
+def _normalize_time_availability(value) -> dict[str, bool | None]:
+    if isinstance(value, dict):
+        normalized = _empty_court_availability(None)
+        matched = False
+        for key, raw_avail in value.items():
+            court = _normalize_court_number(key)
+            if court is None:
+                continue
+            matched = True
+            normalized[court] = None if raw_avail is None else bool(raw_avail)
+        if matched:
+            return normalized
+    if value is False:
+        return _empty_court_availability(False)
+    if value is True:
+        return _empty_court_availability(None)
+    return _empty_court_availability(None)
+
+
+def _normalize_slot_records(slots, *, expand_legacy: bool, default_court: str | None = None) -> list[dict]:
+    normalized: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for slot in slots or []:
+        if not isinstance(slot, dict):
+            continue
+        slot_date = slot.get("date")
+        slot_time = slot.get("time")
+        if not slot_date or not slot_time:
+            continue
+        court = _normalize_court_number(slot.get("court"))
+        if court:
+            courts = [court]
+        elif expand_legacy:
+            courts = TARGET_COURTS
+        elif default_court:
+            courts = [default_court]
+        else:
+            courts = []
+        for court_num in courts:
+            key = (slot_date, slot_time, court_num)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"date": slot_date, "time": slot_time, "court": court_num})
+    return normalized
+
+
+def _normalize_notified_slots(notified_slots) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for entry in notified_slots or []:
+        parts = str(entry).split("|")
+        if len(parts) == 3:
+            court = _normalize_court_number(parts[2])
+            if court is None:
+                continue
+            expanded = [f"{parts[0]}|{parts[1]}|{court}"]
+        elif len(parts) == 2:
+            expanded = [f"{parts[0]}|{parts[1]}|{court}" for court in TARGET_COURTS]
+        else:
+            continue
+        for value in expanded:
+            if value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def _normalize_state(state: dict) -> dict:
+    normalized = _empty_state()
+    normalized["last_scanned"] = state.get("last_scanned")
+    normalized["scan_interval_hours"] = state.get("scan_interval_hours", 1.0)
+    if state.get("scan_started_at"):
+        normalized["scan_started_at"] = state["scan_started_at"]
+
+    availability: dict[str, dict[str, dict[str, bool | None]]] = {}
+    for date_key, day_map in (state.get("availability") or {}).items():
+        if not isinstance(day_map, dict):
+            continue
+        availability[date_key] = {}
+        for time_key in SLOT_TIMES:
+            availability[date_key][time_key] = _normalize_time_availability(day_map.get(time_key))
+    normalized["availability"] = availability
+    normalized["watched_slots"] = _normalize_slot_records(
+        state.get("watched_slots"),
+        expand_legacy=True,
+    )
+    normalized["my_reservations"] = _normalize_slot_records(
+        state.get("my_reservations"),
+        expand_legacy=False,
+        default_court=COURT_PREFERENCE[0],
+    )
+    normalized["notified_slots"] = _normalize_notified_slots(state.get("notified_slots"))
+    return normalized
 
 
 def load_state() -> dict:
@@ -274,7 +398,7 @@ def load_state() -> dict:
     s3 = boto3.client("s3", region_name="us-west-2")
     try:
         obj = s3.get_object(Bucket=STATE_BUCKET, Key=STATE_KEY)
-        return json.loads(obj["Body"].read())
+        return _normalize_state(json.loads(obj["Body"].read()))
     except ClientError as e:
         if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket"):
             return _empty_state()
@@ -285,6 +409,7 @@ def save_state(state: dict) -> None:
     if not STATE_BUCKET:
         return
     s3 = boto3.client("s3", region_name="us-west-2")
+    state = _normalize_state(state)
     s3.put_object(
         Bucket=STATE_BUCKET,
         Key=STATE_KEY,
@@ -397,38 +522,39 @@ async def collect_all_slot_buttons(page) -> list[str]:
     return slots
 
 
-async def get_courts_from_modal(page) -> list[str]:
-    courts: list[str] = []
+async def get_courts_from_modal(page) -> dict[str, bool]:
+    court_availability = {court: False for court in TARGET_COURTS}
     try:
         dialog = page.locator('[role="dialog"]').first
         await dialog.wait_for(timeout=5_000)
         await page.wait_for_timeout(300)
         court_combo = dialog.locator('button[role="combobox"]').last
         if await court_combo.count() > 0:
-            selected = (await court_combo.inner_text()).strip()
-            if selected and COURT_RE.match(selected):
-                courts.append(selected)
             try:
                 await court_combo.click(timeout=2_000)
                 await page.wait_for_timeout(250)
                 option_texts = await page.locator('[role="option"]').all_inner_texts()
-                combo_courts = []
                 for text in option_texts:
-                    label = text.strip()
-                    if label and COURT_RE.match(label) and label not in combo_courts:
-                        combo_courts.append(label)
-                if combo_courts:
-                    courts = combo_courts
+                    match = COURT_RE.match(text.strip())
+                    if not match:
+                        continue
+                    court = _normalize_court_number(match.group(1))
+                    if court:
+                        court_availability[court] = True
                 await page.keyboard.press("Escape")
                 await page.wait_for_timeout(150)
             except PwTimeout:
                 pass
-        if not courts:
+        if not any(court_availability.values()):
             raw = await dialog.inner_text()
             lines = [l.strip() for l in raw.splitlines() if l.strip()]
             for line in lines:
-                if COURT_RE.match(line) and line not in courts:
-                    courts.append(line)
+                match = COURT_RE.match(line)
+                if not match:
+                    continue
+                court = _normalize_court_number(match.group(1))
+                if court:
+                    court_availability[court] = True
     except PwTimeout:
         pass
     try:
@@ -442,7 +568,7 @@ async def get_courts_from_modal(page) -> list[str]:
     except PwTimeout:
         await page.keyboard.press("Escape")
     await page.wait_for_timeout(300)
-    return courts
+    return court_availability
 
 
 async def scan_day(page, target: date, target_time: str | None = None) -> list[dict]:
@@ -462,31 +588,43 @@ async def scan_day(page, target: date, target_time: str | None = None) -> list[d
         try:
             await btn.first.click(timeout=4_000)
         except PwTimeout:
+            results.append({"time": time_text, "courts": [], "court_avail": _empty_court_availability(None), "preferred_court": None})
             continue
-        courts = await get_courts_from_modal(page)
-        results.append({"time": time_text, "courts": courts})
+        court_availability = await get_courts_from_modal(page)
+        if not any(court_availability.values()):
+            court_availability = _empty_court_availability(None)
+        available_courts = [
+            f"Court {court} - Pickleball"
+            for court in COURT_PREFERENCE
+            if court_availability.get(court) is True
+        ]
+        results.append({
+            "time": time_text,
+            "courts": available_courts,
+            "court_avail": court_availability,
+            "preferred_court": _preferred_open_court(court_availability),
+        })
     print(f"{len(results)} slot(s): {', '.join(s['time'] for s in results)}")
     return results
 
 
-async def scan_day_quick(page, target: date) -> dict[str, bool]:
-    """Scan with modal checks. Returns {time: available} — True only if courts are found."""
-    await select_date(page, target)
-    slot_times = set(await collect_all_slot_buttons(page))
-    results: dict[str, bool] = {}
-    for t in SLOT_TIMES:
-        if t not in slot_times:
-            results[t] = False
-            continue
-        btn = page.locator("button").filter(has_text=re.compile(re.escape(t)))
-        try:
-            await btn.first.click(timeout=4_000)
-        except PwTimeout:
-            results[t] = False
-            continue
-        courts = await get_courts_from_modal(page)
-        results[t] = len(courts) > 0
-    return results
+def _slots_to_availability(slots: list[dict]) -> dict[str, dict[str, bool | None]]:
+    availability = {t: _empty_court_availability(False) for t in SLOT_TIMES}
+    for slot in slots:
+        time_text = slot.get("time")
+        if time_text in availability:
+            court_availability = slot.get("court_avail")
+            if isinstance(court_availability, dict):
+                availability[time_text] = _normalize_time_availability(court_availability)
+            else:
+                availability[time_text] = _empty_court_availability(None)
+    return availability
+
+
+async def scan_day_quick(page, target: date) -> dict[str, dict[str, bool | None]]:
+    """Build state booleans from the same slot scan path used by /scan."""
+    slots = await scan_day(page, target, target_time=None)
+    return _slots_to_availability(slots)
 
 
 # ── Browser session helpers ───────────────────────────────────────────────────
@@ -553,19 +691,19 @@ async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
 
 # ── Quick scan (for scheduled worker) ────────────────────────────────────────
 
-async def _scan_dates_quick(targets: list[date]) -> dict[str, dict[str, bool]]:
-    """Returns {date_iso: {time: available}} without clicking into modals."""
+async def _scan_dates_quick(targets: list[date]) -> dict[str, dict[str, dict[str, bool | None]]]:
+    """Returns {date_iso: {time: {court: available}}}."""
     async with async_playwright() as pw:
         browser, page = await _new_page(pw)
         await login(page)
-        results: dict[str, dict[str, bool]] = {}
+        results: dict[str, dict[str, dict[str, bool | None]]] = {}
         for target in targets:
             print(f"  Quick scan {target.isoformat()}…")
             try:
                 results[target.isoformat()] = await scan_day_quick(page, target)
             except Exception as exc:
                 print(f"  Error scanning {target.isoformat()}: {exc}")
-                results[target.isoformat()] = {t: False for t in SLOT_TIMES}
+                results[target.isoformat()] = {t: _empty_court_availability(None) for t in SLOT_TIMES}
         await browser.close()
     return results
 
@@ -615,22 +753,18 @@ def _run_scheduled_worker(*, force: bool = False) -> None:
         state["availability"] = availability
         state["last_scanned"] = _utc_now_iso()
 
-        # SMS dedup: only notify once per slot opening
-        notified = set(state.get("notified_slots", []))
         newly_open = []
-        still_open = set()
-
         for slot in state.get("watched_slots", []):
-            key = f"{slot['date']}|{slot['time']}"
-            is_open = availability.get(slot["date"], {}).get(slot["time"], False)
+            is_open = (
+                availability
+                .get(slot["date"], {})
+                .get(slot["time"], {})
+                .get(slot["court"], False)
+            )
             if is_open:
-                still_open.add(key)
-                if key not in notified:
-                    newly_open.append(f"{slot['date']} {slot['time']}")
-                    notified.add(key)
+                newly_open.append(f"{slot['date']} {slot['time']} Court {slot['court']}")
 
-        # Clear notifications for slots that are no longer open (so we re-notify if they open again)
-        state["notified_slots"] = list(notified & still_open)
+        state["notified_slots"] = []
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
         save_state(state)
@@ -675,8 +809,8 @@ def handle_state(event) -> dict:
     state = load_state()
     today = date.today()
 
-    watched_set = {(s["date"], s["time"]) for s in state.get("watched_slots", [])}
-    mine_set    = {(s["date"], s["time"]) for s in state.get("my_reservations", [])}
+    watched_set = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+    mine_set    = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
 
     grid = []
     for i in range(15):
@@ -685,13 +819,15 @@ def handle_state(event) -> dict:
         day_avail = state.get("availability", {}).get(d_str, {})
         slots = []
         for t in SLOT_TIMES:
-            avail = day_avail.get(t)
-            slots.append({
-                "time":      t,
-                "available": avail,
-                "watching":  (d_str, t) in watched_set,
-                "mine":      (d_str, t) in mine_set,
-            })
+            time_avail = _normalize_time_availability(day_avail.get(t))
+            for court in COURT_PREFERENCE:
+                slots.append({
+                    "time":      t,
+                    "court":     court,
+                    "available": time_avail.get(court),
+                    "watching":  (d_str, t, court) in watched_set,
+                    "mine":      (d_str, t, court) in mine_set,
+                })
         grid.append({
             "date":  d_str,
             "label": d.strftime("%a, %b %-d"),
@@ -704,6 +840,8 @@ def handle_state(event) -> dict:
         "body": json.dumps({
             "grid":                grid,
             "slot_times":          SLOT_TIMES,
+            "court_nums":          COURT_PREFERENCE,
+            "court_preference":    COURT_PREFERENCE,
             "last_scanned":        state.get("last_scanned"),
             "scan_interval_hours": state.get("scan_interval_hours", 1.0),
         }),
@@ -718,15 +856,17 @@ def handle_watch(event) -> dict:
     for s in slots:
         try:
             date.fromisoformat(s["date"])
+            if _normalize_court_number(s.get("court")) is None:
+                raise ValueError("Missing court")
         except (KeyError, ValueError):
             return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s}"})}
 
     state = load_state()
-    state["watched_slots"] = slots
-    watched_keys = {f"{s['date']}|{s['time']}" for s in slots}
+    state["watched_slots"] = _normalize_slot_records(slots, expand_legacy=False)
+    watched_keys = {f"{s['date']}|{s['time']}|{s['court']}" for s in state["watched_slots"]}
     state["notified_slots"] = [n for n in state.get("notified_slots", []) if n in watched_keys]
     save_state(state)
-    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "watched": len(slots)})}
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "watched": len(state['watched_slots'])})}
 
 
 
@@ -735,10 +875,17 @@ def handle_my_reservations(event) -> dict:
     slots = body.get("slots")
     if slots is None:
         return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Missing slots"})}
+    for s in slots:
+        try:
+            date.fromisoformat(s["date"])
+            if _normalize_court_number(s.get("court")) is None:
+                raise ValueError("Missing court")
+        except (KeyError, ValueError):
+            return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s}"})}
     state = load_state()
-    state["my_reservations"] = slots
+    state["my_reservations"] = _normalize_slot_records(slots, expand_legacy=False)
     save_state(state)
-    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(slots)})}
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(state['my_reservations'])})}
 
 
 def handle_scan_interval(event) -> dict:
@@ -814,6 +961,15 @@ def handler(event, context):
 
     if path == "/scan-interval" and method == "PUT":
         return handle_scan_interval(event)
+
+    if path == "/force-scan" and method == "POST":
+        lambda_client = boto3.client("lambda", region_name="us-west-2")
+        lambda_client.invoke(
+            FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+            InvocationType="Event",
+            Payload=json.dumps({"_scheduled": True}).encode(),
+        )
+        return {"statusCode": 202, "headers": CORS_HEADERS, "body": json.dumps({"message": "Scan started"})}
 
     if path in ("/scan", "/prod/scan"):
         params = parse_query_params(event)
