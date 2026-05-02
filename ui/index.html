@@ -59,20 +59,22 @@
     .grid-wrapper { overflow-x: auto; padding: 16px 20px 8px; flex: 1; }
     .grid {
       display: grid;
-      grid-template-columns: 90px repeat(var(--slot-cols, 7), minmax(48px, 1fr));
+      grid-template-columns: 94px repeat(var(--cell-cols, 21), minmax(34px, 1fr));
       gap: 3px;
-      min-width: 600px;
+      min-width: 860px;
     }
 
     /* ── Grid cells ── */
     .col-header { font-size: 0.62rem; font-weight: 600; color: #6b7280; text-align: center; padding: 3px 2px; white-space: nowrap; }
+    .time-header { grid-row: span 1; }
+    .court-header { font-size: 0.58rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.04em; }
     .row-label {
       font-size: 0.68rem; font-weight: 500; color: #374151;
       display: flex; align-items: center; gap: 5px; padding-right: 4px;
       white-space: nowrap;
     }
     .cell {
-      height: 36px; border-radius: 5px; cursor: pointer;
+      height: 34px; border-radius: 5px; cursor: pointer;
       border: 2px solid transparent;
       transition: transform 0.1s, box-shadow 0.1s, opacity 0.15s;
       position: relative;
@@ -143,6 +145,48 @@
     }
     #toast.show { opacity: 1; transform: translateY(0); }
 
+    /* ── Auth modal ── */
+    #auth-modal {
+      position: fixed; inset: 0; z-index: 200;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(17, 24, 39, 0.62);
+      padding: 20px;
+    }
+    #auth-modal.show { display: flex; }
+    .auth-card {
+      width: min(420px, 100%);
+      background: white; border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.18);
+      padding: 22px 22px 18px;
+    }
+    .auth-card h2 {
+      font-size: 1.05rem; font-weight: 700; color: #111827;
+      margin-bottom: 6px;
+    }
+    .auth-card p {
+      font-size: 0.84rem; color: #6b7280; line-height: 1.45;
+      margin-bottom: 14px;
+    }
+    .auth-tip {
+      margin-top: -6px; margin-bottom: 14px;
+      font-size: 0.76rem; color: #6b7280; line-height: 1.45;
+    }
+    .auth-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    .auth-field label { font-size: 0.76rem; font-weight: 600; color: #374151; }
+    .auth-field input {
+      border: 1px solid #d1d5db; border-radius: 8px;
+      padding: 10px 12px; font-size: 0.9rem; color: #111827;
+    }
+    .auth-field input:focus {
+      outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+    }
+    #auth-error {
+      min-height: 18px; margin: 2px 0 10px;
+      color: #dc2626; font-size: 0.76rem;
+    }
+    .auth-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .auth-actions button { min-width: 92px; }
+
     /* ── Spinner ── */
     .spinner {
       display: inline-block; width: 12px; height: 12px;
@@ -150,6 +194,9 @@
       border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Time-group divider ── */
+    .time-group-start { border-left: 2px solid #d1d5db; margin-left: 2px; }
 
     @media (max-width: 720px) {
       header, .legend { padding-left: 14px; padding-right: 14px; }
@@ -180,6 +227,7 @@
     <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
   </div>
   <button class="btn" id="btn-refresh" onclick="refreshState()">Refresh</button>
+  <button class="btn" onclick="openAuthModal()">Credentials</button>
 </header>
 
 <!-- Legend -->
@@ -190,7 +238,7 @@
   <div class="legend-item"><div class="swatch" style="background:#fed7aa; border-color:#ea580c;"></div>Watching (taken)</div>
   <div class="legend-item"><div class="swatch" style="background:#4ade80; border-color:#ea580c;"></div>Watching (open!)</div>
   <div class="legend-item"><div class="swatch" style="background:#bfdbfe; border-color:#3b82f6;"></div>Mine</div>
-  <span class="hint">click cell = watch &nbsp;·&nbsp; shift+click = mine</span>
+  <span class="hint">court display = #4, #5, #6 &nbsp;·&nbsp; booking preference = #6, #4, #5 &nbsp;·&nbsp; click court cell = watch &nbsp;·&nbsp; shift+click = mine</span>
 </div>
 
 <!-- Grid -->
@@ -213,6 +261,29 @@
 <!-- Toast -->
 <div id="toast"></div>
 
+<!-- Auth modal -->
+<div id="auth-modal">
+  <form class="auth-card" id="auth-form">
+    <h2>Sign in</h2>
+    <p>Enter the monitor API username and password once. This is <strong>not</strong> your rec.us login. The credentials will be cached in this browser.</p>
+    <div class="auth-tip">If the page keeps reopening this dialog, use <strong>Reset saved</strong> below and re-enter the monitor API credentials.</div>
+    <div class="auth-field">
+      <label for="auth-username">Username</label>
+      <input id="auth-username" name="username" autocomplete="username" required>
+    </div>
+    <div class="auth-field">
+      <label for="auth-password">Password</label>
+      <input id="auth-password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div id="auth-error"></div>
+    <div class="auth-actions">
+      <button class="btn" type="button" onclick="closeAuthModal()">Cancel</button>
+      <button class="btn" type="button" onclick="clearSavedAuth()">Reset saved</button>
+      <button class="btn" id="auth-submit" type="submit">Sign in</button>
+    </div>
+  </form>
+</div>
+
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const API_BASE   = 'https://example.execute-api.us-west-2.amazonaws.com/prod';
@@ -230,35 +301,102 @@ function clearAuthToken() {
   localStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
-function authHeader() {
-  const token = readAuthToken();
-  return token ? 'Basic ' + token : '';
+function openAuthModal(message = '') {
+  document.getElementById('auth-error').textContent = message;
+  document.getElementById('auth-modal').classList.add('show');
+  const username = document.getElementById('auth-username');
+  const saved = readAuthToken();
+  if (saved && !username.value) {
+    try {
+      username.value = atob(saved).split(':', 1)[0] || '';
+    } catch {}
+  }
+  setTimeout(() => username.focus(), 0);
 }
 
-function ensureAuthToken() {
-  let token = readAuthToken();
-  if (token) return token;
+function closeAuthModal() {
+  document.getElementById('auth-modal').classList.remove('show');
+  document.getElementById('auth-error').textContent = '';
+}
 
-  const username = window.prompt('API username');
-  if (username === null) throw new Error('Authentication cancelled');
-  const password = window.prompt('API password');
-  if (password === null) throw new Error('Authentication cancelled');
+function clearSavedAuth() {
+  clearAuthToken();
+  document.getElementById('auth-username').value = '';
+  document.getElementById('auth-password').value = '';
+  document.getElementById('auth-error').textContent = 'Saved credentials cleared. Enter the username and password again.';
+  document.getElementById('auth-username').focus();
+}
 
-  token = btoa(username + ':' + password);
-  writeAuthToken(token);
+function requireAuthToken() {
+  const token = readAuthToken();
+  if (!token) {
+    openAuthModal();
+    throw new Error('Authentication required');
+  }
   return token;
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], last_scanned: null, scan_interval_hours: 1 };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], last_scanned: null, scan_interval_hours: 1 };
 let clickMode = 'watch';
 let toastTimer = null;
 
+// ── Browser notification dedup ────────────────────────────────────────────────
+const _notifiedKeys = new Set();
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  refreshState();
+  document.getElementById('auth-form').addEventListener('submit', onAuthSubmit);
+  if (readAuthToken()) refreshState();
+  else openAuthModal();
   setInterval(refreshState, 5 * 60 * 1000);
 });
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('auth-modal');
+  if (!modal.classList.contains('show')) return;
+  closeAuthModal();
+});
+
+async function onAuthSubmit(e) {
+  e.preventDefault();
+  const submit = document.getElementById('auth-submit');
+  const username = document.getElementById('auth-username').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if (!username || !password) {
+    openAuthModal('Username and password are required.');
+    return;
+  }
+
+  submit.disabled = true;
+  document.getElementById('auth-error').textContent = '';
+  writeAuthToken(btoa(username + ':' + password));
+
+  try {
+    const r = await fetch(API_BASE + '/state', {
+      headers: { Authorization: 'Basic ' + readAuthToken() },
+    });
+    if (r.status === 401) {
+      clearAuthToken();
+      openAuthModal('Invalid username or password.');
+      return;
+    }
+    if (!r.ok) {
+      clearAuthToken();
+      openAuthModal('Authentication check failed (' + r.status + ').');
+      return;
+    }
+    document.getElementById('auth-password').value = '';
+    closeAuthModal();
+    await refreshState();
+  } catch (err) {
+    clearAuthToken();
+    openAuthModal(err.message || 'Authentication check failed.');
+  } finally {
+    submit.disabled = false;
+  }
+}
 
 // ── Logged fetch ──────────────────────────────────────────────────────────────
 async function apiFetch(path, options = {}) {
@@ -274,18 +412,15 @@ async function apiFetch(path, options = {}) {
   let bodyPreview = '';
 
   try {
-    let token = ensureAuthToken();
+    let token = requireAuthToken();
     let r = await fetch(url, {
       ...options,
       headers: { Authorization: 'Basic ' + token, ...(options.headers || {}) },
     });
     if (r.status === 401) {
       clearAuthToken();
-      token = ensureAuthToken();
-      r = await fetch(url, {
-        ...options,
-        headers: { Authorization: 'Basic ' + token, ...(options.headers || {}) },
-      });
+      openAuthModal('Session expired. Sign in again.');
+      throw new Error('Authentication required');
     }
     status = r.status;
 
@@ -347,6 +482,45 @@ function updateLogToggleBtn() {
   if (btn) btn.textContent = collapsed ? '▲ Show' : '▲ Hide';
 }
 
+// ── Browser notifications for watched open slots ──────────────────────────────
+async function checkWatchedNotifications(state) {
+  if (!('Notification' in window) || Notification.permission === 'denied') return;
+
+  // Collect current watching+open keys so we can prune stale dedup entries
+  const currentOpenKeys = new Set();
+  for (const day of (state.grid || [])) {
+    for (const slot of (day.slots || [])) {
+      if (slot.watching && slot.available === true) {
+        currentOpenKeys.add(day.date + '|' + slot.time + '|' + slot.court);
+      }
+    }
+  }
+
+  // Prune keys that are no longer watching+open (so they re-notify if slot reopens)
+  for (const key of _notifiedKeys) {
+    if (!currentOpenKeys.has(key)) _notifiedKeys.delete(key);
+  }
+
+  // Fire notifications for new watching+open slots
+  for (const key of currentOpenKeys) {
+    if (_notifiedKeys.has(key)) continue;
+
+    if (Notification.permission === 'default') {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') return;
+    }
+    if (Notification.permission !== 'granted') return;
+
+    const [date, time, court] = key.split('|');
+    const dateLabel = new Date(date + 'T12:00:00').toDateString().replace(/^\w+ /, '').replace(/\s\d{4}$/, '');
+    const timeLabel = time.replace(':00 ', ' ').replace(':00', '');
+    new Notification('🏓 Slot available!', {
+      body: dateLabel + ' · ' + timeLabel + ' · Court #' + court,
+    });
+    _notifiedKeys.add(key);
+  }
+}
+
 // ── Fetch state ───────────────────────────────────────────────────────────────
 async function refreshState() {
   const btn = document.getElementById('btn-refresh');
@@ -356,6 +530,13 @@ async function refreshState() {
     const r = await apiFetch('/state');
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
     appState = await r.json();
+    appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
+    if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) {
+      appState.court_nums = ['6', '4', '5'];
+    }
+    if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) {
+      appState.court_preference = appState.court_nums.slice();
+    }
     const freqSelect = document.getElementById('freq-select');
     if (freqSelect && appState.scan_interval_hours != null) {
       freqSelect.value = String(appState.scan_interval_hours);
@@ -365,6 +546,7 @@ async function refreshState() {
     document.getElementById('last-scanned').textContent = ls
       ? 'Last scan: ' + new Date(ls).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : 'Not yet scanned';
+    checkWatchedNotifications(appState);
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
@@ -377,12 +559,24 @@ async function refreshState() {
 function renderGrid() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  grid.style.setProperty('--slot-cols', appState.slot_times.length);
+  const courtCount = appState.court_nums.length || 3;
+  grid.style.setProperty('--cell-cols', appState.slot_times.length * courtCount);
 
   // Corner cell + time headers
   grid.appendChild(el('div', ''));
   for (const t of appState.slot_times) {
-    grid.appendChild(el('div', fmtTime(t), 'col-header'));
+    const header = el('div', fmtTime(t), 'col-header time-header');
+    header.style.gridColumn = 'span ' + courtCount;
+    grid.appendChild(header);
+  }
+
+  // Court subheaders
+  grid.appendChild(el('div', ''));
+  for (const t of appState.slot_times) {
+    for (const court of appState.court_nums) {
+      const isFirst = court === appState.court_nums[0];
+      grid.appendChild(el('div', '#' + court, 'col-header court-header' + (isFirst ? ' time-group-start' : '')));
+    }
   }
 
   // Day rows
@@ -392,15 +586,27 @@ function renderGrid() {
     labelCell.appendChild(el('span', day.label));
     grid.appendChild(labelCell);
 
-    for (const slot of day.slots) {
-      const cell = document.createElement('div');
-      cell.className = 'cell ' + cellClass(slot);
-      cell.title     = day.label + '  ' + slot.time + '\n' + cellLabel(slot);
-      cell.dataset.date = day.date;
-      cell.dataset.time = slot.time;
-      cell.addEventListener('click', onCellClick);
-      cell.addEventListener('contextmenu', onCellRightClick);
-      grid.appendChild(cell);
+    const slotMap = new Map(day.slots.map(slot => [slot.time + '|' + slot.court, slot]));
+    for (const time of appState.slot_times) {
+      for (const court of appState.court_nums) {
+        const slot = slotMap.get(time + '|' + court) || {
+          time,
+          court,
+          available: null,
+          watching: false,
+          mine: false,
+        };
+        const cell = document.createElement('div');
+        const isFirstCourt = court === appState.court_nums[0];
+        cell.className = 'cell ' + cellClass(slot) + (isFirstCourt ? ' time-group-start' : '');
+        cell.title     = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot);
+        cell.dataset.date = day.date;
+        cell.dataset.time = slot.time;
+        cell.dataset.court = slot.court;
+        cell.addEventListener('click', onCellClick);
+        cell.addEventListener('contextmenu', onCellRightClick);
+        grid.appendChild(cell);
+      }
     }
   }
 }
@@ -415,9 +621,9 @@ function cellClass(slot) {
 }
 
 function cellLabel(slot) {
-  if (slot.mine) return 'My reservation';
+  if (slot.mine) return 'Court #' + slot.court + ' · My reservation';
   const avail = slot.available === true ? 'Open' : slot.available === false ? 'Taken' : 'Not scanned';
-  return avail + (slot.watching ? ' · Watching' : '');
+  return 'Court #' + slot.court + ' · ' + avail + (slot.watching ? ' · Watching' : '');
 }
 
 function fmtTime(t) {
@@ -440,29 +646,29 @@ function setMode(m) {
 
 function onCellClick(e) {
   e.preventDefault();
-  const { date, time } = e.currentTarget.dataset;
-  if (e.shiftKey || clickMode === 'mine') toggleMine(date, time);
-  else toggleWatch(date, time);
+  const { date, time, court } = e.currentTarget.dataset;
+  if (e.shiftKey || clickMode === 'mine') toggleMine(date, time, court);
+  else toggleWatch(date, time, court);
 }
 
 function onCellRightClick(e) {
   e.preventDefault();
-  const { date, time } = e.currentTarget.dataset;
-  toggleMine(date, time);
+  const { date, time, court } = e.currentTarget.dataset;
+  toggleMine(date, time, court);
 }
 
-function findSlot(d, t) {
+function findSlot(d, t, court) {
   const day = appState.grid.find(x => x.date === d);
-  return day ? day.slots.find(s => s.time === t) : null;
+  return day ? day.slots.find(s => s.time === t && s.court === court) : null;
 }
 
-async function toggleWatch(date, time) {
-  const slot = findSlot(date, time);
+async function toggleWatch(date, time, court) {
+  const slot = findSlot(date, time, court);
   if (!slot) return;
   slot.watching = !slot.watching;
   renderGrid();
-  toast(slot.watching ? 'Watching ' + time : 'Unwatched');
-  const watched = appState.grid.flatMap(d => d.slots.filter(s => s.watching).map(s => ({ date: d.date, time: s.time })));
+  toast(slot.watching ? 'Watching ' + time + ' Court #' + court : 'Unwatched');
+  const watched = appState.grid.flatMap(d => d.slots.filter(s => s.watching).map(s => ({ date: d.date, time: s.time, court: s.court })));
   await apiFetch('/watch', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -470,13 +676,13 @@ async function toggleWatch(date, time) {
   });
 }
 
-async function toggleMine(date, time) {
-  const slot = findSlot(date, time);
+async function toggleMine(date, time, court) {
+  const slot = findSlot(date, time, court);
   if (!slot) return;
   slot.mine = !slot.mine;
   renderGrid();
-  toast(slot.mine ? 'Marked as mine: ' + time : 'Unmarked');
-  const mine = appState.grid.flatMap(d => d.slots.filter(s => s.mine).map(s => ({ date: d.date, time: s.time })));
+  toast(slot.mine ? 'Marked as mine: ' + time + ' Court #' + court : 'Unmarked');
+  const mine = appState.grid.flatMap(d => d.slots.filter(s => s.mine).map(s => ({ date: d.date, time: s.time, court: s.court })));
   await apiFetch('/my-reservations', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
