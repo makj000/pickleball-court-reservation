@@ -87,7 +87,7 @@
     .cell:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0,0,0,0.18); z-index: 1; }
     .cell:active { transform: scale(0.95); }
 
-    .s-unknown { background: #e5e7eb; }
+    .s-unknown { background: #ffffff; border: 1px solid #e5e7eb; }
     .s-taken   { background: #d1d5db; }
     .s-open    { background: #bbf7d0; }
     .s-mine    { background: #bfdbfe; border-color: #3b82f6; }
@@ -233,13 +233,12 @@
   </div>
   <button class="btn" id="btn-refresh" onclick="refreshState()">Refresh</button>
   <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
-  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
   <button class="btn" onclick="openAuthModal()">Credentials</button>
 </header>
 
 <!-- Legend -->
 <div class="legend">
-  <div class="legend-item"><div class="swatch" style="background:#e5e7eb;"></div>Not scanned</div>
+  <div class="legend-item"><div class="swatch" style="background:#ffffff; border:1px solid #e5e7eb;"></div>Not scanned</div>
   <div class="legend-item"><div class="swatch" style="background:#d1d5db;"></div>Taken</div>
   <div class="legend-item"><div class="swatch" style="background:#bbf7d0;"></div>Open</div>
   <div class="legend-item"><div class="swatch" style="background:#fed7aa; border-color:#ea580c;"></div>Watching (taken)</div>
@@ -563,48 +562,6 @@ async function refreshState() {
 }
 
 // ── Force scan ────────────────────────────────────────────────────────────────
-async function forceScan() {
-  const btn = document.getElementById('btn-scan-now');
-  btn.innerHTML = '<span class="spinner"></span> Scanning…';
-  btn.disabled = true;
-  const prevLastScanned = appState.last_scanned;
-  try {
-    const r = await apiFetch('/force-scan', { method: 'POST' });
-    if (!r.ok) { toast('Scan failed (' + r.status + ')'); return; }
-    toast('Scan started — checking for results…');
-    const deadline = Date.now() + 3 * 60 * 1000;
-    const poll = setInterval(async () => {
-      if (Date.now() > deadline) {
-        clearInterval(poll);
-        btn.textContent = 'Scan Now';
-        btn.disabled = false;
-        toast('Scan timed out — try Refresh manually');
-        return;
-      }
-      try {
-        const sr = await apiFetch('/state');
-        if (!sr.ok) return;
-        const s = await sr.json();
-        if (s.last_scanned && s.last_scanned !== prevLastScanned) {
-          clearInterval(poll);
-          appState = s;
-          appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
-          renderGrid();
-          document.getElementById('last-scanned').textContent =
-            'Last scan: ' + new Date(s.last_scanned).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          checkWatchedNotifications(appState);
-          btn.textContent = 'Scan Now';
-          btn.disabled = false;
-          toast('Scan complete — grid updated');
-        }
-      } catch {}
-    }, 30_000);
-  } catch {
-    btn.textContent = 'Scan Now';
-    btn.disabled = false;
-  }
-}
-
 // ── Render grid ───────────────────────────────────────────────────────────────
 function renderGrid() {
   const grid = document.getElementById('grid');
