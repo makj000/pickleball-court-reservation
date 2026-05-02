@@ -70,8 +70,13 @@
     .court-header { font-size: 0.58rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.04em; }
     .row-label {
       font-size: 0.68rem; font-weight: 500; color: #374151;
-      display: flex; align-items: center; gap: 5px; padding-right: 4px;
-      white-space: nowrap;
+      display: flex; align-items: flex-start; gap: 5px; padding-right: 4px;
+      padding-top: 6px; white-space: nowrap;
+    }
+    .day-start.row-label,
+    .day-start.cell {
+      border-top: 2px solid #9ca3af;
+      margin-top: 8px;
     }
     .cell {
       height: 34px; border-radius: 5px; cursor: pointer;
@@ -227,6 +232,8 @@
     <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
   </div>
   <button class="btn" id="btn-refresh" onclick="refreshState()">Refresh</button>
+  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
+  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
   <button class="btn" onclick="openAuthModal()">Credentials</button>
 </header>
 
@@ -555,6 +562,49 @@ async function refreshState() {
   }
 }
 
+// ── Force scan ────────────────────────────────────────────────────────────────
+async function forceScan() {
+  const btn = document.getElementById('btn-scan-now');
+  btn.innerHTML = '<span class="spinner"></span> Scanning…';
+  btn.disabled = true;
+  const prevLastScanned = appState.last_scanned;
+  try {
+    const r = await apiFetch('/force-scan', { method: 'POST' });
+    if (!r.ok) { toast('Scan failed (' + r.status + ')'); return; }
+    toast('Scan started — checking for results…');
+    const deadline = Date.now() + 3 * 60 * 1000;
+    const poll = setInterval(async () => {
+      if (Date.now() > deadline) {
+        clearInterval(poll);
+        btn.textContent = 'Scan Now';
+        btn.disabled = false;
+        toast('Scan timed out — try Refresh manually');
+        return;
+      }
+      try {
+        const sr = await apiFetch('/state');
+        if (!sr.ok) return;
+        const s = await sr.json();
+        if (s.last_scanned && s.last_scanned !== prevLastScanned) {
+          clearInterval(poll);
+          appState = s;
+          appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
+          renderGrid();
+          document.getElementById('last-scanned').textContent =
+            'Last scan: ' + new Date(s.last_scanned).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          checkWatchedNotifications(appState);
+          btn.textContent = 'Scan Now';
+          btn.disabled = false;
+          toast('Scan complete — grid updated');
+        }
+      } catch {}
+    }, 30_000);
+  } catch {
+    btn.textContent = 'Scan Now';
+    btn.disabled = false;
+  }
+}
+
 // ── Render grid ───────────────────────────────────────────────────────────────
 function renderGrid() {
   const grid = document.getElementById('grid');
@@ -582,7 +632,7 @@ function renderGrid() {
   // Day rows
   for (const day of appState.grid) {
     const labelCell = document.createElement('div');
-    labelCell.className = 'row-label';
+    labelCell.className = 'row-label day-start';
     labelCell.appendChild(el('span', day.label));
     grid.appendChild(labelCell);
 
@@ -598,7 +648,7 @@ function renderGrid() {
         };
         const cell = document.createElement('div');
         const isFirstCourt = court === appState.court_nums[0];
-        cell.className = 'cell ' + cellClass(slot) + (isFirstCourt ? ' time-group-start' : '');
+        cell.className = 'cell day-start ' + cellClass(slot) + (isFirstCourt ? ' time-group-start' : '');
         cell.title     = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot);
         cell.dataset.date = day.date;
         cell.dataset.time = slot.time;
@@ -697,6 +747,54 @@ function toast(msg) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+async function forceScan() {
+  const btn = document.getElementById('btn-scan-now');
+  btn.innerHTML = '<span class="spinner"></span> Scanning…';
+  btn.disabled = true;
+  const prevLastScanned = appState.last_scanned;
+  try {
+    const r = await apiFetch('/force-scan', { method: 'POST' });
+    if (r.status === 202) {
+      toast('Scan started — refreshing in ~2 min');
+      // Poll every 30s for up to 3 minutes, stop when last_scanned changes
+      const deadline = Date.now() + 3 * 60 * 1000;
+      const poll = setInterval(async () => {
+        try {
+          const pr = await apiFetch('/state');
+          if (!pr.ok) return;
+          const data = await pr.json();
+          if (data.last_scanned && data.last_scanned !== prevLastScanned) {
+            clearInterval(poll);
+            appState = data;
+            appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
+            if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) appState.court_nums = ['6', '4', '5'];
+            if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
+            renderGrid();
+            document.getElementById('last-scanned').textContent =
+              'Last scan: ' + new Date(appState.last_scanned).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            toast('Scan complete');
+            btn.textContent = 'Scan Now';
+            btn.disabled = false;
+          } else if (Date.now() >= deadline) {
+            clearInterval(poll);
+            toast('Scan may still be running — refresh manually');
+            btn.textContent = 'Scan Now';
+            btn.disabled = false;
+          }
+        } catch (_) {}
+      }, 30 * 1000);
+    } else {
+      const data = await r.json().catch(() => ({}));
+      toast('Error: ' + (data.error || r.status));
+      btn.textContent = 'Scan Now';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    btn.textContent = 'Scan Now';
+    btn.disabled = false;
+  }
 }
 
 async function setFrequency(val) {
