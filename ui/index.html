@@ -6,7 +6,13 @@
   <title>Pickleball Monitor</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f4f6; color: #111; display: flex; flex-direction: column; min-height: 100vh; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f3f4f6; color: #111;
+      display: flex; flex-direction: column;
+      height: 100vh; overflow: hidden;
+    }
 
     /* ── Header ── */
     header {
@@ -15,8 +21,60 @@
       position: sticky; top: 0; z-index: 10;
     }
     header h1 { font-size: 1rem; font-weight: 700; white-space: nowrap; }
+    .version-chip {
+      font-size: 0.68rem;
+      line-height: 1;
+      padding: 4px 7px;
+      border-radius: 999px;
+      border: 1px solid #d1d5db;
+      background: #f8fafc;
+      color: #475569;
+      white-space: nowrap;
+    }
+    .version-chip.is-ui {
+      background: #eef2ff;
+      border-color: #c7d2fe;
+      color: #4338ca;
+    }
+    .version-chip.is-api {
+      background: #ecfeff;
+      border-color: #a5f3fc;
+      color: #0f766e;
+    }
+    .version-chip.is-unknown {
+      background: #f8fafc;
+      border-color: #d1d5db;
+      color: #64748b;
+    }
+    .rec-link {
+      font-size: 0.72rem; font-weight: 600; color: #2563eb;
+      text-decoration: none; white-space: nowrap;
+      padding: 4px 8px; border-radius: 999px;
+      background: #dbeafe;
+      border: 1px solid #93c5fd;
+    }
+    .rec-link:hover { background: #bfdbfe; }
     .spacer { flex: 1 1 12px; }
-    #last-scanned { font-size: 0.72rem; color: #9ca3af; white-space: nowrap; }
+    .scan-summary {
+      display: grid;
+      gap: 3px;
+      min-width: 280px;
+    }
+    #scan-current {
+      font-size: 0.77rem;
+      color: #1f2937;
+      white-space: normal;
+      line-height: 1.35;
+      font-weight: 600;
+    }
+    #scan-last {
+      font-size: 0.72rem;
+      color: #6b7280;
+      white-space: normal;
+      line-height: 1.35;
+    }
+    #next-scan { font-size: 0.72rem; color: #6b7280; white-space: normal; line-height: 1.35; }
+    #next-scan.rescan { color: #d97706; }
     #freq-label {
       font-size: 0.72rem; color: #6b7280; white-space: nowrap;
       display: flex; align-items: center; gap: 5px;
@@ -27,14 +85,23 @@
     }
 
     /* ── Mode toggle ── */
+    .mode-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .mode-control { display: flex; align-items: center; gap: 6px; }
     .mode-toggle { display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden; }
     .mode-btn {
       padding: 5px 13px; font-size: 0.75rem; font-weight: 600;
       border: none; background: white; cursor: pointer; color: #6b7280;
       transition: background 0.15s, color 0.15s;
     }
-    .mode-btn.active-watch { background: #ea580c; color: white; }
-    .mode-btn.active-mine  { background: #2563eb; color: white; }
+    #btn-watch { background: #fed7aa; color: #9a3412; border: 1px solid #ea580c; }
+    .mode-btn.active-watch { background: #ea580c; color: white; border-color: #ea580c; }
+    #btn-mine { background: #bfdbfe; color: #1e40af; border: 1px solid #3b82f6; }
+    .mode-btn.active-mine  { background: #2563eb; color: white; border-color: #2563eb; }
+    .mode-hint {
+      font-size: 0.69rem;
+      color: #6b7280;
+      white-space: nowrap;
+    }
 
     /* ── Buttons ── */
     .btn {
@@ -54,24 +121,102 @@
     .legend-item { display: flex; align-items: center; gap: 5px; }
     .swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 2px solid transparent; }
     .hint { margin-left: auto; color: #9ca3af; font-size: 0.69rem; }
+    .date-column-hint {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      text-align: left;
+      padding: 6px 6px 4px 0;
+      font-size: 0.62rem;
+      line-height: 1.25;
+      color: #64748b;
+      white-space: normal;
+    }
 
     /* ── Grid wrapper ── */
-    .grid-wrapper { overflow-x: auto; padding: 16px 20px 8px; flex: 1; }
+    .grid-wrapper {
+      overflow: auto;
+      padding: 16px 20px 8px;
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+    }
+    .grid-topbar {
+      display: flex;
+      justify-content: flex-start;
+      padding-bottom: 10px;
+    }
+    #content-shell {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+    }
+    #content-shell.dock-right {
+      flex-direction: row;
+    }
+    #content-shell.dock-bottom {
+      flex-direction: column;
+    }
     .grid {
       display: grid;
-      grid-template-columns: 94px repeat(var(--cell-cols, 21), minmax(34px, 1fr));
+      grid-template-columns: 94px repeat(var(--cell-cols, 21), 34px);
       gap: 3px;
       min-width: 860px;
+      position: relative;
+      isolation: isolate;
     }
 
     /* ── Grid cells ── */
     .col-header { font-size: 0.62rem; font-weight: 600; color: #6b7280; text-align: center; padding: 3px 2px; white-space: nowrap; }
-    .time-header { grid-row: span 1; }
-    .court-header { font-size: 0.58rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.04em; }
+    .time-header {
+      grid-row: span 1;
+      padding: 6px 4px;
+      border-radius: 8px 8px 0 0;
+      border-bottom: 1px solid #d1d5db;
+    }
+    .time-header.time-even { background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%); }
+    .time-header.time-odd  { background: linear-gradient(180deg, #eef2f7 0%, #e5ebf3 100%); }
+    .court-header {
+      font-size: 0.58rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.04em;
+      padding-top: 5px; padding-bottom: 5px;
+    }
     .row-label {
       font-size: 0.68rem; font-weight: 500; color: #374151;
       display: flex; align-items: flex-start; gap: 5px; padding-right: 4px;
       padding-top: 6px; white-space: nowrap;
+      position: relative;
+      z-index: 1;
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.1s, background 0.12s;
+    }
+    .row-label:hover { transform: translateX(1px); box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18); }
+    .row-label:active { transform: translateX(0); }
+    .row-label.weekend-day {
+      color: #57534e;
+      font-weight: 600;
+      background: linear-gradient(90deg, rgba(245, 245, 244, 0.96) 0%, rgba(250, 250, 249, 0.72) 72%, rgba(250, 250, 249, 0) 100%);
+      border-radius: 8px;
+      padding-left: 8px;
+      border-left: 4px solid #a8a29e;
+    }
+    .row-label.weekend-day::before {
+      content: "";
+      width: 8px; height: 8px; border-radius: 999px;
+      background: #78716c;
+      margin-top: 5px;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 3px #f5f5f4;
+    }
+    .weekend-row-band {
+      grid-column: 1 / -1;
+      border-radius: 10px;
+      background: linear-gradient(90deg, rgba(245, 245, 244, 0.96) 0%, rgba(250, 250, 249, 0.82) 100%);
+      border: 2px solid rgba(120, 113, 108, 0.42);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+      margin-top: 8px;
+      z-index: 0;
+      pointer-events: none;
     }
     .day-start.row-label,
     .day-start.cell {
@@ -83,6 +228,7 @@
       border: 2px solid transparent;
       transition: transform 0.1s, box-shadow 0.1s, opacity 0.15s;
       position: relative;
+      z-index: 1;
     }
     .cell:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0,0,0,0.18); z-index: 1; }
     .cell:active { transform: scale(0.95); }
@@ -97,6 +243,11 @@
     .watching.s-open { background: #4ade80; animation: pulse-open 2s ease-in-out infinite; }
     .watching.s-taken { background: #fed7aa; }
     .watching.s-unknown { background: #fef3c7; }
+    .s-past {
+      opacity: 0.4;
+      filter: saturate(0.45) grayscale(0.15);
+    }
+    .watching.s-open.s-past { animation: none; }
 
     @keyframes pulse-open {
       0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0.7); }
@@ -105,11 +256,66 @@
 
     /* ── Log panel ── */
     #log-panel {
+      --log-entries-height: 220px;
+      --log-panel-width: 420px;
       background: #111827; color: #d1d5db; font-family: "SF Mono", "Fira Code", monospace;
-      font-size: 0.72rem; border-top: 1px solid #374151;
+      font-size: 0.72rem;
       display: flex; flex-direction: column;
+      flex: 0 0 auto;
+      min-height: 0;
     }
+    #content-shell.dock-right #log-panel {
+      display: grid;
+      grid-template-columns: 12px minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-areas:
+        "resize header"
+        "resize entries";
+      width: var(--log-panel-width);
+      min-width: 260px;
+      max-width: min(760px, 75vw);
+      border-left: 1px solid #374151;
+    }
+    #content-shell.dock-bottom #log-panel {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      border-top: 1px solid #374151;
+    }
+    #content-shell.dock-right #log-panel.collapsed {
+      width: 200px;
+      min-width: 200px;
+    }
+    #log-resizer {
+      grid-area: resize;
+      height: 12px;
+      cursor: ns-resize;
+      display: flex; align-items: center; justify-content: center;
+      background: #0f172a;
+      border-bottom: 1px solid #1f2937;
+      user-select: none;
+      touch-action: none;
+    }
+    #log-resizer::before {
+      content: "";
+      width: 42px; height: 4px; border-radius: 999px;
+      background: #475569;
+    }
+    #content-shell.dock-right #log-resizer {
+      width: 12px;
+      height: auto;
+      cursor: ew-resize;
+      border-bottom: none;
+      border-right: 1px solid #1f2937;
+    }
+    #content-shell.dock-right #log-resizer::before {
+      width: 4px;
+      height: 42px;
+    }
+    #log-resizer:hover::before,
+    #log-resizer.dragging::before { background: #94a3b8; }
     #log-header {
+      grid-area: header;
       display: flex; align-items: center; gap: 8px;
       padding: 5px 12px; border-bottom: 1px solid #374151;
       background: #1f2937; cursor: pointer; user-select: none;
@@ -122,22 +328,53 @@
     }
     #log-header button:hover { border-color: #6b7280; color: #d1d5db; }
     #log-entries {
-      overflow-y: auto; max-height: 180px; padding: 4px 0;
+      grid-area: entries;
+      overflow-y: auto; height: var(--log-entries-height); min-height: 120px; padding: 4px 0;
+      overscroll-behavior: contain; scrollbar-gutter: stable;
+    }
+    #content-shell.dock-right #log-entries {
+      height: auto;
+      min-height: 0;
+      flex: 1;
     }
     #log-panel.collapsed #log-entries { display: none; }
     .log-entry {
-      display: flex; align-items: baseline; gap: 8px;
+      display: grid; grid-template-columns: auto auto auto auto minmax(0, 1fr) auto;
+      align-items: baseline; gap: 8px;
       padding: 3px 12px; border-bottom: 1px solid #1f2937;
-      line-height: 1.4;
+      line-height: 1.4; cursor: pointer;
     }
     .log-entry:hover { background: #1f2937; }
+    .log-entry:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+    .log-entry.expanded { background: #111827; }
     .log-ts   { color: #6b7280; flex-shrink: 0; font-size: 0.65rem; }
     .log-req  { color: #93c5fd; flex-shrink: 0; }
     .log-arrow { color: #4b5563; }
     .log-status { flex-shrink: 0; font-weight: 600; }
     .log-status.ok  { color: #4ade80; }
+    .log-status.info { color: #fbbf24; }
     .log-status.err { color: #f87171; }
     .log-body { color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .log-hint { color: #4b5563; flex-shrink: 0; margin-left: auto; }
+    .log-detail-inline {
+      grid-column: 1 / -1;
+      display: none;
+      margin: 4px 0 8px;
+      padding: 10px 12px;
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      gap: 10px;
+    }
+    .log-entry.expanded .log-detail-inline { display: grid; }
+    .log-detail-section { display: grid; gap: 6px; }
+    .log-detail-section h3 { font-size: 0.72rem; color: #94a3b8; letter-spacing: 0.04em; }
+    .log-detail-pre {
+      white-space: pre-wrap; word-break: break-word;
+      background: #020617; border: 1px solid #1e293b; border-radius: 8px;
+      padding: 10px 12px; font-size: 0.72rem; line-height: 1.5;
+      max-height: 220px; overflow: auto; tab-size: 2;
+    }
 
     /* ── Toast ── */
     #toast {
@@ -201,7 +438,21 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     /* ── Time-group divider ── */
-    .time-group-start { border-left: 2px solid #d1d5db; margin-left: 2px; }
+    .time-group-start { margin-left: 0; }
+    .court-header.time-group-start,
+    .cell.time-group-start { position: relative; }
+    .court-header.time-group-start::before,
+    .cell.time-group-start::before {
+      content: "";
+      position: absolute;
+      left: -6px;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      border-radius: 999px;
+      background: #94a3b8;
+      pointer-events: none;
+    }
 
     @media (max-width: 720px) {
       header, .legend { padding-left: 14px; padding-right: 14px; }
@@ -214,8 +465,13 @@
 <!-- Header -->
 <header>
   <h1>🏓 Pickleball Monitor</h1>
-  <div class="spacer"></div>
-  <span id="last-scanned"></span>
+  <span class="version-chip is-ui" id="ui-version"></span>
+  <span class="version-chip is-unknown" id="api-version"></span>
+  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
+  <div class="scan-summary">
+    <span id="scan-current"></span>
+    <span id="scan-last"></span>
+  </div>
   <label id="freq-label">
     Scan every
     <select id="freq-select" onchange="setFrequency(this.value)">
@@ -227,13 +483,23 @@
       <option value="24">daily</option>
     </select>
   </label>
-  <div class="mode-toggle">
-    <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁 Watch</button>
-    <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
+  <span id="next-scan"></span>
+  <div class="spacer"></div>
+  <div class="mode-controls">
+    <div class="mode-control">
+      <div class="mode-toggle">
+        <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁 Watch</button>
+      </div>
+      <span class="mode-hint">click court cell = watch</span>
+    </div>
+    <div class="mode-control">
+      <div class="mode-toggle">
+        <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
+      </div>
+      <span class="mode-hint">shift+click = mine</span>
+    </div>
   </div>
-  <button class="btn" id="btn-refresh" onclick="refreshState()">Refresh</button>
-  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
-  <button class="btn" onclick="openAuthModal()">Credentials</button>
+  <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
 </header>
 
 <!-- Legend -->
@@ -244,24 +510,30 @@
   <div class="legend-item"><div class="swatch" style="background:#fed7aa; border-color:#ea580c;"></div>Watching (taken)</div>
   <div class="legend-item"><div class="swatch" style="background:#4ade80; border-color:#ea580c;"></div>Watching (open!)</div>
   <div class="legend-item"><div class="swatch" style="background:#bfdbfe; border-color:#3b82f6;"></div>Mine</div>
-  <span class="hint">court display = #4, #5, #6 &nbsp;·&nbsp; booking preference = #6, #4, #5 &nbsp;·&nbsp; click court cell = watch &nbsp;·&nbsp; shift+click = mine</span>
+  <span class="hint">court display = #4, #5, #6 &nbsp;·&nbsp; booking preference = #6, #4, #5</span>
 </div>
 
-<!-- Grid -->
-<div class="grid-wrapper">
-  <div class="grid" id="grid"></div>
-</div>
-
-<!-- Log panel -->
-<div id="log-panel" class="collapsed">
-  <div id="log-header" onclick="toggleLog()">
-    <span>API LOG</span>
-    <div class="log-controls" onclick="e => e.stopPropagation()">
-      <button onclick="event.stopPropagation(); clearLog()">Clear</button>
-      <button onclick="event.stopPropagation(); toggleLog()">▲ Hide</button>
+<div id="content-shell" class="dock-right">
+  <!-- Grid -->
+  <div class="grid-wrapper">
+    <div class="grid-topbar">
+      <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
     </div>
+    <div class="grid" id="grid"></div>
   </div>
-  <div id="log-entries"></div>
+
+  <!-- Log panel -->
+  <div id="log-panel" class="collapsed">
+    <div id="log-resizer" onpointerdown="startLogResize(event)" title="Drag to resize API log"></div>
+    <div id="log-header" onclick="toggleLog()">
+      <span>API LOG</span>
+      <div class="log-controls" onclick="event.stopPropagation()">
+        <button onclick="event.stopPropagation(); clearLog()">Clear</button>
+        <button onclick="event.stopPropagation(); toggleLog()">▲ Hide</button>
+      </div>
+    </div>
+    <div id="log-entries"></div>
+  </div>
 </div>
 
 <!-- Toast -->
@@ -294,6 +566,9 @@
 // ── Config ────────────────────────────────────────────────────────────────────
 const API_BASE   = 'https://example.execute-api.us-west-2.amazonaws.com/prod';
 const AUTH_STORAGE_KEY = 'pickleball-basic-auth';
+const LOG_DOCK_STORAGE_KEY = 'pickleball-log-dock';
+const LOG_HEIGHT_STORAGE_KEY = 'pickleball-log-height';
+const LOG_WIDTH_STORAGE_KEY = 'pickleball-log-width';
 
 function readAuthToken() {
   return localStorage.getItem(AUTH_STORAGE_KEY) || '';
@@ -342,17 +617,266 @@ function requireAuthToken() {
   return token;
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function localToday() {
+  const d = new Date();
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+function fmtScanTime(isoStr) {
+  const d = new Date(isoStr);
+  const today = new Date();
+  const isToday = d.getFullYear() === today.getFullYear() &&
+                  d.getMonth()    === today.getMonth()    &&
+                  d.getDate()     === today.getDate();
+  const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return isToday ? timePart : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + timePart;
+}
+
+function fmtLogTimestamp(d = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return pad(d.getMonth() + 1) + '-' +
+    pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' +
+    pad(d.getMinutes()) + ':' +
+    pad(d.getSeconds());
+}
+
+function formatClockTime(dateLike, includeSeconds = false) {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  return d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(includeSeconds ? { second: '2-digit' } : {}),
+  });
+}
+
+function formatLogBody(text) {
+  if (!text) return '';
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function formatLogPreview(text) {
+  if (!text) return '';
+  try {
+    const json = JSON.parse(text);
+    const preview = JSON.stringify(json).replace(/"slots":\[.*?\]/g, '"slots":[…]');
+    return preview.length > 160 ? preview.slice(0, 160) + '…' : preview;
+  } catch {
+    return text.slice(0, 160);
+  }
+}
+
+function clampLogHeight(height) {
+  const min = 120;
+  const max = Math.min(620, Math.round(window.innerHeight * 0.7));
+  return Math.max(min, Math.min(height, max));
+}
+
+function clampLogWidth(width) {
+  const min = 260;
+  const max = Math.min(760, Math.round(window.innerWidth * 0.75));
+  return Math.max(min, Math.min(width, max));
+}
+
+function setLogHeight(height) {
+  const clamped = clampLogHeight(height);
+  document.getElementById('log-panel').style.setProperty('--log-entries-height', clamped + 'px');
+  localStorage.setItem(LOG_HEIGHT_STORAGE_KEY, String(clamped));
+  updateToastPosition();
+}
+
+function setLogWidth(width) {
+  const clamped = clampLogWidth(width);
+  document.getElementById('log-panel').style.setProperty('--log-panel-width', clamped + 'px');
+  localStorage.setItem(LOG_WIDTH_STORAGE_KEY, String(clamped));
+  updateToastPosition();
+}
+
+function currentLogDock() {
+  return document.getElementById('content-shell').classList.contains('dock-bottom') ? 'bottom' : 'right';
+}
+
+function setLogDock(dock, persist = true) {
+  const shell = document.getElementById('content-shell');
+  const resizer = document.getElementById('log-resizer');
+  shell.classList.toggle('dock-right', dock === 'right');
+  shell.classList.toggle('dock-bottom', dock === 'bottom');
+  if (persist) localStorage.setItem(LOG_DOCK_STORAGE_KEY, dock);
+  if (resizer) {
+    resizer.title = dock === 'right'
+      ? 'Drag left/right to resize. Drag downward to snap to bottom.'
+      : 'Drag up/down to resize. Drag toward the right edge to snap to the side.';
+  }
+  updateToastPosition();
+}
+
+function updateToastPosition() {
+  const toast = document.getElementById('toast');
+  const panel = document.getElementById('log-panel');
+  if (!toast || !panel) return;
+  if (currentLogDock() === 'right' && !panel.classList.contains('collapsed')) {
+    toast.style.right = (panel.getBoundingClientRect().width + 22) + 'px';
+  } else {
+    toast.style.right = '22px';
+  }
+}
+
+function initLogResizer() {
+  const saved = parseInt(localStorage.getItem(LOG_HEIGHT_STORAGE_KEY) || '', 10);
+  const savedWidth = parseInt(localStorage.getItem(LOG_WIDTH_STORAGE_KEY) || '', 10);
+  const savedDock = localStorage.getItem(LOG_DOCK_STORAGE_KEY) || 'right';
+  setLogDock(savedDock, false);
+  setLogHeight(Number.isNaN(saved) ? 220 : saved);
+  setLogWidth(Number.isNaN(savedWidth) ? 420 : savedWidth);
+  window.addEventListener('resize', () => {
+    const current = parseInt(getComputedStyle(document.getElementById('log-panel')).getPropertyValue('--log-entries-height'), 10);
+    if (!Number.isNaN(current)) setLogHeight(current);
+    const currentWidth = parseInt(getComputedStyle(document.getElementById('log-panel')).getPropertyValue('--log-panel-width'), 10);
+    if (!Number.isNaN(currentWidth)) setLogWidth(currentWidth);
+  });
+}
+
+function renderScanStatus() {
+  const currentEl = document.getElementById('scan-current');
+  const lastEl = document.getElementById('scan-last');
+  if (!currentEl || !lastEl) return;
+  const activeScanStartedAt = currentScanStartedAt();
+  const kind = currentScanKind();
+  const pendingPartialCount = (appState.pending_partial_rescan_dates || []).length;
+  const incompleteCount = (appState.incomplete_dates || []).length;
+  const dateLabel = count => count + ' date' + (count === 1 ? '' : 's');
+
+  if (_missedRescanTimer && _missedRescanAt) {
+    currentEl.textContent = 'Current: Waiting to start ad-hoc partial rescan at ' + formatClockTime(_missedRescanAt, true) + ' to fill missing results';
+  } else if (activeScanStartedAt) {
+    const suffix = appState.pending_full_scan ? ' · full scan queued next' : '';
+    const detail = kind === 'missed_rescan' ? ' to fill missing results' : '';
+    currentEl.textContent = 'Current: ' + scanKindLabel(kind) + ' running since ' + fmtScanTime(activeScanStartedAt) + detail + suffix;
+  } else if (appState.pending_full_scan) {
+    currentEl.textContent = 'Current: Full scan queued to start next';
+  } else if (pendingPartialCount) {
+    currentEl.textContent = appState.pending_partial_rescan_at
+      ? 'Current: Partial rescan scheduled at ' + fmtScanTime(appState.pending_partial_rescan_at) + ' for ' + dateLabel(pendingPartialCount) + ' to fill missing results'
+      : 'Current: Partial rescan needed for ' + dateLabel(pendingPartialCount) + ' to fill missing results';
+  } else if (incompleteCount) {
+    currentEl.textContent = 'Current: No scan in progress · incomplete results remain for ' + dateLabel(incompleteCount);
+  } else {
+    currentEl.textContent = 'Current: No scan in progress';
+  }
+
+  if (!appState.last_scanned) {
+    lastEl.textContent = 'Last complete: Not yet scanned';
+  } else if (appState.last_scan_started_at) {
+    lastEl.textContent =
+      'Last complete: ' +
+      scanKindLabel(appState.last_scan_kind) +
+      ' started ' +
+      fmtScanTime(appState.last_scan_started_at) +
+      ', ended ' +
+      fmtScanTime(appState.last_scanned);
+  } else {
+    lastEl.textContent =
+      'Last complete: ' +
+      scanKindLabel(appState.last_scan_kind) +
+      ' ended ' +
+      fmtScanTime(appState.last_scanned);
+  }
+}
+
+function renderScanButton() {
+  const btn = document.getElementById('btn-scan-now');
+  if (!btn) return;
+  btn.textContent = 'Scan Now';
+  btn.disabled = isFullScanBusy() || appState.pending_full_scan;
+}
+
+function currentScanStartedAt() {
+  return appState.scan_started_at || ((_manualScanPending || _missedRescanActive) ? _localScanRequestedAt : null);
+}
+
+function currentScanKind() {
+  if (_manualScanPending) return 'ad_hoc';
+  if (_missedRescanActive) return 'missed_rescan';
+  return appState.scan_started_kind || (appState.scan_started_at ? 'scheduled' : null);
+}
+
+function isFullScanBusy() {
+  const kind = currentScanKind();
+  return _manualScanPending || (!!appState.scan_started_at && kind !== 'missed_rescan');
+}
+
+function scanKindLabel(kind) {
+  switch (kind) {
+    case 'scheduled':
+      return 'Scheduled scan';
+    case 'ad_hoc':
+      return 'Ad-hoc full scan';
+    case 'missed_rescan':
+      return 'Ad-hoc partial rescan';
+    default:
+      return 'Scan';
+  }
+}
+
+function slotStartAt(dateStr, timeStr) {
+  const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})\s*([AP]M)$/i);
+  if (!match) return null;
+  let [, hour, minute, meridiem] = match;
+  hour = parseInt(hour, 10);
+  minute = parseInt(minute, 10);
+  meridiem = meridiem.toUpperCase();
+  if (meridiem === 'PM' && hour !== 12) hour += 12;
+  if (meridiem === 'AM' && hour === 12) hour = 0;
+  const dt = new Date(dateStr + 'T00:00:00');
+  dt.setHours(hour, minute, 0, 0);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function isPastSlot(dateStr, timeStr) {
+  const start = slotStartAt(dateStr, timeStr);
+  return start ? start.getTime() < Date.now() : false;
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], last_scanned: null, scan_interval_hours: 1 };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, pending_partial_rescan_dates: [], pending_partial_rescan_at: null, incomplete_dates: [], scan_completion_status: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, pending_full_scan: false, scan_interval_hours: 1, rec_url: '' };
 let clickMode = 'watch';
 let toastTimer = null;
+let _missedRescanTimer = null;
+let _missedRescanAt = null;
+let _missedRescanActive = false;
+let _logIdSeq = 0;
+let _logResizeState = null;
+let _manualScanPending = false;
+let _localScanRequestedAt = null;
 
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
+const _apiLogs = [];
+const UI_VERSION = '1.1.0';
+
+function renderVersionInfo() {
+  const uiEl = document.getElementById('ui-version');
+  const apiEl = document.getElementById('api-version');
+  if (uiEl) uiEl.textContent = 'UI v' + UI_VERSION;
+  if (!apiEl) return;
+  const apiVersion = appState.app_version || null;
+  apiEl.textContent = apiVersion ? 'API v' + apiVersion : 'API unknown';
+  apiEl.className = 'version-chip ' + (apiVersion ? 'is-api' : 'is-unknown');
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('auth-form').addEventListener('submit', onAuthSubmit);
+  initLogResizer();
+  renderVersionInfo();
+  renderScanButton();
   if (readAuthToken()) refreshState();
   else openAuthModal();
   setInterval(refreshState, 5 * 60 * 1000);
@@ -360,8 +884,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  const modal = document.getElementById('auth-modal');
-  if (!modal.classList.contains('show')) return;
+  const authModal = document.getElementById('auth-modal');
+  if (!authModal.classList.contains('show')) return;
   closeAuthModal();
 });
 
@@ -408,7 +932,13 @@ async function onAuthSubmit(e) {
 async function apiFetch(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const url    = API_BASE + path;
-  const ts     = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const ts     = fmtLogTimestamp(new Date());
+  const requestBody = typeof options.body === 'string'
+    ? options.body
+    : options.body == null
+      ? ''
+      : JSON.stringify(options.body);
+  const prettyRequestBody = formatLogBody(requestBody);
 
   // Show log panel on first request
   document.getElementById('log-panel').classList.remove('collapsed');
@@ -416,6 +946,7 @@ async function apiFetch(path, options = {}) {
 
   let status = '···';
   let bodyPreview = '';
+  let responseBody = '';
 
   try {
     let token = requireAuthToken();
@@ -431,42 +962,100 @@ async function apiFetch(path, options = {}) {
     status = r.status;
 
     const text = await r.clone().text();
-    try {
-      const json = JSON.parse(text);
-      // Show meaningful preview: omit large grid arrays
-      const preview = JSON.stringify(json).replace(/"slots":\[.*?\]/g, '"slots":[…]');
-      bodyPreview = preview.length > 160 ? preview.slice(0, 160) + '…' : preview;
-    } catch {
-      bodyPreview = text.slice(0, 160);
-    }
+    responseBody = formatLogBody(text);
+    bodyPreview = formatLogPreview(text);
 
-    addLogEntry(ts, method, path, status, bodyPreview);
+    addLogEntry({
+      ts,
+      method,
+      path,
+      status,
+      bodyPreview,
+      requestBody: prettyRequestBody,
+      responseBody,
+    });
     return r;
   } catch (e) {
-    addLogEntry(ts, method, path, 'ERR', e.message);
+    addLogEntry({
+      ts,
+      method,
+      path,
+      status: 'ERR',
+      bodyPreview: e.message,
+      requestBody: prettyRequestBody,
+      responseBody: responseBody || e.message,
+    });
     throw e;
   }
 }
 
 // ── Log panel ─────────────────────────────────────────────────────────────────
-function addLogEntry(ts, method, path, status, body) {
+function addLogEntry(entry) {
+  const { ts, method, path, status, bodyPreview, requestBody, responseBody } = entry;
   const entries = document.getElementById('log-entries');
+  const shouldStickToBottom = entries.scrollTop + entries.clientHeight >= entries.scrollHeight - 24;
   const row = document.createElement('div');
   row.className = 'log-entry';
+  row.tabIndex = 0;
 
   const ok = typeof status === 'number' && status >= 200 && status < 300;
+  const statusClass = ok ? 'ok' : status === 'INFO' ? 'info' : 'err';
+  const log = {
+    id: ++_logIdSeq,
+    ts,
+    method,
+    path,
+    status,
+    requestBody,
+    responseBody,
+  };
+  _apiLogs.push(log);
+  row.dataset.logId = String(log.id);
   row.innerHTML =
     `<span class="log-ts">${ts}</span>` +
     `<span class="log-req">${method} ${path}</span>` +
     `<span class="log-arrow">→</span>` +
-    `<span class="log-status ${ok ? 'ok' : 'err'}">${status}</span>` +
-    `<span class="log-body">${escHtml(body)}</span>`;
+    `<span class="log-status ${statusClass}">${status}</span>` +
+    `<span class="log-body">${escHtml(bodyPreview)}</span>` +
+    `<span class="log-hint">Expand</span>` +
+    `<div class="log-detail-inline">` +
+      `<section class="log-detail-section">` +
+        `<h3>Request Body</h3>` +
+        `<pre class="log-detail-pre">${escHtml(requestBody || '(empty)')}</pre>` +
+      `</section>` +
+      `<section class="log-detail-section">` +
+        `<h3>Response Body</h3>` +
+        `<pre class="log-detail-pre">${escHtml(responseBody || '(empty)')}</pre>` +
+      `</section>` +
+    `</div>`;
+  row.addEventListener('click', () => toggleLogDetail(log.id));
+  row.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggleLogDetail(log.id);
+    }
+  });
 
   entries.appendChild(row);
-  entries.scrollTop = entries.scrollHeight;
+  if (shouldStickToBottom) entries.scrollTop = entries.scrollHeight;
 
-  // Keep last 50 entries
-  while (entries.children.length > 50) entries.removeChild(entries.firstChild);
+  // Keep last 200 entries
+  while (entries.children.length > 200) {
+    entries.removeChild(entries.firstChild);
+    _apiLogs.shift();
+  }
+}
+
+function addProgressLog(summary, details = '') {
+  addLogEntry({
+    ts: fmtLogTimestamp(new Date()),
+    method: 'CLIENT',
+    path: '/scan-progress',
+    status: 'INFO',
+    bodyPreview: summary,
+    requestBody: '',
+    responseBody: details || summary,
+  });
 }
 
 function escHtml(s) {
@@ -475,17 +1064,92 @@ function escHtml(s) {
 
 function clearLog() {
   document.getElementById('log-entries').innerHTML = '';
+  _apiLogs.length = 0;
 }
 
 function toggleLog() {
   document.getElementById('log-panel').classList.toggle('collapsed');
   updateLogToggleBtn();
+  updateToastPosition();
 }
 
 function updateLogToggleBtn() {
   const collapsed = document.getElementById('log-panel').classList.contains('collapsed');
   const btn = document.querySelector('#log-header .log-controls button:last-child');
   if (btn) btn.textContent = collapsed ? '▲ Show' : '▲ Hide';
+}
+
+function toggleLogDetail(logId) {
+  const row = document.querySelector(`.log-entry[data-log-id="${logId}"]`);
+  if (!row) return;
+  const expanded = row.classList.toggle('expanded');
+  const hint = row.querySelector('.log-hint');
+  if (hint) hint.textContent = expanded ? 'Collapse' : 'Expand';
+}
+
+function startLogResize(event) {
+  event.preventDefault();
+  const panel = document.getElementById('log-panel');
+  const entries = document.getElementById('log-entries');
+  _logResizeState = {
+    dock: currentLogDock(),
+    startX: event.clientX,
+    startY: event.clientY,
+    startWidth: panel.getBoundingClientRect().width,
+    startHeight: entries.getBoundingClientRect().height,
+  };
+  document.getElementById('log-resizer').classList.add('dragging');
+  window.addEventListener('pointermove', onLogResizeMove);
+  window.addEventListener('pointerup', stopLogResize);
+}
+
+function syncLogResizeState(dock, event) {
+  const panel = document.getElementById('log-panel');
+  const entries = document.getElementById('log-entries');
+  _logResizeState.dock = dock;
+  _logResizeState.startX = event.clientX;
+  _logResizeState.startY = event.clientY;
+  _logResizeState.startWidth = panel.getBoundingClientRect().width;
+  _logResizeState.startHeight = entries.getBoundingClientRect().height;
+}
+
+function onLogResizeMove(event) {
+  if (!_logResizeState) return;
+  const dx = event.clientX - _logResizeState.startX;
+  const dy = event.clientY - _logResizeState.startY;
+
+  if (_logResizeState.dock === 'right') {
+    const shouldSnapBottom = event.clientY >= window.innerHeight - 120 ||
+      (Math.abs(dy) > 90 && Math.abs(dy) > Math.abs(dx) * 1.15);
+    if (shouldSnapBottom) {
+      if (currentLogDock() !== 'bottom') {
+        setLogDock('bottom');
+        syncLogResizeState('bottom', event);
+      }
+      return;
+    }
+    setLogWidth(_logResizeState.startWidth - dx);
+    return;
+  }
+
+  const shouldSnapRight = event.clientX >= window.innerWidth - 140 ||
+    (Math.abs(dx) > 90 && Math.abs(dx) > Math.abs(dy) * 1.15);
+  if (shouldSnapRight) {
+    if (currentLogDock() !== 'right') {
+      setLogDock('right');
+      syncLogResizeState('right', event);
+    }
+    return;
+  }
+  setLogHeight(_logResizeState.startHeight - dy);
+}
+
+function stopLogResize() {
+  if (!_logResizeState) return;
+  _logResizeState = null;
+  document.getElementById('log-resizer').classList.remove('dragging');
+  window.removeEventListener('pointermove', onLogResizeMove);
+  window.removeEventListener('pointerup', stopLogResize);
 }
 
 // ── Browser notifications for watched open slots ──────────────────────────────
@@ -527,15 +1191,224 @@ async function checkWatchedNotifications(state) {
   }
 }
 
+// ── Next-scan display ─────────────────────────────────────────────────────────
+function updateNextScanDisplay() {
+  const el = document.getElementById('next-scan');
+  if (!el) return;
+
+  const activeScanStartedAt = currentScanStartedAt();
+  const activeKind = currentScanKind();
+  if (activeScanStartedAt && activeKind !== 'missed_rescan') {
+    el.textContent = 'Next scheduled scan: will be recalculated after current scan finishes';
+    el.className = 'rescan';
+    return;
+  }
+  if (appState.pending_full_scan) {
+    el.textContent = 'Next scheduled scan: will be recalculated after queued full scan finishes';
+    el.className = 'rescan';
+    return;
+  }
+  if ((appState.pending_partial_rescan_dates || []).length) {
+    el.textContent = appState.pending_partial_rescan_at
+      ? 'Next scheduled scan: partial rescan first at ' + fmtScanTime(appState.pending_partial_rescan_at)
+      : 'Next scheduled scan: waiting for partial rescan retry first';
+    el.className = 'rescan';
+    return;
+  }
+
+  el.className = '';
+  const todayStr = localToday();
+  const hasFutureWatched = (appState.grid || []).some(
+    d => d.date >= todayStr && (d.slots || []).some(s => s.watching)
+  );
+
+  if (!hasFutureWatched) {
+    el.textContent = 'Next scheduled scan: off (no watched slots)';
+    return;
+  }
+  const anchors = [appState.last_scanned, appState.watched_slots_updated_at]
+    .filter(Boolean)
+    .map(value => new Date(value).getTime())
+    .filter(value => !Number.isNaN(value));
+  if (!anchors.length) {
+    el.textContent = 'Next scheduled scan: after watch list is saved';
+    return;
+  }
+  const nextMs = Math.max(...anchors) + appState.scan_interval_hours * 3600 * 1000;
+  el.textContent = 'Next scheduled scan: ' + fmtScanTime(new Date(nextMs).toISOString());
+}
+
+// ── Missed-slot rescan ────────────────────────────────────────────────────────
+function findMissedDates(state) {
+  const today = localToday();
+  const missed = new Set();
+  for (const day of (state.grid || [])) {
+    if (day.date < today) continue;
+    if ((day.slots || []).some(s => s.available === null)) missed.add(day.date);
+  }
+  return [...missed];
+}
+
+function scheduleMissedRescan(dates) {
+  if (_missedRescanTimer) clearTimeout(_missedRescanTimer);
+  _missedRescanAt = new Date(Date.now() + 60 * 1000);
+  addProgressLog(
+    'Missed-slot rescan scheduled for ' + dates.join(', '),
+    'The ad-hoc scan completed with partially missing results. A targeted rescan will be requested at ' +
+      formatClockTime(_missedRescanAt, true) +
+      ' for dates: ' + dates.join(', ')
+  );
+  _missedRescanTimer = setTimeout(() => {
+    _missedRescanTimer = null;
+    _missedRescanAt = null;
+    triggerMissedRescan(dates);
+  }, 60 * 1000);
+  updateNextScanDisplay();
+}
+
+async function triggerMissedRescan(dates) {
+  _missedRescanActive = true;
+  _localScanRequestedAt = new Date().toISOString();
+  renderScanStatus();
+  renderScanButton();
+  updateNextScanDisplay();
+  const prevLastScanned = appState.last_scanned;
+  addProgressLog(
+    'Requesting missed-slot rescan',
+    'Sending POST /force-scan for dates: ' + dates.join(', ') + '. The UI will poll GET /state every 20 seconds for up to 5 minutes.'
+  );
+  try {
+    const r = await apiFetch('/force-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates }),
+    });
+    if (r.status !== 202) {
+      _missedRescanActive = false;
+      _localScanRequestedAt = null;
+      addProgressLog('Missed-slot rescan request failed', 'POST /force-scan returned status ' + r.status + '.');
+      renderScanStatus();
+      renderScanButton();
+      updateNextScanDisplay();
+      return;
+    }
+  } catch (e) {
+    _missedRescanActive = false;
+    _localScanRequestedAt = null;
+    addProgressLog('Missed-slot rescan request failed', e.message || 'Unknown error.');
+    renderScanStatus();
+    renderScanButton();
+    updateNextScanDisplay();
+    return;
+  }
+
+  // Poll for rescan completion (up to 5 minutes)
+  const deadline = Date.now() + 5 * 60 * 1000;
+  const poll = setInterval(async () => {
+    try {
+      const pr = await apiFetch('/state');
+      if (!pr.ok) return;
+      const data = await pr.json();
+      appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
+      appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
+      appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
+      appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
+      appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
+      appState.app_version = data.app_version || appState.app_version || null;
+      appState.scan_started_at = data.scan_started_at || null;
+      appState.scan_started_kind = data.scan_started_kind || null;
+      appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
+      appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
+      appState.pending_full_scan = !!data.pending_full_scan;
+      renderScanStatus();
+      renderScanButton();
+      renderVersionInfo();
+      updateNextScanDisplay();
+      if (data.last_scanned && data.last_scanned !== prevLastScanned) {
+        clearInterval(poll);
+        _missedRescanActive = false;
+        _localScanRequestedAt = null;
+        addProgressLog(
+          'Missed-slot rescan completed',
+          'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
+        );
+        applyPartialUpdate(dates, data);
+      } else if (Date.now() >= deadline) {
+        clearInterval(poll);
+        _missedRescanActive = false;
+        _localScanRequestedAt = null;
+        addProgressLog(
+          'Missed-slot rescan still pending',
+          'Timed out after 5 minutes waiting for GET /state to show a new last_scanned timestamp.'
+        );
+        renderScanStatus();
+        renderScanButton();
+        updateNextScanDisplay();
+      }
+    } catch (_) {}
+  }, 20 * 1000);
+}
+
+function applyPartialUpdate(dates, newState) {
+  const dateSet = new Set(dates);
+  const dayMap = new Map((newState.grid || []).map(d => [d.date, d]));
+
+  // Merge rescanned dates into appState
+  for (let i = 0; i < appState.grid.length; i++) {
+    if (!dateSet.has(appState.grid[i].date)) continue;
+    const newDay = dayMap.get(appState.grid[i].date);
+    if (newDay) appState.grid[i] = newDay;
+  }
+  appState.app_version = newState.app_version || appState.app_version || null;
+  appState.watched_slots_updated_at = newState.watched_slots_updated_at || null;
+  appState.pending_partial_rescan_dates = Array.isArray(newState.pending_partial_rescan_dates) ? newState.pending_partial_rescan_dates : [];
+  appState.pending_partial_rescan_at = newState.pending_partial_rescan_at || null;
+  appState.incomplete_dates = Array.isArray(newState.incomplete_dates) ? newState.incomplete_dates : [];
+  appState.scan_completion_status = newState.scan_completion_status || null;
+  appState.last_scanned = newState.last_scanned;
+  appState.last_scan_started_at = newState.last_scan_started_at || null;
+  appState.last_scan_kind = newState.last_scan_kind || null;
+  appState.pending_full_scan = !!newState.pending_full_scan;
+  appState.scan_started_at = newState.scan_started_at || null;
+  appState.scan_started_kind = newState.scan_started_kind || null;
+
+  // Update only the DOM cells for these dates
+  for (const date of dates) {
+    const day = dayMap.get(date);
+    if (!day) continue;
+    for (const slot of (day.slots || [])) {
+      const cells = document.querySelectorAll(`.cell[data-date="${date}"]`);
+      for (const cell of cells) {
+        if (cell.dataset.time !== slot.time || cell.dataset.court !== slot.court) continue;
+        const isFirstCourt = slot.court === appState.court_nums[0];
+        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '');
+        cell.title = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot, day.date);
+      }
+    }
+  }
+
+  renderScanStatus();
+  renderScanButton();
+  renderVersionInfo();
+  checkWatchedNotifications(appState);
+  updateNextScanDisplay();
+}
+
 // ── Fetch state ───────────────────────────────────────────────────────────────
 async function refreshState() {
-  const btn = document.getElementById('btn-refresh');
-  btn.innerHTML = '<span class="spinner"></span>';
-  btn.disabled = true;
   try {
     const r = await apiFetch('/state');
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
     appState = await r.json();
+    if (!appState.app_version) appState.app_version = null;
+    appState.watched_slots_updated_at = appState.watched_slots_updated_at || null;
+    appState.pending_partial_rescan_dates = Array.isArray(appState.pending_partial_rescan_dates) ? appState.pending_partial_rescan_dates : [];
+    appState.pending_partial_rescan_at = appState.pending_partial_rescan_at || null;
+    appState.incomplete_dates = Array.isArray(appState.incomplete_dates) ? appState.incomplete_dates : [];
+    appState.scan_completion_status = appState.scan_completion_status || null;
+    appState.last_scan_started_at = appState.last_scan_started_at || null;
+    if (!appState.last_scan_kind) appState.last_scan_kind = null;
+    appState.pending_full_scan = !!appState.pending_full_scan;
     appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
     if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) {
       appState.court_nums = ['6', '4', '5'];
@@ -543,21 +1416,27 @@ async function refreshState() {
     if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) {
       appState.court_preference = appState.court_nums.slice();
     }
+    if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
+    const recLink = document.getElementById('rec-link');
+    if (recLink) recLink.href = appState.rec_url;
     const freqSelect = document.getElementById('freq-select');
     if (freqSelect && appState.scan_interval_hours != null) {
       freqSelect.value = String(appState.scan_interval_hours);
     }
+    renderVersionInfo();
     renderGrid();
-    const ls = appState.last_scanned;
-    document.getElementById('last-scanned').textContent = ls
-      ? 'Last scan: ' + new Date(ls).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : 'Not yet scanned';
+    renderScanStatus();
+    renderScanButton();
     checkWatchedNotifications(appState);
+
+    if (_missedRescanTimer && appState.scan_started_at) {
+      clearTimeout(_missedRescanTimer);
+      _missedRescanTimer = null;
+      _missedRescanAt = null;
+    }
+    updateNextScanDisplay();
   } catch (e) {
     toast('Error: ' + e.message);
-  } finally {
-    btn.textContent = 'Refresh';
-    btn.disabled = false;
   }
 }
 
@@ -568,34 +1447,62 @@ function renderGrid() {
   grid.innerHTML = '';
   const courtCount = appState.court_nums.length || 3;
   grid.style.setProperty('--cell-cols', appState.slot_times.length * courtCount);
+  const headerRows = 2;
 
   // Corner cell + time headers
-  grid.appendChild(el('div', ''));
-  for (const t of appState.slot_times) {
-    const header = el('div', fmtTime(t), 'col-header time-header');
-    header.style.gridColumn = 'span ' + courtCount;
+  const topCorner = el('div', 'click date = rescan that day', 'date-column-hint');
+  topCorner.style.gridColumn = '1';
+  topCorner.style.gridRow = '1 / span 2';
+  grid.appendChild(topCorner);
+  for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
+    const t = appState.slot_times[timeIndex];
+    const header = el('div', fmtTime(t), 'col-header time-header ' + (timeIndex % 2 === 0 ? 'time-even' : 'time-odd'));
+    header.style.gridRow = '1';
+    header.style.gridColumn = `${2 + timeIndex * courtCount} / span ${courtCount}`;
     grid.appendChild(header);
   }
 
   // Court subheaders
-  grid.appendChild(el('div', ''));
-  for (const t of appState.slot_times) {
-    for (const court of appState.court_nums) {
+  for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
+    for (let courtIndex = 0; courtIndex < appState.court_nums.length; courtIndex++) {
+      const court = appState.court_nums[courtIndex];
       const isFirst = court === appState.court_nums[0];
-      grid.appendChild(el('div', '#' + court, 'col-header court-header' + (isFirst ? ' time-group-start' : '')));
+      const subheader = el('div', '#' + court, 'col-header court-header' + (isFirst ? ' time-group-start' : ''));
+      subheader.style.gridRow = '2';
+      subheader.style.gridColumn = String(2 + timeIndex * courtCount + courtIndex);
+      grid.appendChild(subheader);
     }
   }
 
   // Day rows
-  for (const day of appState.grid) {
+  for (let dayIndex = 0; dayIndex < appState.grid.length; dayIndex++) {
+    const day = appState.grid[dayIndex];
+    const isWeekend = new Date(day.date + 'T12:00:00').getDay() % 6 === 0;
+    const row = headerRows + dayIndex + 1;
+
+    if (isWeekend) {
+      const band = document.createElement('div');
+      band.className = 'weekend-row-band';
+      band.style.gridRow = String(row);
+      band.style.gridColumn = '1 / -1';
+      grid.appendChild(band);
+    }
+
     const labelCell = document.createElement('div');
-    labelCell.className = 'row-label day-start';
+    labelCell.className = 'row-label day-start' + (isWeekend ? ' weekend-day' : '');
+    labelCell.style.gridRow = String(row);
+    labelCell.style.gridColumn = '1';
+    labelCell.dataset.date = day.date;
+    labelCell.title = 'Rescan only ' + day.label;
+    labelCell.addEventListener('click', onDayLabelClick);
     labelCell.appendChild(el('span', day.label));
     grid.appendChild(labelCell);
 
     const slotMap = new Map(day.slots.map(slot => [slot.time + '|' + slot.court, slot]));
-    for (const time of appState.slot_times) {
-      for (const court of appState.court_nums) {
+    for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
+      const time = appState.slot_times[timeIndex];
+      for (let courtIndex = 0; courtIndex < appState.court_nums.length; courtIndex++) {
+        const court = appState.court_nums[courtIndex];
         const slot = slotMap.get(time + '|' + court) || {
           time,
           court,
@@ -605,11 +1512,13 @@ function renderGrid() {
         };
         const cell = document.createElement('div');
         const isFirstCourt = court === appState.court_nums[0];
-        cell.className = 'cell day-start ' + cellClass(slot) + (isFirstCourt ? ' time-group-start' : '');
-        cell.title     = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot);
+        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '');
+        cell.title     = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot, day.date);
         cell.dataset.date = day.date;
         cell.dataset.time = slot.time;
         cell.dataset.court = slot.court;
+        cell.style.gridRow = String(row);
+        cell.style.gridColumn = String(2 + timeIndex * courtCount + courtIndex);
         cell.addEventListener('click', onCellClick);
         cell.addEventListener('contextmenu', onCellRightClick);
         grid.appendChild(cell);
@@ -618,19 +1527,20 @@ function renderGrid() {
   }
 }
 
-function cellClass(slot) {
-  if (slot.mine) return 's-mine';
+function cellClass(slot, dateStr) {
+  if (slot.mine) return 's-mine' + (isPastSlot(dateStr, slot.time) ? ' s-past' : '');
   let base = slot.available === true ? 's-open'
            : slot.available === false ? 's-taken'
            : 's-unknown';
   if (slot.watching) base += ' watching';
+  if (isPastSlot(dateStr, slot.time)) base += ' s-past';
   return base;
 }
 
-function cellLabel(slot) {
-  if (slot.mine) return 'Court #' + slot.court + ' · My reservation';
+function cellLabel(slot, dateStr) {
+  if (slot.mine) return 'Court #' + slot.court + ' · My reservation' + (isPastSlot(dateStr, slot.time) ? ' · Past' : '');
   const avail = slot.available === true ? 'Open' : slot.available === false ? 'Taken' : 'Not scanned';
-  return 'Court #' + slot.court + ' · ' + avail + (slot.watching ? ' · Watching' : '');
+  return 'Court #' + slot.court + ' · ' + avail + (isPastSlot(dateStr, slot.time) ? ' · Past' : '') + (slot.watching ? ' · Watching' : '');
 }
 
 function fmtTime(t) {
@@ -664,6 +1574,12 @@ function onCellRightClick(e) {
   toggleMine(date, time, court);
 }
 
+function onDayLabelClick(e) {
+  e.preventDefault();
+  const { date } = e.currentTarget.dataset;
+  if (date) triggerDayRescan(date);
+}
+
 function findSlot(d, t, court) {
   const day = appState.grid.find(x => x.date === d);
   return day ? day.slots.find(s => s.time === t && s.court === court) : null;
@@ -676,6 +1592,10 @@ async function toggleWatch(date, time, court) {
   renderGrid();
   toast(slot.watching ? 'Watching ' + time + ' Court #' + court : 'Unwatched');
   const watched = appState.grid.flatMap(d => d.slots.filter(s => s.watching).map(s => ({ date: d.date, time: s.time, court: s.court })));
+  const todayStr = localToday();
+  const hasFutureWatched = watched.some(s => s.date >= todayStr);
+  appState.watched_slots_updated_at = hasFutureWatched ? new Date().toISOString() : null;
+  updateNextScanDisplay();
   await apiFetch('/watch', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -707,51 +1627,272 @@ function toast(msg) {
 }
 
 async function forceScan() {
-  const btn = document.getElementById('btn-scan-now');
-  btn.innerHTML = '<span class="spinner"></span> Scanning…';
-  btn.disabled = true;
+  if (isFullScanBusy() || appState.pending_full_scan) {
+    toast('A scan is already running');
+    addProgressLog(
+      'Ad-hoc scan not started',
+      'The page did not submit a new full scan because a full scan is already running or already queued.'
+    );
+    renderScanButton();
+    return;
+  }
+  // Cancel any pending missed rescan — a full scan covers those dates
+  if (_missedRescanTimer) {
+    clearTimeout(_missedRescanTimer);
+    _missedRescanTimer = null;
+    _missedRescanAt = null;
+    addProgressLog(
+      'Canceled pending partial rescan',
+      'The page canceled the waiting ad-hoc partial rescan because a full scan was requested instead.'
+    );
+  }
+  const queueAfterPartial = currentScanKind() === 'missed_rescan' && !!appState.scan_started_at;
+  if (!queueAfterPartial) {
+    _missedRescanActive = false;
+    _manualScanPending = true;
+    _localScanRequestedAt = new Date().toISOString();
+  }
+  renderScanStatus();
+  renderScanButton();
+  updateNextScanDisplay();
   const prevLastScanned = appState.last_scanned;
+  addProgressLog(
+    queueAfterPartial ? 'Queueing ad-hoc full scan after partial rescan' : 'Requesting ad-hoc scan',
+    queueAfterPartial
+      ? 'Sending POST /force-scan while an ad-hoc partial rescan is already running. The backend should queue the full scan to run next.'
+      : 'Sending POST /force-scan. The UI will poll GET /state every 30 seconds for up to 3 minutes.'
+  );
   try {
     const r = await apiFetch('/force-scan', { method: 'POST' });
     if (r.status === 202) {
-      toast('Scan started — refreshing in ~2 min');
+      const data = await r.json().catch(() => ({}));
+      const queuedAfterPartial = !!data.queued_after_partial;
+      if (queuedAfterPartial) {
+        appState.pending_full_scan = true;
+        _manualScanPending = false;
+        _localScanRequestedAt = null;
+        toast('Full scan queued after partial rescan');
+        addProgressLog(
+          'Ad-hoc full scan queued',
+          'POST /force-scan returned 202 and the backend queued a full scan to start after the current ad-hoc partial rescan finishes.'
+        );
+      } else {
+        toast('Scan started — refreshing in ~2 min');
+        addProgressLog(
+          'Ad-hoc scan accepted',
+          'POST /force-scan returned 202. Waiting for GET /state to report a newer last_scanned timestamp.'
+        );
+      }
+      renderScanStatus();
+      renderScanButton();
+      updateNextScanDisplay();
       // Poll every 30s for up to 3 minutes, stop when last_scanned changes
       const deadline = Date.now() + 3 * 60 * 1000;
+      let lastSeenScanned = prevLastScanned;
+      let partialCompletionSeen = false;
       const poll = setInterval(async () => {
         try {
           const pr = await apiFetch('/state');
           if (!pr.ok) return;
           const data = await pr.json();
-          if (data.last_scanned && data.last_scanned !== prevLastScanned) {
+          appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
+          appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
+          appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
+          appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
+          appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
+          appState.app_version = data.app_version || appState.app_version || null;
+          appState.scan_started_at = data.scan_started_at || null;
+          appState.scan_started_kind = data.scan_started_kind || null;
+          appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
+          appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
+          appState.pending_full_scan = !!data.pending_full_scan;
+          renderScanStatus();
+          renderScanButton();
+          renderVersionInfo();
+          updateNextScanDisplay();
+          if (data.last_scanned && data.last_scanned !== lastSeenScanned) {
+            if (queueAfterPartial && !partialCompletionSeen && data.last_scan_kind === 'missed_rescan') {
+              partialCompletionSeen = true;
+              lastSeenScanned = data.last_scanned;
+              if (!data.scan_started_at && !data.pending_full_scan) {
+                appState.pending_full_scan = true;
+              }
+              addProgressLog(
+                'Partial rescan finished; waiting for queued full scan',
+                'GET /state reported a partial-rescan completion at ' + data.last_scanned + '. The UI is still waiting for the queued ad-hoc full scan to finish.'
+              );
+              renderScanStatus();
+              renderScanButton();
+              updateNextScanDisplay();
+              return;
+            }
             clearInterval(poll);
+            _manualScanPending = false;
+            _localScanRequestedAt = null;
+            appState.pending_full_scan = !!data.pending_full_scan;
+            addProgressLog(
+              'Ad-hoc scan completed',
+              'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
+            );
             appState = data;
+            appState.app_version = appState.app_version || null;
+            appState.watched_slots_updated_at = appState.watched_slots_updated_at || null;
+            appState.pending_partial_rescan_dates = Array.isArray(appState.pending_partial_rescan_dates) ? appState.pending_partial_rescan_dates : [];
+            appState.pending_partial_rescan_at = appState.pending_partial_rescan_at || null;
+            appState.incomplete_dates = Array.isArray(appState.incomplete_dates) ? appState.incomplete_dates : [];
+            appState.scan_completion_status = appState.scan_completion_status || null;
+            appState.last_scan_started_at = appState.last_scan_started_at || null;
+            if (!appState.last_scan_kind) appState.last_scan_kind = null;
+            appState.pending_full_scan = !!appState.pending_full_scan;
             appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
             if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) appState.court_nums = ['6', '4', '5'];
             if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
             renderGrid();
-            document.getElementById('last-scanned').textContent =
-              'Last scan: ' + new Date(appState.last_scanned).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            renderScanStatus();
+            renderScanButton();
+            renderVersionInfo();
             toast('Scan complete');
-            btn.textContent = 'Scan Now';
-            btn.disabled = false;
+            updateNextScanDisplay();
           } else if (Date.now() >= deadline) {
             clearInterval(poll);
+            _manualScanPending = false;
+            _localScanRequestedAt = null;
             toast('Scan may still be running — refresh manually');
-            btn.textContent = 'Scan Now';
-            btn.disabled = false;
+            addProgressLog(
+              'Ad-hoc scan still pending',
+              'Timed out after 3 minutes waiting for GET /state to show a new last_scanned timestamp.'
+            );
+            renderScanStatus();
+            renderScanButton();
+            updateNextScanDisplay();
           }
         } catch (_) {}
       }, 30 * 1000);
     } else {
       const data = await r.json().catch(() => ({}));
       toast('Error: ' + (data.error || r.status));
-      btn.textContent = 'Scan Now';
-      btn.disabled = false;
+      _manualScanPending = false;
+      _localScanRequestedAt = null;
+      appState.pending_full_scan = !!appState.pending_full_scan && queueAfterPartial;
+      addProgressLog('Ad-hoc scan request failed', 'POST /force-scan returned status ' + (data.error || r.status) + '.');
+      renderScanStatus();
+      renderScanButton();
+      updateNextScanDisplay();
     }
   } catch (e) {
-    btn.textContent = 'Scan Now';
-    btn.disabled = false;
+    _manualScanPending = false;
+    _localScanRequestedAt = null;
+    appState.pending_full_scan = false;
+    toast('Error: ' + e.message);
+    addProgressLog('Ad-hoc scan request failed', e.message || 'Unknown error.');
+    renderScanStatus();
+    renderScanButton();
+    updateNextScanDisplay();
   }
+}
+
+async function triggerDayRescan(dateStr) {
+  if (currentScanStartedAt() || appState.pending_full_scan) {
+    toast('Wait for the current scan to finish');
+    addProgressLog(
+      'Day rescan not started',
+      'The page did not submit a one-day rescan for ' + dateStr + ' because another scan is already running or a full scan is queued.'
+    );
+    return;
+  }
+  if (_missedRescanTimer) {
+    clearTimeout(_missedRescanTimer);
+    _missedRescanTimer = null;
+    _missedRescanAt = null;
+    addProgressLog(
+      'Canceled pending partial rescan',
+      'The page canceled the waiting partial rescan because you clicked the date row for ' + dateStr + '.'
+    );
+    renderScanStatus();
+    renderScanButton();
+    updateNextScanDisplay();
+  }
+
+  _missedRescanActive = true;
+  _localScanRequestedAt = new Date().toISOString();
+  renderScanStatus();
+  renderScanButton();
+  updateNextScanDisplay();
+  const prevLastScanned = appState.last_scanned;
+  addProgressLog(
+    'Requesting day rescan',
+    'Sending POST /force-scan for ' + dateStr + ' after clicking its date row. The UI will poll GET /state every 20 seconds for up to 5 minutes.'
+  );
+  try {
+    const r = await apiFetch('/force-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates: [dateStr] }),
+    });
+    if (r.status !== 202) {
+      _missedRescanActive = false;
+      _localScanRequestedAt = null;
+      addProgressLog('Day rescan request failed', 'POST /force-scan returned status ' + r.status + '.');
+      renderScanStatus();
+      renderScanButton();
+      updateNextScanDisplay();
+      return;
+    }
+  } catch (e) {
+    _missedRescanActive = false;
+    _localScanRequestedAt = null;
+    addProgressLog('Day rescan request failed', e.message || 'Unknown error.');
+    renderScanStatus();
+    renderScanButton();
+    updateNextScanDisplay();
+    return;
+  }
+
+  const deadline = Date.now() + 5 * 60 * 1000;
+  const poll = setInterval(async () => {
+    try {
+      const pr = await apiFetch('/state');
+      if (!pr.ok) return;
+      const data = await pr.json();
+      appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
+      appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
+      appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
+      appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
+      appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
+      appState.app_version = data.app_version || appState.app_version || null;
+      appState.scan_started_at = data.scan_started_at || null;
+      appState.scan_started_kind = data.scan_started_kind || null;
+      appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
+      appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
+      appState.pending_full_scan = !!data.pending_full_scan;
+      renderScanStatus();
+      renderScanButton();
+      renderVersionInfo();
+      updateNextScanDisplay();
+      if (data.last_scanned && data.last_scanned !== prevLastScanned) {
+        clearInterval(poll);
+        _missedRescanActive = false;
+        _localScanRequestedAt = null;
+        addProgressLog(
+          'Day rescan completed',
+          'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
+        );
+        applyPartialUpdate([dateStr], data);
+        toast('Day rescan complete');
+      } else if (Date.now() >= deadline) {
+        clearInterval(poll);
+        _missedRescanActive = false;
+        _localScanRequestedAt = null;
+        addProgressLog(
+          'Day rescan still pending',
+          'Timed out after 5 minutes waiting for GET /state to show a new last_scanned timestamp.'
+        );
+        renderScanStatus();
+        renderScanButton();
+        updateNextScanDisplay();
+      }
+    } catch (_) {}
+  }, 20 * 1000);
 }
 
 async function setFrequency(val) {
@@ -772,6 +1913,7 @@ async function setFrequency(val) {
     const data = await r.json();
     appState.scan_interval_hours = data.scan_interval_hours;
     toast('Scan frequency updated');
+    updateNextScanDisplay();
   } catch (e) {
     freqSelect.value = prev;
     toast('Error: ' + e.message);
