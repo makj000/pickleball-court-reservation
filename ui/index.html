@@ -47,13 +47,15 @@
       color: #64748b;
     }
     .rec-link {
-      font-size: 0.72rem; font-weight: 600; color: #2563eb;
-      text-decoration: none; white-space: nowrap;
-      padding: 4px 8px; border-radius: 999px;
-      background: #dbeafe;
-      border: 1px solid #93c5fd;
+      font-size: 0.74rem;
+      font-weight: 600;
+      color: #2563eb;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      white-space: nowrap;
+      margin-right: 10px;
     }
-    .rec-link:hover { background: #bfdbfe; }
+    .rec-link:hover { color: #1d4ed8; }
     .spacer { flex: 1 1 12px; }
     .scan-summary {
       display: grid;
@@ -91,12 +93,12 @@
     .mode-btn {
       padding: 5px 13px; font-size: 0.75rem; font-weight: 600;
       border: none; background: white; cursor: pointer; color: #6b7280;
-      transition: background 0.15s, color 0.15s;
+      transition: background 0.15s, color 0.15s, box-shadow 0.15s;
     }
-    #btn-watch { background: #fed7aa; color: #9a3412; border: 1px solid #ea580c; }
-    .mode-btn.active-watch { background: #ea580c; color: white; border-color: #ea580c; }
-    #btn-mine { background: #bfdbfe; color: #1e40af; border: 1px solid #3b82f6; }
-    .mode-btn.active-mine  { background: #2563eb; color: white; border-color: #2563eb; }
+    #btn-watch { background: #ffffff; color: #9a3412; border: 1px solid #ea580c; }
+    .mode-btn.active-watch { background: #ffffff; color: #9a3412; border-color: #ea580c; box-shadow: inset 0 0 0 1px #ea580c; }
+    #btn-mine { background: #ffffff; color: #1e40af; border: 1px solid #3b82f6; }
+    .mode-btn.active-mine  { background: #ffffff; color: #1e40af; border-color: #3b82f6; box-shadow: inset 0 0 0 1px #3b82f6; }
     .mode-hint {
       font-size: 0.69rem;
       color: #6b7280;
@@ -140,11 +142,6 @@
       flex: 1;
       min-height: 0;
       min-width: 0;
-    }
-    .grid-topbar {
-      display: flex;
-      justify-content: flex-start;
-      padding-bottom: 10px;
     }
     #content-shell {
       flex: 1;
@@ -230,19 +227,29 @@
       position: relative;
       z-index: 1;
     }
+    .cell::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      display: none;
+    }
     .cell:hover { transform: scale(1.08); box-shadow: 0 2px 8px rgba(0,0,0,0.18); z-index: 1; }
     .cell:active { transform: scale(0.95); }
 
     .s-unknown { background: #ffffff; border: 1px solid #e5e7eb; }
     .s-taken   { background: #d1d5db; }
     .s-open    { background: #bbf7d0; }
-    .s-mine    { background: #bfdbfe; border-color: #3b82f6; }
-    .s-mine::after { content: ""; position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: #2563eb; }
-
-    .watching { border-color: #ea580c !important; }
-    .watching.s-open { background: #4ade80; animation: pulse-open 2s ease-in-out infinite; }
-    .watching.s-taken { background: #fed7aa; }
-    .watching.s-unknown { background: #fef3c7; }
+    .mine { border-color: #3b82f6; }
+    .watching { border-color: #ea580c; }
+    .mine.watching { border-color: #3b82f6; }
+    .mine.watching::after {
+      display: block;
+      inset: 3px;
+      box-shadow: inset 0 0 0 2px #ea580c;
+    }
+    .watching.s-open { animation: pulse-open 2s ease-in-out infinite; }
     .s-past {
       opacity: 0.4;
       filter: saturate(0.45) grayscale(0.15);
@@ -485,6 +492,7 @@
   </label>
   <span id="next-scan"></span>
   <div class="spacer"></div>
+  <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
   <div class="mode-controls">
     <div class="mode-control">
       <div class="mode-toggle">
@@ -507,7 +515,7 @@
   <div class="legend-item"><div class="swatch" style="background:#ffffff; border:1px solid #e5e7eb;"></div>Not scanned</div>
   <div class="legend-item"><div class="swatch" style="background:#d1d5db;"></div>Taken</div>
   <div class="legend-item"><div class="swatch" style="background:#bbf7d0;"></div>Open</div>
-  <div class="legend-item"><div class="swatch" style="background:#fed7aa; border-color:#ea580c;"></div>Watching (taken)</div>
+  <div class="legend-item"><div class="swatch" style="background:#ffffff; border-color:#ea580c;"></div>Watching (taken)</div>
   <div class="legend-item"><div class="swatch" style="background:#4ade80; border-color:#ea580c;"></div>Watching (open!)</div>
   <div class="legend-item"><div class="swatch" style="background:#bfdbfe; border-color:#3b82f6;"></div>Mine</div>
   <span class="hint">court display = #4, #5, #6 &nbsp;·&nbsp; booking preference = #6, #4, #5</span>
@@ -516,9 +524,6 @@
 <div id="content-shell" class="dock-right">
   <!-- Grid -->
   <div class="grid-wrapper">
-    <div class="grid-topbar">
-      <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
-    </div>
     <div class="grid" id="grid"></div>
   </div>
 
@@ -1528,19 +1533,22 @@ function renderGrid() {
 }
 
 function cellClass(slot, dateStr) {
-  if (slot.mine) return 's-mine' + (isPastSlot(dateStr, slot.time) ? ' s-past' : '');
   let base = slot.available === true ? 's-open'
            : slot.available === false ? 's-taken'
            : 's-unknown';
+  if (slot.mine) base += ' mine';
   if (slot.watching) base += ' watching';
   if (isPastSlot(dateStr, slot.time)) base += ' s-past';
   return base;
 }
 
 function cellLabel(slot, dateStr) {
-  if (slot.mine) return 'Court #' + slot.court + ' · My reservation' + (isPastSlot(dateStr, slot.time) ? ' · Past' : '');
   const avail = slot.available === true ? 'Open' : slot.available === false ? 'Taken' : 'Not scanned';
-  return 'Court #' + slot.court + ' · ' + avail + (isPastSlot(dateStr, slot.time) ? ' · Past' : '') + (slot.watching ? ' · Watching' : '');
+  let label = 'Court #' + slot.court + ' · ' + avail;
+  if (slot.mine) label += ' · My reservation';
+  if (slot.watching) label += ' · Watching';
+  if (isPastSlot(dateStr, slot.time)) label += ' · Past';
+  return label;
 }
 
 function fmtTime(t) {
