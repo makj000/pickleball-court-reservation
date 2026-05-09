@@ -1090,6 +1090,14 @@ def _run_scheduled_worker() -> None:
         save_state(state)
 
     watched_times = _future_watched_time_map(state)
+
+    # Always include 8 AM and 9 AM for the date 14 days out
+    target_14 = (date.today() + timedelta(days=14)).isoformat()
+    existing_14 = set(watched_times.get(target_14, []))
+    merged_14 = [t for t in SLOT_TIMES if t in (existing_14 | {"8:00 AM", "9:00 AM"})]
+    if merged_14:
+        watched_times[target_14] = merged_14
+
     if not watched_times:
         print("No future watched slots. Skipping cron scan.")
         return
@@ -1309,82 +1317,12 @@ def _run_async_worker() -> None:
     notify(msg)
 
 
-# ── Targeted daily scan ───────────────────────────────────────────────────────
-
-TARGETED_DAILY_TIMES = ["8:00 AM", "9:00 AM"]
-
-
-def _run_targeted_daily_scan() -> None:
-    """Scan 8 AM and 9 AM slots for the date exactly 14 days from today."""
-    target = date.today() + timedelta(days=14)
-    target_times = TARGETED_DAILY_TIMES
-    times_by_date = {target.isoformat(): target_times}
-
-    state = load_state()
-    active_scan = _active_scan_started_at(state)
-    if active_scan:
-        print(f"Another scan started at {active_scan.isoformat()}. Skipping.")
-        return
-
-    _auto_watch_upcoming_weekends(state)
-
-    started_at = _utc_now_iso()
-    state["scan_started_at"] = started_at
-    state["scan_started_kind"] = "targeted_daily"
-    save_state(state)
-
-    print(f"Targeted daily scan: {target.isoformat()} for {target_times}…")
-    try:
-        new_avail = asyncio.run(_scan_dates_quick([target], target_times_by_date=times_by_date))
-
-        state = load_state()
-        availability = state.get("availability", {})
-        for date_str, time_map in new_avail.items():
-            day_avail = availability.get(date_str, {})
-            for time_text, court_avail in time_map.items():
-                day_avail[time_text] = _normalize_time_availability(court_avail)
-            availability[date_str] = day_avail
-        state["availability"] = availability
-        state["last_scan_started_at"] = started_at
-        state["last_scanned"] = _utc_now_iso()
-        state["last_scan_kind"] = "targeted_daily"
-
-        newly_open = []
-        watched_set = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
-        for time_text in target_times:
-            for court, is_open in new_avail.get(target.isoformat(), {}).get(time_text, {}).items():
-                if is_open and (target.isoformat(), time_text, court) in watched_set:
-                    newly_open.append(f"{target.isoformat()} {time_text} Court {court}")
-
-        if state.get("scan_started_at") == started_at:
-            state.pop("scan_started_at", None)
-            state.pop("scan_started_kind", None)
-        save_state(state)
-    except Exception:
-        state = load_state()
-        if state.get("scan_started_at") == started_at:
-            state.pop("scan_started_at", None)
-            state.pop("scan_started_kind", None)
-            save_state(state)
-        raise
-
-    if newly_open:
-        notify("Pickleball slot(s) now available:\n" + "\n".join(newly_open))
-    else:
-        print("No open watched slots found in targeted scan.")
-
-
 # ── Lambda handler ────────────────────────────────────────────────────────────
 
 def handler(event, context):
     # Internal: legacy async worker
     if event.get("_async_worker"):
         _run_async_worker()
-        return
-
-    # Internal: daily targeted scan (8 AM & 9 AM, 14 days out)
-    if event.get("_targeted_daily_scan"):
-        _run_targeted_daily_scan()
         return
 
     # Internal: direct scheduled invocation (for testing)
