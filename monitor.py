@@ -248,11 +248,38 @@ def _build_sync_redirect(event) -> dict:
     }
 
 
-# ── SMS ───────────────────────────────────────────────────────────────────────
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+NOTIFY_EMAIL = "kejia.ma@gmail.com"
 
 def send_sms(to: str, message: str) -> None:
     sns = boto3.client("sns", region_name="us-west-2")
     sns.publish(PhoneNumber=to, Message=message)
+
+
+def send_email(to: str, subject: str, body: str) -> None:
+    ses = boto3.client("sesv2", region_name="us-west-2")
+    ses.send_email(
+        FromEmailAddress=to,
+        Destination={"ToAddresses": [to]},
+        Content={"Simple": {
+            "Subject": {"Data": subject},
+            "Body": {"Text": {"Data": body}},
+        }},
+    )
+
+
+def notify(message: str, subject: str = "Pickleball alert") -> None:
+    try:
+        send_sms(NOTIFY_NUMBER, message)
+        print(f"SMS sent: {message}")
+    except Exception as exc:
+        print(f"SMS failed: {exc}")
+    try:
+        send_email(NOTIFY_EMAIL, subject, message)
+        print(f"Email sent to {NOTIFY_EMAIL}.")
+    except Exception as exc:
+        print(f"Email failed: {exc}")
 
 
 def ordinal(n: int) -> str:
@@ -278,6 +305,7 @@ def _empty_state() -> dict:
         "pending_full_scan":   False,
         "scan_started_kind":   None,
         "scan_interval_hours": 1.0,
+        "auto_watched_weekends": [],  # ISO date strings already auto-watched; user removals are respected
     }
 
 
@@ -408,6 +436,11 @@ def _normalize_state(state: dict) -> dict:
         default_court=COURT_PREFERENCE[0],
     )
     normalized["notified_slots"] = _normalize_notified_slots(state.get("notified_slots"))
+    today_str = date.today().isoformat()
+    normalized["auto_watched_weekends"] = sorted(
+        d for d in (state.get("auto_watched_weekends") or [])
+        if isinstance(d, str) and d >= today_str
+    )
     return normalized
 
 
@@ -466,6 +499,48 @@ def _has_future_watched_slots(state: dict) -> bool:
         slot.get("date", "") >= today_str
         for slot in state.get("watched_slots", [])
     )
+
+
+def _upcoming_weekends(n: int = 3) -> list[tuple[date, date]]:
+    today = date.today()
+    days_until_sat = (5 - today.weekday()) % 7  # 0 if today is already Saturday
+    first_sat = today + timedelta(days=days_until_sat)
+    return [(first_sat + timedelta(weeks=i), first_sat + timedelta(weeks=i, days=1)) for i in range(n)]
+
+
+def _auto_watch_upcoming_weekends(state: dict) -> bool:
+    """Add 9 AM slots for the next 3 weekends (once per weekend). Returns True if state was modified."""
+    weekends = _upcoming_weekends(3)
+    auto_watched = set(state.get("auto_watched_weekends") or [])
+    new_dates = [
+        d.isoformat()
+        for sat, sun in weekends
+        for d in (sat, sun)
+        if d.isoformat() not in auto_watched
+    ]
+    if not new_dates:
+        return False
+
+    existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+    new_slots = [
+        {"date": d_str, "time": "9:00 AM", "court": court}
+        for d_str in new_dates
+        for court in COURT_PREFERENCE
+        if (d_str, "9:00 AM", court) not in existing
+    ]
+
+    today_str = date.today().isoformat()
+    state["auto_watched_weekends"] = sorted(
+        (auto_watched | set(new_dates)) - {d for d in auto_watched if d < today_str}
+    )
+    if new_slots:
+        state["watched_slots"] = _normalize_slot_records(
+            state.get("watched_slots", []) + new_slots,
+            expand_legacy=False,
+        )
+        state["watched_slots_updated_at"] = _utc_now_iso()
+        print(f"Auto-watched {len(new_slots)} 9 AM slot(s) for weekends {new_dates}.")
+    return True
 
 
 def _detect_missed_dates(avail: dict) -> list[str]:
@@ -930,8 +1005,10 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         print(f"Another scan started at {active_scan.isoformat()}. Skipping.")
         return
 
+    _auto_watch_upcoming_weekends(state)
+
     today = date.today()
-    targets = [today + timedelta(days=i) for i in range(15)]
+    targets = [today + timedelta(days=i) for i in range(16)]
     started_at = _utc_now_iso()
 
     state["pending_full_scan"] = False
@@ -992,8 +1069,7 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
 
     if newly_open:
         msg = "Pickleball slot(s) now available:\n" + "\n".join(newly_open)
-        send_sms(NOTIFY_NUMBER, msg)
-        print(f"SMS sent: {msg}")
+        notify(msg)
     else:
         print("No newly open watched slots.")
 
@@ -1009,6 +1085,9 @@ def _run_scheduled_worker() -> None:
     if active_scan:
         print(f"Another scheduled scan started at {active_scan.isoformat()}. Skipping.")
         return
+
+    if _auto_watch_upcoming_weekends(state):
+        save_state(state)
 
     watched_times = _future_watched_time_map(state)
     if not watched_times:
@@ -1076,8 +1155,7 @@ def _run_scheduled_worker() -> None:
 
     if newly_open:
         msg = "Pickleball slot(s) now available:\n" + "\n".join(newly_open)
-        send_sms(NOTIFY_NUMBER, msg)
-        print(f"SMS sent: {msg}")
+        notify(msg)
     else:
         print("No newly open watched slots.")
 
@@ -1113,7 +1191,7 @@ def handle_state(event) -> dict:
     mine_set    = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
 
     grid = []
-    for i in range(15):
+    for i in range(16):
         d = today + timedelta(days=i)
         d_str = d.isoformat()
         day_avail = state.get("availability", {}).get(d_str, {})
@@ -1228,8 +1306,7 @@ def _run_async_worker() -> None:
             for s in slots
         ]
         msg = f"Pickleball {DEFAULT_TIME_FILTER} available:\n" + "\n".join(lines)
-    send_sms(NOTIFY_NUMBER, msg)
-    print(f"SMS sent to {NOTIFY_NUMBER}.")
+    notify(msg)
 
 
 # ── Lambda handler ────────────────────────────────────────────────────────────
@@ -1354,5 +1431,4 @@ if __name__ == "__main__":
             for s in slots
         ]
         msg = f"Pickleball {DEFAULT_TIME_FILTER} available:\n" + "\n".join(lines)
-        send_sms(NOTIFY_NUMBER, msg)
-        print(f"  SMS sent to {NOTIFY_NUMBER}.")
+        notify(msg)
