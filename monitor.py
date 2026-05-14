@@ -19,6 +19,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urljoin
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -31,7 +32,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.6"
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 EMAIL    = os.environ["EMAIL"]
@@ -251,6 +252,8 @@ def _build_sync_redirect(event) -> dict:
 # ── Notifications ─────────────────────────────────────────────────────────────
 
 NOTIFY_EMAIL = "kejia.ma@gmail.com"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 def send_sms(to: str, message: str) -> None:
     sns = boto3.client("sns", region_name="us-west-2")
@@ -269,6 +272,27 @@ def send_email(to: str, subject: str, body: str) -> None:
     )
 
 
+def send_telegram(message: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be configured")
+
+    payload = json.dumps({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+    }).encode("utf-8")
+    req = Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=10) as resp:
+        body = resp.read()
+    data = json.loads(body.decode("utf-8"))
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API error: {data}")
+
+
 def notify(message: str, subject: str = "Pickleball alert") -> None:
     try:
         send_sms(NOTIFY_NUMBER, message)
@@ -276,10 +300,72 @@ def notify(message: str, subject: str = "Pickleball alert") -> None:
     except Exception as exc:
         print(f"SMS failed: {exc}")
     try:
+        send_telegram(message)
+        print("Telegram sent.")
+    except Exception as exc:
+        print(f"Telegram failed: {exc}")
+    try:
         send_email(NOTIFY_EMAIL, subject, message)
         print(f"Email sent to {NOTIFY_EMAIL}.")
     except Exception as exc:
         print(f"Email failed: {exc}")
+
+
+def _ordered_open_courts(court_availability: dict[str, bool | None]) -> list[str]:
+    ordered = [court for court in COURT_PREFERENCE if court_availability.get(court) is True]
+    extras = sorted(
+        court
+        for court, is_open in court_availability.items()
+        if is_open is True and court not in COURT_PREFERENCE
+    )
+    return ordered + extras
+
+
+def _alert_lines_for_open_targets(
+    state: dict,
+    scanned_availability: dict[str, dict[str, dict[str, bool | None]]],
+) -> list[str]:
+    watched_set = {
+        (slot["date"], slot["time"], slot["court"])
+        for slot in state.get("watched_slots", [])
+    }
+    auto_book_set = {
+        (slot.get("date"), slot.get("time"))
+        for slot in (state.get("auto_book_slots") or [])
+        if slot.get("date") and slot.get("time")
+    }
+
+    lines: list[str] = []
+    for date_str in sorted(scanned_availability):
+        time_map = scanned_availability[date_str]
+        ordered_times = sorted(
+            time_map,
+            key=lambda t: SLOT_TIMES.index(t) if t in SLOT_TIMES else len(SLOT_TIMES),
+        )
+        for time_text in ordered_times:
+            court_availability = time_map[time_text]
+            open_courts = _ordered_open_courts(court_availability)
+            if not open_courts:
+                continue
+
+            watched_open = [
+                court for court in open_courts
+                if (date_str, time_text, court) in watched_set
+            ]
+            auto_book_open = (date_str, time_text) in auto_book_set
+            if not watched_open and not auto_book_open:
+                continue
+
+            tags = []
+            if watched_open:
+                tags.append("watched " + ", ".join(f"Court {court}" for court in watched_open))
+            if auto_book_open:
+                tags.append("auto-book")
+            lines.append(
+                f"{date_str} {time_text}: open {', '.join(f'Court {court}' for court in open_courts)}"
+                + (f" ({'; '.join(tags)})" if tags else "")
+            )
+    return lines
 
 
 def ordinal(n: int) -> str:
@@ -302,10 +388,13 @@ def _empty_state() -> dict:
         "last_scanned":        None,
         "last_scan_started_at": None,
         "last_scan_kind":      None,
+        "recent_scan_history": [],
         "pending_full_scan":   False,
         "scan_started_kind":   None,
         "scan_interval_hours": 1.0,
         "auto_watched_weekends": [],  # ISO date strings already auto-watched; user removals are respected
+        "auto_watch_weekends_enabled": True,
+        "auto_book_slots":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}] — slots to auto-book
     }
 
 
@@ -412,6 +501,41 @@ def _normalize_state(state: dict) -> dict:
     normalized["last_scanned"] = state.get("last_scanned")
     normalized["last_scan_started_at"] = state.get("last_scan_started_at")
     normalized["last_scan_kind"] = state.get("last_scan_kind") or None
+    recent_scan_history = []
+    for entry in (state.get("recent_scan_history") or [])[:10]:
+        if not isinstance(entry, dict):
+            continue
+        targets = []
+        for target in (entry.get("targets") or []):
+            if not isinstance(target, dict):
+                continue
+            target_date = target.get("date")
+            times = [t for t in (target.get("times") or []) if t in SLOT_TIMES]
+            if not target_date or not times:
+                continue
+            raw_courts = target.get("courts") if isinstance(target.get("courts"), dict) else {}
+            courts: dict[str, dict[str, bool | None]] = {}
+            for time_text in times:
+                court_avail = raw_courts.get(time_text)
+                if isinstance(court_avail, dict):
+                    normalized_courts: dict[str, bool | None] = {}
+                    for court in COURT_PREFERENCE:
+                        raw = court_avail.get(court)
+                        normalized_courts[court] = None if raw is None else bool(raw)
+                    courts[time_text] = normalized_courts
+            target_entry = {"date": target_date, "times": times}
+            if courts:
+                target_entry["courts"] = courts
+            targets.append(target_entry)
+        recent_scan_history.append({
+            "kind": entry.get("kind") or None,
+            "started_at": entry.get("started_at"),
+            "completed_at": entry.get("completed_at"),
+            "status": entry.get("status") or "completed",
+            "error": entry.get("error"),
+            "targets": targets,
+        })
+    normalized["recent_scan_history"] = recent_scan_history
     normalized["pending_full_scan"] = bool(state.get("pending_full_scan"))
     normalized["scan_interval_hours"] = state.get("scan_interval_hours", 1.0)
     if state.get("scan_started_at"):
@@ -441,7 +565,81 @@ def _normalize_state(state: dict) -> dict:
         d for d in (state.get("auto_watched_weekends") or [])
         if isinstance(d, str) and d >= today_str
     )
+    raw_enabled = state.get("auto_watch_weekends_enabled")
+    normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
+    # Normalize auto_book_slots: {date, time} pairs, future only, valid times only
+    auto_book_slots = []
+    seen_ab: set[tuple[str, str]] = set()
+    for slot in (state.get("auto_book_slots") or []):
+        if not isinstance(slot, dict):
+            continue
+        slot_date = slot.get("date")
+        slot_time = slot.get("time")
+        if not slot_date or not slot_time:
+            continue
+        if slot_date < today_str or slot_time not in SLOT_TIMES:
+            continue
+        key = (slot_date, slot_time)
+        if key in seen_ab:
+            continue
+        seen_ab.add(key)
+        auto_book_slots.append({"date": slot_date, "time": slot_time})
+    normalized["auto_book_slots"] = auto_book_slots
     return normalized
+
+
+def _history_targets_from_map(targets_by_date: dict[str, list[str]]) -> list[dict]:
+    normalized_targets = []
+    for date_str, times in sorted(targets_by_date.items()):
+        ordered_times = [t for t in SLOT_TIMES if t in set(times)]
+        if ordered_times:
+            normalized_targets.append({"date": date_str, "times": ordered_times})
+    return normalized_targets
+
+
+def _attach_history_results(targets: list[dict], new_avail: dict) -> list[dict]:
+    """Return targets with per-time court results filled from new_avail."""
+    enriched = []
+    for target in targets:
+        date_str = target.get("date")
+        times = target.get("times") or []
+        new_target = {"date": date_str, "times": list(times)}
+        day = (new_avail or {}).get(date_str) or {}
+        courts: dict[str, dict[str, bool | None]] = {}
+        for time_text in times:
+            court_avail = day.get(time_text)
+            if not isinstance(court_avail, dict):
+                continue
+            courts[time_text] = {
+                c: (None if court_avail.get(c) is None else bool(court_avail.get(c)))
+                for c in COURT_PREFERENCE
+            }
+        if courts:
+            new_target["courts"] = courts
+        enriched.append(new_target)
+    return enriched
+
+
+def _record_scan_history(
+    state: dict,
+    *,
+    kind: str,
+    started_at: str | None,
+    completed_at: str | None,
+    status: str,
+    targets: list[dict],
+    error: str | None = None,
+) -> None:
+    history = list(state.get("recent_scan_history") or [])
+    history.insert(0, {
+        "kind": kind,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "status": status,
+        "error": error,
+        "targets": targets,
+    })
+    state["recent_scan_history"] = history[:10]
 
 
 def load_state() -> dict:
@@ -510,6 +708,8 @@ def _upcoming_weekends(n: int = 3) -> list[tuple[date, date]]:
 
 def _auto_watch_upcoming_weekends(state: dict) -> bool:
     """Add 9 AM slots for the next 3 weekends (once per weekend). Returns True if state was modified."""
+    if not state.get("auto_watch_weekends_enabled", True):
+        return False
     weekends = _upcoming_weekends(3)
     auto_watched = set(state.get("auto_watched_weekends") or [])
     new_dates = [
@@ -694,6 +894,133 @@ async def get_courts_from_modal(page) -> dict[str, bool]:
     return court_availability
 
 
+async def book_slot(page, target_date: date, time_text: str, court: str) -> bool:
+    """Navigate to the slot, open the modal, select the court, and confirm booking.
+
+    Returns True if the booking succeeded, False otherwise.
+    The caller is responsible for navigating to the correct date first.
+    """
+    print(f"  Attempting to book {target_date.isoformat()} {time_text} Court {court}…")
+    await select_date(page, target_date)
+    visible_times = set(await collect_all_slot_buttons(page))
+    if time_text not in visible_times:
+        print(f"  Time slot {time_text} not visible — possibly already taken.")
+        return False
+
+    btn = page.locator("button").filter(has_text=re.compile(re.escape(time_text)))
+    try:
+        await btn.first.click(timeout=4_000)
+    except PwTimeout:
+        print(f"  Could not click time slot button for {time_text}.")
+        return False
+
+    try:
+        dialog = page.locator('[role="dialog"]').first
+        await dialog.wait_for(timeout=5_000)
+        await page.wait_for_timeout(300)
+    except PwTimeout:
+        print(f"  Dialog did not appear for {time_text}.")
+        await page.keyboard.press("Escape")
+        return False
+
+    # Select the court from the combobox dropdown
+    court_combo = dialog.locator('button[role="combobox"]').last
+    selected_court = False
+    if await court_combo.count() > 0:
+        try:
+            await court_combo.click(timeout=2_000)
+            await page.wait_for_timeout(250)
+            options = page.locator('[role="option"]')
+            option_count = await options.count()
+            for i in range(option_count):
+                opt = options.nth(i)
+                text = (await opt.inner_text()).strip()
+                match = COURT_RE.match(text)
+                if match and _normalize_court_number(match.group(1)) == court:
+                    await opt.click(timeout=2_000)
+                    await page.wait_for_timeout(300)
+                    selected_court = True
+                    break
+            if not selected_court:
+                # Court not in dropdown options — not available
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(150)
+                print(f"  Court {court} not available in dropdown for {time_text}.")
+                try:
+                    close = page.locator(
+                        '[role="dialog"] button[aria-label*="close" i], '
+                        '[role="dialog"] button[aria-label*="dismiss" i], '
+                        '[role="dialog"] button:text-is("Cancel"), '
+                        '[role="dialog"] button:text-is("Close")'
+                    ).first
+                    await close.click(timeout=3_000)
+                except PwTimeout:
+                    await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+                return False
+        except PwTimeout:
+            print(f"  Timeout interacting with court combobox for {time_text}.")
+            await page.keyboard.press("Escape")
+            try:
+                close = page.locator(
+                    '[role="dialog"] button[aria-label*="close" i], '
+                    '[role="dialog"] button[aria-label*="dismiss" i], '
+                    '[role="dialog"] button:text-is("Cancel"), '
+                    '[role="dialog"] button:text-is("Close")'
+                ).first
+                await close.click(timeout=3_000)
+            except PwTimeout:
+                await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
+            return False
+
+    # Click the Reserve / Book button in the dialog
+    reserve_btn = dialog.locator(
+        'button:text-is("Reserve"), button:text-is("Book"), '
+        'button:text-is("Reserve Now"), button:text-is("Book Now"), '
+        'button[type="submit"]'
+    ).first
+    try:
+        await reserve_btn.wait_for(timeout=4_000)
+        await reserve_btn.click(timeout=4_000)
+        await page.wait_for_timeout(1_500)
+    except PwTimeout:
+        print(f"  Could not find or click Reserve button for {time_text} Court {court}.")
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(300)
+        return False
+
+    # Check for a confirmation dialog / success indicator
+    # rec.us may show a confirmation step — look for a "Confirm" button or success message
+    try:
+        confirm_btn = page.locator(
+            'button:text-is("Confirm"), button:text-is("Confirm Booking"), '
+            'button:text-is("Complete Booking"), button:text-is("Yes")'
+        ).first
+        if await confirm_btn.count() > 0:
+            await confirm_btn.click(timeout=4_000)
+            await page.wait_for_timeout(1_500)
+    except PwTimeout:
+        pass
+
+    # Dismiss any remaining dialog
+    try:
+        close = page.locator(
+            '[role="dialog"] button[aria-label*="close" i], '
+            '[role="dialog"] button[aria-label*="dismiss" i], '
+            '[role="dialog"] button:text-is("Done"), '
+            '[role="dialog"] button:text-is("Close")'
+        ).first
+        if await close.count() > 0:
+            await close.click(timeout=3_000)
+    except PwTimeout:
+        await page.keyboard.press("Escape")
+    await page.wait_for_timeout(300)
+
+    print(f"  Booked {target_date.isoformat()} {time_text} Court {court}.")
+    return True
+
+
 async def scan_day(page, target: date, target_time: str | None = None) -> list[dict]:
     """Full scan with court details — for the /scan endpoint."""
     label = target.strftime("%a %b %-d")
@@ -772,20 +1099,33 @@ async def scan_day_quick(
     results: dict[str, dict[str, bool | None]] = {}
 
     for time_text in requested_times:
+        slot_t0 = time.monotonic()
         if time_text not in visible_times:
             results[time_text] = _empty_court_availability(False)
+            slot_elapsed = time.monotonic() - slot_t0
+            print(f"    {time_text} scanned in {slot_elapsed:.1f}s -> not visible")
             continue
         btn = page.locator("button").filter(has_text=re.compile(re.escape(time_text)))
         try:
             await btn.first.click(timeout=4_000)
         except PwTimeout:
             results[time_text] = _empty_court_availability(None)
+            slot_elapsed = time.monotonic() - slot_t0
+            print(f"    {time_text} scanned in {slot_elapsed:.1f}s -> click timeout")
             continue
         court_availability = await get_courts_from_modal(page)
         results[time_text] = (
             _normalize_time_availability(court_availability)
             if any(court_availability.values())
             else _empty_court_availability(None)
+        )
+        slot_elapsed = time.monotonic() - slot_t0
+        open_courts = [c for c, v in results[time_text].items() if v is True]
+        null_courts = [c for c, v in results[time_text].items() if v is None]
+        closed_courts = [c for c, v in results[time_text].items() if v is False]
+        print(
+            f"    {time_text} scanned in {slot_elapsed:.1f}s -> "
+            f"open={open_courts} null={null_courts} closed={closed_courts}"
         )
 
     print(f"{len(results)} watched slot(s): {', '.join(requested_times)}")
@@ -859,33 +1199,109 @@ async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
 async def _scan_dates_quick(
     targets: list[date],
     target_times_by_date: dict[str, list[str]] | None = None,
-) -> dict[str, dict[str, dict[str, bool | None]]]:
-    """Returns {date_iso: {time: {court: available}}}."""
+    auto_book_slots: list[dict] | None = None,
+) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
+    """Returns (availability, booked_slots).
+
+    availability: {date_iso: {time: {court: available}}}
+    booked_slots: list of {date, time, court} that were successfully booked this session.
+    """
+    today_str = date.today().isoformat()
+    # Build a lookup: {(date_iso, time_text)} for quick membership check
+    auto_book_set: set[tuple[str, str]] = set()
+    if auto_book_slots:
+        for ab in auto_book_slots:
+            ab_date = ab.get("date", "")
+            ab_time = ab.get("time", "")
+            if ab_date >= today_str and ab_time in SLOT_TIMES:
+                auto_book_set.add((ab_date, ab_time))
+
     async with async_playwright() as pw:
         browser, page = await _new_page(pw)
         await login(page)
         results: dict[str, dict[str, dict[str, bool | None]]] = {}
+        booked: list[dict] = []
+
         for target in targets:
-            print(f"  Quick scan {target.isoformat()}…")
+            date_iso = target.isoformat()
+            print(f"  Quick scan {date_iso}…")
             try:
                 target_times = None
                 if target_times_by_date is not None:
-                    target_times = target_times_by_date.get(target.isoformat(), [])
-                results[target.isoformat()] = await scan_day_quick(page, target, target_times=target_times)
+                    target_times = target_times_by_date.get(date_iso, [])
+                avail = await scan_day_quick(page, target, target_times=target_times)
+                results[date_iso] = avail
+
+                # Auto-book: check if any auto-book slot for this date is now available
+                for time_text, court_avail in avail.items():
+                    if (date_iso, time_text) not in auto_book_set:
+                        continue
+                    best_court = _preferred_open_court(court_avail)
+                    if best_court is None:
+                        continue
+                    # Attempt to book in preference order
+                    for court in COURT_PREFERENCE:
+                        if court_avail.get(court) is not True:
+                            continue
+                        try:
+                            success = await book_slot(page, target, time_text, court)
+                        except Exception as book_exc:
+                            print(f"  Booking error for {date_iso} {time_text} Court {court}: {book_exc}")
+                            success = False
+                        if success:
+                            booked.append({"date": date_iso, "time": time_text, "court": court})
+                            auto_book_set.discard((date_iso, time_text))  # remove so we don't double-book
+                            # Mark court as taken in availability so caller sees the updated state
+                            for c in results[date_iso].get(time_text, {}):
+                                results[date_iso][time_text][c] = False
+                            break
             except Exception as exc:
-                print(f"  Error scanning {target.isoformat()}: {exc}")
+                print(f"  Error scanning {date_iso}: {exc}")
                 fallback_times = (
-                    target_times_by_date.get(target.isoformat(), [])
+                    target_times_by_date.get(date_iso, [])
                     if target_times_by_date is not None
                     else SLOT_TIMES
                 )
-                results[target.isoformat()] = {
+                results[date_iso] = {
                     t: _empty_court_availability(None)
                     for t in fallback_times
                     if t in SLOT_TIMES
                 }
         await browser.close()
-    return results
+    return results, booked
+
+
+# ── Auto-book helpers ─────────────────────────────────────────────────────────
+
+def _apply_booked_slots(state: dict, booked_slots: list[dict]) -> None:
+    """Update state after successful bookings: remove from auto_book_slots, add to my_reservations."""
+    if not booked_slots:
+        return
+    booked_keys: set[tuple[str, str]] = {(b["date"], b["time"]) for b in booked_slots}
+    state["auto_book_slots"] = [
+        ab for ab in (state.get("auto_book_slots") or [])
+        if (ab.get("date"), ab.get("time")) not in booked_keys
+    ]
+    existing_reservations = {
+        (r["date"], r["time"], r["court"])
+        for r in (state.get("my_reservations") or [])
+    }
+    for b in booked_slots:
+        key = (b["date"], b["time"], b["court"])
+        if key not in existing_reservations:
+            state.setdefault("my_reservations", []).append(
+                {"date": b["date"], "time": b["time"], "court": b["court"]}
+            )
+            existing_reservations.add(key)
+
+
+def _notify_booked_slots(booked_slots: list[dict]) -> None:
+    """Send SMS/email notification for each successfully booked slot."""
+    if not booked_slots:
+        return
+    lines = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked_slots]
+    msg = "Auto-booked pickleball slot(s):\n" + "\n".join(lines)
+    notify(msg, subject="Pickleball auto-booking confirmed")
 
 
 # ── Scheduled worker ──────────────────────────────────────────────────────────
@@ -903,6 +1319,7 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
             continue
     if not targets:
         return
+    history_targets = _history_targets_from_map({d_str: SLOT_TIMES[:] for d_str in date_strs})
 
     state = load_state()
     if _active_scan_started_at(state):
@@ -921,8 +1338,9 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
     save_state(state)
 
     print(f"Rescanning {len(targets)} missed date(s): {date_strs}")
+    auto_book_slots = state.get("auto_book_slots") or []
     try:
-        new_avail = asyncio.run(_scan_dates_quick(targets))
+        new_avail, booked_slots = asyncio.run(_scan_dates_quick(targets, auto_book_slots=auto_book_slots))
         state = load_state()
         availability = state.get("availability", {})
         availability.update(new_avail)
@@ -930,11 +1348,27 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "missed_rescan"
+        _record_scan_history(
+            state,
+            kind="missed_rescan",
+            started_at=started_at,
+            completed_at=state["last_scanned"],
+            status="completed",
+            targets=_attach_history_results(history_targets, new_avail),
+        )
+        open_target_lines = _alert_lines_for_open_targets(state, new_avail)
+        _apply_booked_slots(state, booked_slots)
         pending_full_scan = bool(state.get("pending_full_scan"))
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
         save_state(state)
+        _notify_booked_slots(booked_slots)
+        if open_target_lines:
+            msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
+            notify(msg)
+        else:
+            print("No open watched or auto-book slots in this scan.")
         print(f"Rescan complete for: {date_strs}")
         if pending_full_scan:
             state = load_state()
@@ -942,13 +1376,37 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
             save_state(state)
             print("Queued full scan will start after partial rescan.")
             _run_full_refresh_worker(force=True)
-    except Exception:
+    except Exception as exc:
         state = load_state()
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
+            _record_scan_history(
+                state,
+                kind="missed_rescan",
+                started_at=started_at,
+                completed_at=_utc_now_iso(),
+                status="failed",
+                targets=history_targets,
+                error=str(exc),
+            )
             save_state(state)
         raise
+
+
+def _new_day_iso(today: date | None = None) -> str:
+    return ((today or date.today()) + timedelta(days=14)).isoformat()
+
+
+def _matches_focused_scan_policy(date_str: str, time_text: str) -> bool:
+    """Focused policy: scan the new day at all times, plus 9 AM on weekends only."""
+    if date_str == _new_day_iso():
+        return True
+    try:
+        d = date.fromisoformat(date_str)
+    except ValueError:
+        return False
+    return d.weekday() >= 5 and time_text == "9:00 AM"
 
 
 def _future_watched_time_map(state: dict) -> dict[str, list[str]]:
@@ -959,6 +1417,8 @@ def _future_watched_time_map(state: dict) -> dict[str, list[str]]:
         slot_date = slot.get("date")
         slot_time = slot.get("time")
         if not slot_date or not slot_time or slot_date < today_str:
+            continue
+        if not _matches_focused_scan_policy(slot_date, slot_time):
             continue
         key = (slot_date, slot_time)
         if key in seen:
@@ -971,15 +1431,21 @@ def _future_watched_time_map(state: dict) -> dict[str, list[str]]:
     }
 
 
-def _scheduled_scan_anchor(state: dict) -> datetime | None:
-    candidates: list[datetime] = []
-    for key in ("last_scanned", "watched_slots_updated_at"):
-        parsed = _parse_utc_iso(state.get(key))
-        if parsed is not None:
-            candidates.append(parsed)
-    if not candidates:
-        return None
-    return max(candidates)
+def _watched_and_auto_book_targets(state: dict) -> dict[str, list[str]]:
+    watched_times = _future_watched_time_map(state)
+
+    today_str = date.today().isoformat()
+    for ab in (state.get("auto_book_slots") or []):
+        ab_date = ab.get("date", "")
+        ab_time = ab.get("time", "")
+        if not ab_date or not ab_time or ab_date < today_str or ab_time not in SLOT_TIMES:
+            continue
+        existing = set(watched_times.get(ab_date, []))
+        if ab_time not in existing:
+            existing.add(ab_time)
+            watched_times[ab_date] = [t for t in SLOT_TIMES if t in existing]
+
+    return watched_times
 
 
 def _scan_completion_status(state: dict) -> tuple[str, list[str]]:
@@ -997,8 +1463,36 @@ def _is_within_scan_window() -> bool:
     return 8 <= datetime.now(tz=PT).hour <= 22  # 8 AM – 10 PM PT inclusive
 
 
+def _is_publish_detection_window() -> bool:
+    hour = datetime.now(tz=PT).hour
+    return hour == 23 or 0 <= hour < 8  # 11 PM – 7:59 AM PT
+
+
+def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
+    """Return (targets, is_special_new_day_scan) for the scheduled worker."""
+    now_pt = datetime.now(tz=PT)
+    target_14 = (date.today() + timedelta(days=14)).isoformat()
+
+    # The 8 AM and 9 AM runs are mandatory probes for the newly opened day only.
+    if now_pt.hour in {8, 9}:
+        return {target_14: ["8:00 AM", "9:00 AM"]}, True
+
+    return _watched_and_auto_book_targets(state), False
+
+
+def _full_scan_targets() -> dict[str, list[str]]:
+    today = date.today()
+    new_day = _new_day_iso(today)
+    targets: dict[str, list[str]] = {new_day: SLOT_TIMES[:]}
+    for day_offset in range(16):
+        target = today + timedelta(days=day_offset)
+        if target.weekday() >= 5:
+            targets.setdefault(target.isoformat(), ["9:00 AM"])
+    return targets
+
+
 def _run_full_refresh_worker(*, force: bool = False) -> None:
-    """Refresh full state across all displayed dates."""
+    """Refresh all displayed dates/times for an ad-hoc full scan."""
     state = load_state()
     active_scan = _active_scan_started_at(state)
     if active_scan:
@@ -1006,9 +1500,9 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         return
 
     _auto_watch_upcoming_weekends(state)
-
-    today = date.today()
-    targets = [today + timedelta(days=i) for i in range(16)]
+    scan_targets = _full_scan_targets()
+    history_targets = _history_targets_from_map(scan_targets)
+    targets = [date.fromisoformat(d_str) for d_str in sorted(scan_targets)]
     started_at = _utc_now_iso()
 
     state["pending_full_scan"] = False
@@ -1018,9 +1512,16 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
     state["scan_started_kind"] = "ad_hoc"
     save_state(state)
 
-    print(f"Scanning {len(targets)} date(s)…")
+    print(
+        "Scanning all displayed slots for "
+        + ", ".join(f"{d} ({', '.join(scan_targets[d])})" for d in sorted(scan_targets))
+        + "…"
+    )
+    auto_book_slots = state.get("auto_book_slots") or []
     try:
-        new_avail = asyncio.run(_scan_dates_quick(targets))
+        new_avail, booked_slots = asyncio.run(
+            _scan_dates_quick(targets, target_times_by_date=scan_targets, auto_book_slots=auto_book_slots)
+        )
 
         state = load_state()
         availability = state.get("availability", {})
@@ -1029,18 +1530,18 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "ad_hoc"
+        _record_scan_history(
+            state,
+            kind="ad_hoc",
+            started_at=started_at,
+            completed_at=state["last_scanned"],
+            status="completed",
+            targets=_attach_history_results(history_targets, new_avail),
+        )
 
-        newly_open = []
-        for slot in state.get("watched_slots", []):
-            is_open = (
-                availability
-                .get(slot["date"], {})
-                .get(slot["time"], {})
-                .get(slot["court"], False)
-            )
-            if is_open:
-                newly_open.append(f"{slot['date']} {slot['time']} Court {slot['court']}")
+        open_target_lines = _alert_lines_for_open_targets(state, new_avail)
 
+        _apply_booked_slots(state, booked_slots)
         state["notified_slots"] = []
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
@@ -1052,6 +1553,7 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
             if missed_dates else None
         )
         save_state(state)
+        _notify_booked_slots(booked_slots)
 
         if missed_dates:
             print(f"Scheduling rescan for {len(missed_dates)} missed date(s) in 60s: {missed_dates}")
@@ -1059,19 +1561,28 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
                 _invoke_rescan_lambda(missed_dates, delay_seconds=60)
             except Exception as exc:
                 print(f"Failed to schedule rescan: {exc}")
-    except Exception:
+    except Exception as exc:
         state = load_state()
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
+            _record_scan_history(
+                state,
+                kind="ad_hoc",
+                started_at=started_at,
+                completed_at=_utc_now_iso(),
+                status="failed",
+                targets=history_targets,
+                error=str(exc),
+            )
             save_state(state)
         raise
 
-    if newly_open:
-        msg = "Pickleball slot(s) now available:\n" + "\n".join(newly_open)
+    if open_target_lines:
+        msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
         notify(msg)
     else:
-        print("No newly open watched slots.")
+        print("No open watched or auto-book slots in this scan.")
 
 
 def _run_scheduled_worker() -> None:
@@ -1089,27 +1600,13 @@ def _run_scheduled_worker() -> None:
     if _auto_watch_upcoming_weekends(state):
         save_state(state)
 
-    watched_times = _future_watched_time_map(state)
-
-    # Always include 8 AM and 9 AM for the date 14 days out
-    target_14 = (date.today() + timedelta(days=14)).isoformat()
-    existing_14 = set(watched_times.get(target_14, []))
-    merged_14 = [t for t in SLOT_TIMES if t in (existing_14 | {"8:00 AM", "9:00 AM"})]
-    if merged_14:
-        watched_times[target_14] = merged_14
+    watched_times, special_new_day_scan = _scheduled_scan_targets(state)
 
     if not watched_times:
-        print("No future watched slots. Skipping cron scan.")
+        print("No future watched slots or auto-book slots. Skipping cron scan.")
         return
 
-    interval_hours = state.get("scan_interval_hours", 1.0)
-    anchor = _scheduled_scan_anchor(state)
-    if anchor is not None:
-        elapsed = (datetime.now(tz=timezone.utc) - anchor).total_seconds() / 3600
-        if elapsed < interval_hours:
-            print(f"Last scan {elapsed:.1f}h ago, interval {interval_hours}h. Skipping.")
-            return
-
+    history_targets = _history_targets_from_map(watched_times)
     targets = [date.fromisoformat(d_str) for d_str in sorted(watched_times)]
     started_at = _utc_now_iso()
     state["pending_full_scan"] = False
@@ -1122,8 +1619,11 @@ def _run_scheduled_worker() -> None:
         + ", ".join(f"{d} ({', '.join(watched_times[d])})" for d in sorted(watched_times))
         + "…"
     )
+    auto_book_slots = state.get("auto_book_slots") or []
     try:
-        new_avail = asyncio.run(_scan_dates_quick(targets, target_times_by_date=watched_times))
+        new_avail, booked_slots = asyncio.run(
+            _scan_dates_quick(targets, target_times_by_date=watched_times, auto_book_slots=auto_book_slots)
+        )
 
         state = load_state()
         availability = state.get("availability", {})
@@ -1136,36 +1636,46 @@ def _run_scheduled_worker() -> None:
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "scheduled"
+        _record_scan_history(
+            state,
+            kind="scheduled",
+            started_at=started_at,
+            completed_at=state["last_scanned"],
+            status="completed",
+            targets=_attach_history_results(history_targets, new_avail),
+        )
 
-        newly_open = []
-        for slot in state.get("watched_slots", []):
-            is_open = (
-                availability
-                .get(slot["date"], {})
-                .get(slot["time"], {})
-                .get(slot["court"], False)
-            )
-            if is_open:
-                newly_open.append(f"{slot['date']} {slot['time']} Court {slot['court']}")
+        open_target_lines = _alert_lines_for_open_targets(state, new_avail)
 
+        _apply_booked_slots(state, booked_slots)
         state["notified_slots"] = []
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
         save_state(state)
-    except Exception:
+        _notify_booked_slots(booked_slots)
+    except Exception as exc:
         state = load_state()
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
+            _record_scan_history(
+                state,
+                kind="scheduled",
+                started_at=started_at,
+                completed_at=_utc_now_iso(),
+                status="failed",
+                targets=history_targets,
+                error=str(exc),
+            )
             save_state(state)
         raise
 
-    if newly_open:
-        msg = "Pickleball slot(s) now available:\n" + "\n".join(newly_open)
+    if open_target_lines:
+        msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
         notify(msg)
     else:
-        print("No newly open watched slots.")
+        print("No open watched or auto-book slots in this scan.")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -1195,8 +1705,9 @@ def handle_state(event) -> dict:
     today = date.today()
     completion_status, incomplete_dates = _scan_completion_status(state)
 
-    watched_set = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
-    mine_set    = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
+    watched_set   = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+    mine_set      = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
+    auto_book_set = {(ab["date"], ab["time"]) for ab in state.get("auto_book_slots", [])}
 
     grid = []
     for i in range(16):
@@ -1208,11 +1719,12 @@ def handle_state(event) -> dict:
             time_avail = _normalize_time_availability(day_avail.get(t))
             for court in COURT_PREFERENCE:
                 slots.append({
-                    "time":      t,
-                    "court":     court,
-                    "available": time_avail.get(court),
-                    "watching":  (d_str, t, court) in watched_set,
-                    "mine":      (d_str, t, court) in mine_set,
+                    "time":        t,
+                    "court":       court,
+                    "available":   time_avail.get(court),
+                    "watching":    (d_str, t, court) in watched_set,
+                    "mine":        (d_str, t, court) in mine_set,
+                    "auto_booking": (d_str, t) in auto_book_set,
                 })
         grid.append({
             "date":  d_str,
@@ -1239,9 +1751,12 @@ def handle_state(event) -> dict:
             "last_scanned":        state.get("last_scanned"),
             "last_scan_started_at": state.get("last_scan_started_at"),
             "last_scan_kind":      state.get("last_scan_kind"),
+            "recent_scan_history": state.get("recent_scan_history", []),
             "pending_full_scan":   bool(state.get("pending_full_scan")),
             "scan_interval_hours": state.get("scan_interval_hours", 1.0),
             "rec_url":             BASE_URL,
+            "auto_book_slots":     state.get("auto_book_slots", []),
+            "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
         }),
     }
 
@@ -1287,17 +1802,193 @@ def handle_my_reservations(event) -> dict:
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(state['my_reservations'])})}
 
 
-def handle_scan_interval(event) -> dict:
+def handle_auto_book(event) -> dict:
     body = get_body(event)
-    hours = body.get("hours")
-    valid = [0.5, 1, 2, 3, 6, 24]
-    if hours not in valid:
-        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"hours must be one of {valid}"})}
+    slots = body.get("slots")
+    if slots is None:
+        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Missing slots"})}
+    today_str = date.today().isoformat()
+    normalized: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for s in slots:
+        try:
+            slot_date = s["date"]
+            date.fromisoformat(slot_date)  # validate format
+            slot_time = s["time"]
+            if slot_time not in SLOT_TIMES:
+                raise ValueError(f"Invalid time: {slot_time}")
+            if slot_date < today_str:
+                continue  # silently drop past dates
+        except (KeyError, ValueError) as exc:
+            return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s} — {exc}"})}
+        key = (slot_date, slot_time)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"date": slot_date, "time": slot_time})
 
     state = load_state()
-    state["scan_interval_hours"] = hours
+    state["auto_book_slots"] = normalized
     save_state(state)
-    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "scan_interval_hours": hours})}
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "auto_book": len(normalized)})}
+
+
+def handle_auto_watch_weekends(event) -> dict:
+    body = get_body(event)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return {
+            "statusCode": 400,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"ok": False, "error": "enabled must be true or false"}),
+        }
+    state = load_state()
+    state["auto_watch_weekends_enabled"] = enabled
+    if enabled:
+        _auto_watch_upcoming_weekends(state)
+    save_state(state)
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({"ok": True, "auto_watch_weekends_enabled": enabled}),
+    }
+
+
+ALLOWED_SCAN_INTERVALS = (0.25, 0.5, 1.0, 2.0, 3.0)
+
+
+def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
+    """Decide whether a 15-min EventBridge tick should actually run a probe."""
+    interval = float(state.get("scan_interval_hours") or 1.0)
+    minute = now.minute
+    if interval <= 0.25:
+        return True
+    if interval == 0.5:
+        return minute in (0, 30)
+    if minute != 0:
+        return False
+    if interval == 1.0:
+        return True
+    if interval == 2.0:
+        return now.hour % 2 == 0
+    if interval == 3.0:
+        return now.hour % 3 == 0
+    return True
+
+
+def handle_scan_interval(event) -> dict:
+    body = get_body(event)
+    try:
+        requested = float(body.get("scan_interval_hours"))
+    except (TypeError, ValueError):
+        requested = None
+    if requested not in ALLOWED_SCAN_INTERVALS:
+        return {
+            "statusCode": 400,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({
+                "ok": False,
+                "error": "scan_interval_hours must be one of "
+                         + ", ".join(str(v) for v in ALLOWED_SCAN_INTERVALS),
+            }),
+        }
+    state = load_state()
+    state["scan_interval_hours"] = requested
+    save_state(state)
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({
+            "ok": True,
+            "scan_interval_hours": requested,
+        }),
+    }
+
+
+# ── Targeted daily probe (diagnostic) ────────────────────────────────────────
+
+def _run_targeted_daily_scan() -> None:
+    """Probe scan: weekends at 9 AM plus the newly published day for all times."""
+    state = load_state()
+    if _auto_watch_upcoming_weekends(state):
+        save_state(state)
+
+    today = date.today()
+    new_day = today + timedelta(days=14)
+    times_by_date: dict[str, list[str]] = {new_day.isoformat(): SLOT_TIMES[:]}
+
+    for day_offset in range(16):
+        target = today + timedelta(days=day_offset)
+        if target.weekday() >= 5:
+            times_by_date.setdefault(target.isoformat(), ["9:00 AM"])
+
+    targets = [date.fromisoformat(d_str) for d_str in sorted(times_by_date)]
+    history_targets = _history_targets_from_map(times_by_date)
+    started_at = _utc_now_iso()
+
+    t0 = time.monotonic()
+    print(
+        "Targeted probe: "
+        + ", ".join(f"{d} for {times_by_date[d]}" for d in sorted(times_by_date))
+        + "…"
+    )
+    try:
+        new_avail, _ = asyncio.run(_scan_dates_quick(targets, target_times_by_date=times_by_date))
+        elapsed = time.monotonic() - t0
+
+        for date_str in sorted(times_by_date):
+            day_avail = new_avail.get(date_str, {})
+            print(f"  {date_str}:")
+            for time_text in times_by_date[date_str]:
+                court_avail = day_avail.get(time_text, {})
+                open_courts = [c for c, v in court_avail.items() if v is True]
+                null_courts = [c for c, v in court_avail.items() if v is None]
+                closed_courts = [c for c, v in court_avail.items() if v is False]
+                print(f"    {time_text}: open={open_courts} null={null_courts} closed={closed_courts}")
+
+        print(f"Targeted probe finished in {elapsed:.1f}s.")
+
+        state = load_state()
+        state["last_scan_started_at"] = started_at
+        state["last_scanned"] = _utc_now_iso()
+        state["last_scan_kind"] = "probe"
+        _record_scan_history(
+            state,
+            kind="probe",
+            started_at=started_at,
+            completed_at=state["last_scanned"],
+            status="completed",
+            targets=_attach_history_results(history_targets, new_avail),
+        )
+        open_target_lines = _alert_lines_for_open_targets(state, new_avail)
+        availability = state.get("availability", {})
+        for date_str, day_avail in new_avail.items():
+            day_state = availability.get(date_str, {})
+            for time_text, court_avail in day_avail.items():
+                day_state[time_text] = _normalize_time_availability(court_avail)
+            availability[date_str] = day_state
+        state["availability"] = availability
+        save_state(state)
+        if open_target_lines:
+            msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
+            notify(msg)
+        else:
+            print("No open watched or auto-book slots in this scan.")
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        state = load_state()
+        _record_scan_history(
+            state,
+            kind="probe",
+            started_at=started_at,
+            completed_at=_utc_now_iso(),
+            status="failed",
+            targets=history_targets,
+            error=str(exc),
+        )
+        save_state(state)
+        print(f"Targeted probe failed after {elapsed:.1f}s: {exc}")
+        raise
 
 
 # ── Legacy async worker ───────────────────────────────────────────────────────
@@ -1325,6 +2016,11 @@ def handler(event, context):
         _run_async_worker()
         return
 
+    # Internal: targeted daily probe (8 AM & 9 AM, 14 days out)
+    if event.get("_targeted_daily_scan"):
+        _run_targeted_daily_scan()
+        return
+
     # Internal: direct scheduled invocation (for testing)
     if event.get("_scheduled"):
         _run_full_refresh_worker(force=True)
@@ -1338,9 +2034,13 @@ def handler(event, context):
         )
         return
 
-    # EventBridge hourly trigger
+    # EventBridge tick (fires every 15 min); honor configured scan_interval_hours.
     if event.get("source") == "aws.events":
-        _run_scheduled_worker()
+        state = load_state()
+        if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
+            print(f"Skipping tick: interval={state.get('scan_interval_hours')} hr.")
+            return
+        _run_targeted_daily_scan()
         return
 
     method = get_method(event)
@@ -1367,6 +2067,12 @@ def handler(event, context):
 
     if path == "/scan-interval" and method == "PUT":
         return handle_scan_interval(event)
+
+    if path == "/auto-watch-weekends" and method == "PUT":
+        return handle_auto_watch_weekends(event)
+
+    if path == "/auto-book" and method == "PUT":
+        return handle_auto_book(event)
 
     if path == "/force-scan" and method == "POST":
         body = get_body(event)

@@ -17,8 +17,27 @@
     /* ── Header ── */
     header {
       background: white; border-bottom: 1px solid #e5e7eb;
-      padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 20px; display: flex; flex-direction: column; gap: 8px;
       position: sticky; top: 0; z-index: 10;
+    }
+    .header-row {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .header-toggle {
+      display: none;
+      font-size: 0.9rem;
+      padding: 4px 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: white;
+      color: #374151;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .header-toggle.open .header-toggle-icon { transform: rotate(180deg); }
+    .header-toggle-icon {
+      display: inline-block;
+      transition: transform 0.15s ease;
     }
     header h1 { font-size: 1rem; font-weight: 700; white-space: nowrap; }
     .version-chip {
@@ -75,12 +94,19 @@
       white-space: normal;
       line-height: 1.35;
     }
+    #scan-eta {
+      font-size: 0.72rem;
+      color: #6b7280;
+      white-space: normal;
+      line-height: 1.35;
+    }
     #next-scan { font-size: 0.72rem; color: #6b7280; white-space: normal; line-height: 1.35; }
     #next-scan.rescan { color: #d97706; }
-    #freq-label {
+    #freq-label, #auto-watch-label {
       font-size: 0.72rem; color: #6b7280; white-space: nowrap;
       display: flex; align-items: center; gap: 5px;
     }
+    #auto-watch-toggle { cursor: pointer; }
     #freq-select {
       font-size: 0.72rem; border: 1px solid #d1d5db; border-radius: 5px;
       padding: 3px 6px; background: white; color: #374151; cursor: pointer;
@@ -91,14 +117,16 @@
     .mode-control { display: flex; align-items: center; gap: 6px; }
     .mode-toggle { display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden; }
     .mode-btn {
-      padding: 5px 13px; font-size: 0.75rem; font-weight: 600;
+      min-width: 34px; padding: 5px 10px; font-size: 0.95rem; font-weight: 600;
       border: none; background: white; cursor: pointer; color: #6b7280;
       transition: background 0.15s, color 0.15s, box-shadow 0.15s;
     }
-    #btn-watch { background: #ffffff; color: #9a3412; border: 1px solid #ea580c; }
-    .mode-btn.active-watch { background: #ffffff; color: #9a3412; border-color: #ea580c; box-shadow: inset 0 0 0 1px #ea580c; }
-    #btn-mine { background: #ffffff; color: #1e40af; border: 1px solid #3b82f6; }
-    .mode-btn.active-mine  { background: #ffffff; color: #1e40af; border-color: #3b82f6; box-shadow: inset 0 0 0 1px #3b82f6; }
+    #btn-watch { color: #9a3412; }
+    .mode-btn.active-watch { background: #fff7ed; color: #9a3412; box-shadow: inset 0 0 0 1px #fdba74; }
+    #btn-mine { color: #166534; }
+    .mode-btn.active-mine  { background: #f0fdf4; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
+    #btn-book { color: #92400e; }
+    .mode-btn.active-book  { background: #fffbeb; color: #92400e; box-shadow: inset 0 0 0 1px #fcd34d; }
     .mode-hint {
       font-size: 0.69rem;
       color: #6b7280;
@@ -114,15 +142,6 @@
     .btn:hover { background: #f9fafb; }
     .btn:disabled { opacity: 0.5; cursor: default; }
 
-    /* ── Legend ── */
-    .legend {
-      display: flex; flex-wrap: wrap; gap: 10px 18px;
-      padding: 10px 20px; background: white;
-      border-bottom: 1px solid #e5e7eb; font-size: 0.72rem; color: #374151;
-    }
-    .legend-item { display: flex; align-items: center; gap: 5px; }
-    .swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 2px solid transparent; }
-    .hint { margin-left: auto; color: #9ca3af; font-size: 0.69rem; }
     .date-column-hint {
       display: flex;
       align-items: center;
@@ -134,6 +153,44 @@
       color: #64748b;
       white-space: normal;
     }
+
+    /* ── Upcoming scans table ── */
+    #upcoming-scans-table { margin-top: 20px; padding-bottom: 12px; }
+    #upcoming-scans-table .section-label {
+      font-size: 0.70rem; font-weight: 600; color: #6b7280;
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
+    }
+    .scans-table { border-collapse: collapse; font-size: 0.75rem; color: #374151; }
+    .scans-table th {
+      text-align: left; font-weight: 600; color: #9ca3af; font-size: 0.68rem;
+      padding: 0 20px 4px 0; border-bottom: 1px solid #e5e7eb;
+    }
+    .scans-table td { padding: 5px 20px 5px 0; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+    .scans-table tr:last-child td { border-bottom: none; }
+    .scans-table td.scan-targets { min-width: 320px; white-space: normal; line-height: 1.4; }
+    .scan-target-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 1px 0; }
+    .scan-target-line .scan-target-day { min-width: 110px; }
+    .scan-target-time { display: inline-flex; align-items: center; gap: 3px; }
+    .scan-target-time .scan-target-time-label { color: #4b5563; }
+    .scan-court-sq {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px; border-radius: 3px;
+      font-size: 0.6rem; font-weight: 600; color: #374151;
+      line-height: 1;
+    }
+    .scan-court-sq.sc-open    { background: #bbf7d0; }
+    .scan-court-sq.sc-closed  { background: #d1d5db; }
+    .scan-court-sq.sc-unknown { background: #ffffff; border: 1px solid #e5e7eb; }
+    .scan-badge {
+      display: inline-block; font-size: 0.65rem; padding: 2px 7px;
+      border-radius: 999px; font-weight: 500; white-space: nowrap;
+    }
+    .scan-badge.probe { background: #ede9fe; color: #6d28d9; }
+    .scan-badge.scheduled { background: #f3f4f6; color: #6b7280; }
+    .scan-badge.ad_hoc { background: #dbeafe; color: #1d4ed8; }
+    .scan-badge.missed_rescan { background: #fef3c7; color: #b45309; }
+    .scan-badge.failed { background: #fee2e2; color: #b91c1c; }
+    .scan-badge.success { background: #dcfce7; color: #166534; }
 
     /* ── Grid wrapper ── */
     .grid-wrapper {
@@ -190,27 +247,26 @@
     .row-label:hover { transform: translateX(1px); box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18); }
     .row-label:active { transform: translateX(0); }
     .row-label.weekend-day {
-      color: #57534e;
+      color: #92400e;
       font-weight: 600;
-      background: linear-gradient(90deg, rgba(245, 245, 244, 0.96) 0%, rgba(250, 250, 249, 0.72) 72%, rgba(250, 250, 249, 0) 100%);
+      background: rgba(254, 243, 199, 0.9);
       border-radius: 8px;
       padding-left: 8px;
-      border-left: 4px solid #a8a29e;
+      border-left: 4px solid #f59e0b;
     }
     .row-label.weekend-day::before {
       content: "";
       width: 8px; height: 8px; border-radius: 999px;
-      background: #78716c;
+      background: #f59e0b;
       margin-top: 5px;
       flex-shrink: 0;
-      box-shadow: 0 0 0 3px #f5f5f4;
+      box-shadow: 0 0 0 3px rgba(254, 243, 199, 0.9);
     }
     .weekend-row-band {
       grid-column: 1 / -1;
       border-radius: 10px;
-      background: linear-gradient(90deg, rgba(245, 245, 244, 0.96) 0%, rgba(250, 250, 249, 0.82) 100%);
-      border: 2px solid rgba(120, 113, 108, 0.42);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+      background: rgba(254, 243, 199, 0.85);
+      border: 1.5px solid rgba(251, 191, 36, 0.5);
       margin-top: 8px;
       z-index: 0;
       pointer-events: none;
@@ -219,6 +275,10 @@
     .day-start.cell {
       border-top: 2px solid #9ca3af;
       margin-top: 8px;
+    }
+    .weekend-day.day-start,
+    .day-start.cell.weekend {
+      border-top-color: #f59e0b;
     }
     .cell {
       height: 34px; border-radius: 5px; cursor: pointer;
@@ -242,7 +302,6 @@
     .s-taken   { background: #d1d5db; }
     .s-open    { background: #bbf7d0; }
     .mine { border-color: #3b82f6; }
-    .watching { border-color: #ea580c; }
     .mine.watching { border-color: #3b82f6; }
     .mine.watching::after {
       display: block;
@@ -250,15 +309,106 @@
       box-shadow: inset 0 0 0 2px #ea580c;
     }
     .watching.s-open { animation: pulse-open 2s ease-in-out infinite; }
+    .cell-watch-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      pointer-events: none;
+      opacity: 0.8;
+    }
+    .watch-eye {
+      font-size: 11px;
+      line-height: 1;
+      color: #555;
+    }
+    .watch-dots {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 8px;
+      gap: 3px;
+      color: #555;
+    }
+    .watch-dots .dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.16;
+      animation: watch-dot-flash 1.5s ease-in-out infinite;
+    }
+    .watch-dots .dot:nth-child(2) { animation-delay: 0.3s; }
+    .watch-dots .dot:nth-child(3) { animation-delay: 0.6s; }
+    .cell-watch-label .watch-dots .dot {
+      width: 6px;
+      height: 6px;
+    }
+    .cell-watch-label.with-unknown-dots .watch-eye {
+      transform: translateY(1px);
+    }
+    .timeslot-hover { outline: 2px solid #a855f7; outline-offset: -1px; z-index: 2; }
     .s-past {
       opacity: 0.4;
       filter: saturate(0.45) grayscale(0.15);
     }
     .watching.s-open.s-past { animation: none; }
+    .s-retrying { animation: pulse-retry 2.4s ease-in-out infinite; }
+    .cell-pending-dots {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      color: #6b7280;
+    }
+    .cell-pending-dots .watch-dots .dot {
+      width: 6px;
+      height: 6px;
+    }
+    /* Watched un-scanned cells keep a stable box; only the dots animate. */
+    .week-separator {
+      grid-column: 1 / -1;
+      height: 14px;
+      display: flex;
+      align-items: center;
+      pointer-events: none;
+    }
+    .week-separator::after {
+      content: '';
+      width: 100%;
+      height: 2px;
+      background: #1f2937;
+      border-radius: 1px;
+    }
+    .auto-booking.s-open { animation: pulse-book 2s ease-in-out infinite; }
+    .auto-booking.s-open.s-past { animation: none; }
+    .auto-booking .cell-book-label {
+      position: absolute;
+      top: 1px; right: 2px;
+      font-size: 0.5rem; font-weight: 700;
+      color: #a855f7;
+      line-height: 1;
+      pointer-events: none;
+    }
 
     @keyframes pulse-open {
       0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0.7); }
       50%       { box-shadow: 0 0 0 7px rgba(74,222,128,0); }
+    }
+    @keyframes pulse-retry {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+    @keyframes watch-dot-flash {
+      0%, 100% { opacity: 0.16; transform: scale(0.92); }
+      16% { opacity: 1; transform: scale(1.22); }
+      34% { opacity: 0.18; transform: scale(0.96); }
     }
 
     /* ── Log panel ── */
@@ -345,6 +495,7 @@
       flex: 1;
     }
     #log-panel.collapsed #log-entries { display: none; }
+    #log-panel.hidden { display: none !important; }
     .log-entry {
       display: grid; grid-template-columns: auto auto auto auto minmax(0, 1fr) auto;
       align-items: baseline; gap: 8px;
@@ -462,73 +613,86 @@
     }
 
     @media (max-width: 720px) {
-      header, .legend { padding-left: 14px; padding-right: 14px; }
+      header { padding-left: 14px; padding-right: 14px; }
       .grid-wrapper { padding-left: 14px; padding-right: 14px; }
+      .header-toggle { display: inline-flex; align-items: center; gap: 4px; }
+      .header-details { display: none; }
+      header.header-open .header-details { display: flex; }
     }
   </style>
 </head>
 <body>
 
 <!-- Header -->
-<header>
-  <h1>🏓 Pickleball Monitor</h1>
-  <span class="version-chip is-ui" id="ui-version"></span>
-  <span class="version-chip is-unknown" id="api-version"></span>
-  <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
-  <div class="scan-summary">
-    <span id="scan-current"></span>
-    <span id="scan-last"></span>
+<header id="app-header">
+  <div class="header-row">
+    <h1>🏓 Pickleball Monitor</h1>
+    <span class="version-chip is-ui" id="ui-version"></span>
+    <span class="version-chip is-unknown" id="api-version"></span>
+    <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan All</button>
+    <button class="header-toggle" id="header-toggle" onclick="toggleHeaderDetails()" aria-label="Toggle details">
+      <span>Details</span><span class="header-toggle-icon">▼</span>
+    </button>
+    <div class="spacer"></div>
+    <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
+    <button class="btn" onclick="toggleLogPanel()" id="btn-log-toggle" title="Show API log" style="font-size:0.72rem;padding:4px 10px;">API Log</button>
+    <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
   </div>
-  <label id="freq-label">
-    Scan every
-    <select id="freq-select" onchange="setFrequency(this.value)">
-      <option value="0.5">30 mins</option>
-      <option value="1">1 hr</option>
-      <option value="2">2 hr</option>
-      <option value="3">3 hr</option>
-      <option value="6">6 hr</option>
-      <option value="24">daily</option>
-    </select>
-  </label>
-  <span id="next-scan"></span>
-  <div class="spacer"></div>
-  <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
-  <div class="mode-controls">
-    <div class="mode-control">
-      <div class="mode-toggle">
-        <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁 Watch</button>
-      </div>
-      <span class="mode-hint">click court cell = watch</span>
+  <div class="header-row header-details">
+    <div class="scan-summary">
+      <span id="scan-current"></span>
+      <span id="scan-last"></span>
+      <span id="scan-eta"></span>
+      <label id="freq-label">
+        Scans run
+        <select id="freq-select">
+          <option value="0.25">every 15 min</option>
+          <option value="0.5">every 30 min</option>
+          <option value="1">hourly</option>
+          <option value="2">every 2 hours</option>
+          <option value="3">every 3 hours</option>
+        </select>
+      </label>
+      <label id="auto-watch-label">
+        <input type="checkbox" id="auto-watch-toggle" checked>
+        Auto-watch weekend 9 AM
+      </label>
     </div>
-    <div class="mode-control">
-      <div class="mode-toggle">
-        <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓ Mine</button>
+    <span id="next-scan"></span>
+  </div>
+  <div class="header-row header-details">
+    <div class="mode-controls">
+      <div class="mode-control">
+        <div class="mode-toggle">
+          <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁</button>
+        </div>
+        <span class="mode-hint">click court cell = watch</span>
       </div>
-      <span class="mode-hint">shift+click = mine</span>
+      <div class="mode-control">
+        <div class="mode-toggle">
+          <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓</button>
+        </div>
+        <span class="mode-hint">shift+click = mine</span>
+      </div>
+      <div class="mode-control">
+        <div class="mode-toggle">
+          <button class="mode-btn" id="btn-book" onclick="setMode('book')" title="Click cells to auto-book that date+time when a court opens">$</button>
+        </div>
+        <span class="mode-hint">hover = highlight timeslot · click any court = book that timeslot</span>
+      </div>
     </div>
   </div>
-  <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
 </header>
-
-<!-- Legend -->
-<div class="legend">
-  <div class="legend-item"><div class="swatch" style="background:#ffffff; border:1px solid #e5e7eb;"></div>Not scanned</div>
-  <div class="legend-item"><div class="swatch" style="background:#d1d5db;"></div>Taken</div>
-  <div class="legend-item"><div class="swatch" style="background:#bbf7d0;"></div>Open</div>
-  <div class="legend-item"><div class="swatch" style="background:#ffffff; border-color:#ea580c;"></div>Watching (taken)</div>
-  <div class="legend-item"><div class="swatch" style="background:#4ade80; border-color:#ea580c;"></div>Watching (open!)</div>
-  <div class="legend-item"><div class="swatch" style="background:#bfdbfe; border-color:#3b82f6;"></div>Mine</div>
-  <span class="hint">court display = #4, #5, #6 &nbsp;·&nbsp; booking preference = #6, #4, #5</span>
-</div>
 
 <div id="content-shell" class="dock-right">
   <!-- Grid -->
   <div class="grid-wrapper">
     <div class="grid" id="grid"></div>
+    <div id="upcoming-scans-table"></div>
   </div>
 
   <!-- Log panel -->
-  <div id="log-panel" class="collapsed">
+  <div id="log-panel" class="collapsed hidden">
     <div id="log-resizer" onpointerdown="startLogResize(event)" title="Drag to resize API log"></div>
     <div id="log-header" onclick="toggleLog()">
       <span>API LOG</span>
@@ -658,6 +822,26 @@ function formatClockTime(dateLike, includeSeconds = false) {
   });
 }
 
+const SCAN_DURATION_ESTIMATES_MS = {
+  ad_hoc: 8 * 60 * 1000,
+  scheduled: 2 * 60 * 1000,
+  missed_rescan: 3 * 60 * 1000,
+};
+
+function formatDurationCompact(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return seconds + ' sec';
+  if (seconds === 0) return minutes + ' min';
+  return minutes + 'm ' + String(seconds).padStart(2, '0') + 's';
+}
+
+function estimatedScanDurationMs(kind) {
+  return SCAN_DURATION_ESTIMATES_MS[kind] || SCAN_DURATION_ESTIMATES_MS.ad_hoc;
+}
+
 function formatLogBody(text) {
   if (!text) return '';
   try {
@@ -751,7 +935,8 @@ function initLogResizer() {
 function renderScanStatus() {
   const currentEl = document.getElementById('scan-current');
   const lastEl = document.getElementById('scan-last');
-  if (!currentEl || !lastEl) return;
+  const etaEl = document.getElementById('scan-eta');
+  if (!currentEl || !lastEl || !etaEl) return;
   const activeScanStartedAt = currentScanStartedAt();
   const kind = currentScanKind();
   const pendingPartialCount = (appState.pending_partial_rescan_dates || []).length;
@@ -779,13 +964,16 @@ function renderScanStatus() {
   if (!appState.last_scanned) {
     lastEl.textContent = 'Last complete: Not yet scanned';
   } else if (appState.last_scan_started_at) {
+    const durationMs = new Date(appState.last_scanned).getTime() - new Date(appState.last_scan_started_at).getTime();
+    const durationText = formatDurationCompact(durationMs);
     lastEl.textContent =
       'Last complete: ' +
       scanKindLabel(appState.last_scan_kind) +
       ' started ' +
       fmtScanTime(appState.last_scan_started_at) +
       ', ended ' +
-      fmtScanTime(appState.last_scanned);
+      fmtScanTime(appState.last_scanned) +
+      (durationText ? ' · took ' + durationText : '');
   } else {
     lastEl.textContent =
       'Last complete: ' +
@@ -793,12 +981,52 @@ function renderScanStatus() {
       ' ended ' +
       fmtScanTime(appState.last_scanned);
   }
+
+  if (activeScanStartedAt) {
+    const expectedMs = estimatedScanDurationMs(kind);
+    const startedMs = new Date(activeScanStartedAt).getTime();
+    const eta = new Date(startedMs + expectedMs);
+    const elapsedMs = Date.now() - startedMs;
+    if (elapsedMs > expectedMs) {
+      etaEl.textContent =
+        'Historical timing: ' +
+        scanKindLabel(kind) +
+        ' is usually about ' +
+        formatDurationCompact(expectedMs) +
+        ' · this run is taking longer than usual';
+    } else {
+      etaEl.textContent =
+        'Historical timing: ' +
+        scanKindLabel(kind) +
+        ' is usually about ' +
+        formatDurationCompact(expectedMs) +
+        ' · check back around ' +
+        formatClockTime(eta);
+    }
+  } else if (appState.pending_full_scan) {
+    etaEl.textContent =
+      'Historical timing: Ad-hoc full scans usually take about ' +
+      formatDurationCompact(estimatedScanDurationMs('ad_hoc')) +
+      '.';
+  } else if (pendingPartialCount) {
+    etaEl.textContent =
+      'Historical timing: Partial rescans usually take about ' +
+      formatDurationCompact(estimatedScanDurationMs('missed_rescan')) +
+      '.';
+  } else {
+    etaEl.textContent =
+      'Historical timing: full scans are usually about ' +
+      formatDurationCompact(estimatedScanDurationMs('ad_hoc')) +
+      ', scheduled scans about ' +
+      formatDurationCompact(estimatedScanDurationMs('scheduled')) +
+      '.';
+  }
 }
 
 function renderScanButton() {
   const btn = document.getElementById('btn-scan-now');
   if (!btn) return;
-  btn.textContent = 'Scan Now';
+  btn.textContent = 'Scan All';
   btn.disabled = isFullScanBusy() || appState.pending_full_scan;
 }
 
@@ -819,6 +1047,8 @@ function isFullScanBusy() {
 
 function scanKindLabel(kind) {
   switch (kind) {
+    case 'probe':
+      return 'Hourly probe';
     case 'scheduled':
       return 'Scheduled scan';
     case 'ad_hoc':
@@ -850,12 +1080,13 @@ function isPastSlot(dateStr, timeStr) {
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, pending_partial_rescan_dates: [], pending_partial_rescan_at: null, incomplete_dates: [], scan_completion_status: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, pending_full_scan: false, scan_interval_hours: 1, rec_url: '' };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, pending_partial_rescan_dates: [], pending_partial_rescan_at: null, incomplete_dates: [], scan_completion_status: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], pending_full_scan: false, scan_interval_hours: 1, rec_url: '', auto_book_slots: [] };
 let clickMode = 'watch';
 let toastTimer = null;
 let _missedRescanTimer = null;
 let _missedRescanAt = null;
 let _missedRescanActive = false;
+let _retryingDates = new Set();
 let _logIdSeq = 0;
 let _logResizeState = null;
 let _manualScanPending = false;
@@ -864,7 +1095,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.1.0';
+const UI_VERSION = '1.2.3';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -885,6 +1116,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (readAuthToken()) refreshState();
   else openAuthModal();
   setInterval(refreshState, 5 * 60 * 1000);
+  setInterval(renderUpcomingScans, 60 * 1000);
 });
 
 window.addEventListener('keydown', (e) => {
@@ -1078,6 +1310,16 @@ function toggleLog() {
   updateToastPosition();
 }
 
+function toggleLogPanel() {
+  const panel = document.getElementById('log-panel');
+  const btn = document.getElementById('btn-log-toggle');
+  const hidden = panel.classList.toggle('hidden');
+  if (!hidden) panel.classList.remove('collapsed');
+  if (btn) btn.textContent = hidden ? 'API Log' : 'Hide Log';
+  updateLogToggleBtn();
+  updateToastPosition();
+}
+
 function updateLogToggleBtn() {
   const collapsed = document.getElementById('log-panel').classList.contains('collapsed');
   const btn = document.querySelector('#log-header .log-controls button:last-child');
@@ -1197,50 +1439,188 @@ async function checkWatchedNotifications(state) {
 }
 
 // ── Next-scan display ─────────────────────────────────────────────────────────
+// ── Upcoming scans footer ─────────────────────────────────────────────────────
+function nextHourlyProbeMs(fromMs) {
+  const interval = Number(appState.scan_interval_hours) || 1;
+  const d = new Date(fromMs);
+  if (interval <= 0.25) {
+    d.setUTCSeconds(0, 0);
+    const m = d.getUTCMinutes();
+    const next = Math.floor(m / 15) * 15 + 15;
+    d.setUTCMinutes(next);
+    return d.getTime();
+  }
+  if (interval === 0.5) {
+    d.setUTCSeconds(0, 0);
+    const m = d.getUTCMinutes();
+    if (m < 30) { d.setUTCMinutes(30); } else { d.setUTCMinutes(0); d.setUTCHours(d.getUTCHours() + 1); }
+    return d.getTime();
+  }
+  d.setUTCMinutes(0, 0, 0);
+  d.setUTCHours(d.getUTCHours() + 1);
+  while (d.getTime() <= fromMs || (interval >= 2 && d.getUTCHours() % interval !== 0)) {
+    d.setUTCHours(d.getUTCHours() + 1);
+  }
+  return d.getTime();
+}
+
+function ptHourOf(d) {
+  return parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false,
+  }).format(d), 10);
+}
+
+function isInPTScanWindow(d) {
+  const h = ptHourOf(d);
+  return h >= 8 && h <= 22;
+}
+
+function nextPTScanWindowStart(fromMs) {
+  for (let dayOff = 0; dayOff <= 3; dayOff++) {
+    for (const h of [15, 16]) {
+      const d = new Date(fromMs);
+      d.setUTCDate(d.getUTCDate() + dayOff);
+      d.setUTCHours(h, 0, 0, 0);
+      if (ptHourOf(d) === 8 && d.getTime() > fromMs) return d.getTime();
+    }
+  }
+  const d = new Date(fromMs);
+  d.setUTCDate(d.getUTCDate() + 1);
+  d.setUTCHours(15, 0, 0, 0);
+  return d.getTime();
+}
+
+function computeUpcomingScans(hoursAhead = 24) {
+  const now = Date.now();
+  const events = [];
+  const cutoffMs = now + hoursAhead * 60 * 60 * 1000;
+  const interval = Number(appState.scan_interval_hours) || 1;
+  const intervalLabel = interval === 0.25 ? '15-min probe'
+                      : interval === 0.5  ? '30-min probe'
+                      : interval === 1    ? 'hourly probe'
+                      : `${interval}-hour probe`;
+
+  let nextMs = nextHourlyProbeMs(now);
+  let guard = 0;
+  while (nextMs <= cutoffMs && guard++ < 200) {
+    events.push({ ms: nextMs, label: intervalLabel, type: 'probe' });
+    nextMs = nextHourlyProbeMs(nextMs + 1000);
+  }
+
+  events.sort((a, b) => a.ms - b.ms);
+  return events;
+}
+
+function formatScanTargetLines(targets) {
+  if (!Array.isArray(targets) || !targets.length) return '—';
+  const courtOrder = (Array.isArray(appState.court_preference) && appState.court_preference.length)
+    ? appState.court_preference
+    : ['6', '4', '5'];
+  return targets.map(target => {
+    const d = new Date(target.date + 'T12:00:00');
+    const dayStr = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    const courtsByTime = (target.courts && typeof target.courts === 'object') ? target.courts : null;
+    const times = target.times || [];
+    const timeChunks = times.map(time => {
+      const courtAvail = courtsByTime ? (courtsByTime[time] || null) : null;
+      const squares = courtOrder.map(court => {
+        const v = courtAvail ? courtAvail[court] : undefined;
+        const cls = v === true ? 'sc-open' : v === false ? 'sc-closed' : 'sc-unknown';
+        return `<span class="scan-court-sq ${cls}" title="Court ${court}">${court}</span>`;
+      }).join('');
+      return `<span class="scan-target-time"><span class="scan-target-time-label">${time}</span>${squares}</span>`;
+    }).join('');
+    return `<span class="scan-target-line"><span class="scan-target-day">${dayStr}</span>${timeChunks}</span>`;
+  }).join('');
+}
+
+function scanBadgeClass(kind, status = 'completed') {
+  if (status === 'failed') return 'failed';
+  return kind === 'probe' ? 'probe' : kind === 'missed_rescan' ? 'missed_rescan' : kind === 'ad_hoc' ? 'ad_hoc' : 'scheduled';
+}
+
+function renderUpcomingScans() {
+  const container = document.getElementById('upcoming-scans-table');
+  if (!container) return;
+  const scans = computeUpcomingScans(24);
+  const upcomingRows = scans.map(s => {
+    const d = new Date(s.ms);
+    const dayStr  = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const badge   = s.type === 'probe' ? s.label : 'scheduled';
+    return `<tr>
+      <td>${dayStr}</td>
+      <td>${timeStr}</td>
+      <td><span class="scan-badge ${s.type}">${badge}</span></td>
+    </tr>`;
+  }).join('');
+  const recentRows = (appState.recent_scan_history || []).slice(0, 10).slice().reverse().map(scan => {
+    const completedAt = scan.completed_at ? new Date(scan.completed_at) : null;
+    const startedAt = scan.started_at ? new Date(scan.started_at) : null;
+    const dayStr = completedAt
+      ? completedAt.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+      : '—';
+    const timeStr = completedAt
+      ? completedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '—';
+    let durationStr = '—';
+    if (startedAt && completedAt) {
+      const secs = Math.max(0, Math.round((completedAt - startedAt) / 1000));
+      durationStr = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    }
+    const statusLabel = scan.status === 'failed' ? 'failed' : 'success';
+    return `<tr>
+      <td>${dayStr}</td>
+      <td>${timeStr}</td>
+      <td>${durationStr}</td>
+      <td><span class="scan-badge ${scanBadgeClass(scan.kind, 'completed')}">${scanKindLabel(scan.kind)}</span></td>
+      <td><span class="scan-badge ${scan.status === 'failed' ? 'failed' : 'success'}">${statusLabel}</span></td>
+      <td class="scan-targets">${formatScanTargetLines(scan.targets)}</td>
+    </tr>`;
+  }).join('');
+  container.innerHTML =
+    `<div class="section-label" style="margin-top:14px;">Latest 10 Previous Scans</div>` +
+    `<table class="scans-table">` +
+    `<thead><tr><th>Day</th><th>Time</th><th>Duration</th><th>Type</th><th>Status</th><th>Targets</th></tr></thead>` +
+    `<tbody>${recentRows || '<tr><td colspan="6">No scan history yet</td></tr>'}</tbody>` +
+    `</table>` +
+    `<div class="section-label" style="margin-top:14px;">Upcoming Scans</div>` +
+    `<table class="scans-table">` +
+    `<thead><tr><th>Day</th><th>Time</th><th>Type</th></tr></thead>` +
+    `<tbody>${upcomingRows}</tbody>` +
+    `</table>`;
+}
+
 function updateNextScanDisplay() {
   const el = document.getElementById('next-scan');
   if (!el) return;
 
   const activeScanStartedAt = currentScanStartedAt();
   const activeKind = currentScanKind();
+  renderUpcomingScans();
+
   if (activeScanStartedAt && activeKind !== 'missed_rescan') {
-    el.textContent = 'Next scheduled scan: will be recalculated after current scan finishes';
+    el.textContent = 'Next hourly probe: will be recalculated after current scan finishes';
     el.className = 'rescan';
     return;
   }
   if (appState.pending_full_scan) {
-    el.textContent = 'Next scheduled scan: will be recalculated after queued full scan finishes';
+    el.textContent = 'Next hourly probe: will be recalculated after queued full scan finishes';
     el.className = 'rescan';
     return;
   }
   if ((appState.pending_partial_rescan_dates || []).length) {
     el.textContent = appState.pending_partial_rescan_at
-      ? 'Next scheduled scan: partial rescan first at ' + fmtScanTime(appState.pending_partial_rescan_at)
-      : 'Next scheduled scan: waiting for partial rescan retry first';
+      ? 'Next hourly probe: partial rescan first at ' + fmtScanTime(appState.pending_partial_rescan_at)
+      : 'Next hourly probe: waiting for partial rescan retry first';
     el.className = 'rescan';
     return;
   }
 
   el.className = '';
-  const todayStr = localToday();
-  const hasFutureWatched = (appState.grid || []).some(
-    d => d.date >= todayStr && (d.slots || []).some(s => s.watching)
-  );
-
-  if (!hasFutureWatched) {
-    el.textContent = 'Next scheduled scan: off (no watched slots)';
-    return;
-  }
-  const anchors = [appState.last_scanned, appState.watched_slots_updated_at]
-    .filter(Boolean)
-    .map(value => new Date(value).getTime())
-    .filter(value => !Number.isNaN(value));
-  if (!anchors.length) {
-    el.textContent = 'Next scheduled scan: after watch list is saved';
-    return;
-  }
-  const nextMs = Math.max(...anchors) + appState.scan_interval_hours * 3600 * 1000;
-  el.textContent = 'Next scheduled scan: ' + fmtScanTime(new Date(nextMs).toISOString());
+  const nextMs = nextHourlyProbeMs(Date.now());
+  el.textContent = 'Next hourly probe: ' + fmtScanTime(new Date(nextMs).toISOString());
+  renderUpcomingScans();
 }
 
 // ── Missed-slot rescan ────────────────────────────────────────────────────────
@@ -1249,25 +1629,42 @@ function findMissedDates(state) {
   const missed = new Set();
   for (const day of (state.grid || [])) {
     if (day.date < today) continue;
-    if ((day.slots || []).some(s => s.available === null)) missed.add(day.date);
+    if ((day.slots || []).some(s => s.watching && s.available === null)) missed.add(day.date);
   }
   return [...missed];
 }
 
+function applyRetryingClass(dates) {
+  for (const date of dates) {
+    const cells = document.querySelectorAll(`.cell[data-date="${date}"].s-unknown`);
+    for (const cell of cells) cell.classList.add('s-retrying');
+  }
+}
+
+function clearRetryingClass(dates) {
+  for (const date of dates) {
+    const cells = document.querySelectorAll(`.cell[data-date="${date}"].s-retrying`);
+    for (const cell of cells) cell.classList.remove('s-retrying');
+  }
+}
+
 function scheduleMissedRescan(dates) {
   if (_missedRescanTimer) clearTimeout(_missedRescanTimer);
-  _missedRescanAt = new Date(Date.now() + 60 * 1000);
+  clearRetryingClass([..._retryingDates]);
+  _retryingDates = new Set(dates);
+  applyRetryingClass(dates);
+  _missedRescanAt = new Date(Date.now() + 10 * 60 * 1000);
   addProgressLog(
     'Missed-slot rescan scheduled for ' + dates.join(', '),
-    'The ad-hoc scan completed with partially missing results. A targeted rescan will be requested at ' +
+    'Some watched slots still have no scan result. A targeted rescan will be requested at ' +
       formatClockTime(_missedRescanAt, true) +
-      ' for dates: ' + dates.join(', ')
+      ' for dates: ' + dates.join(', ') + '. Will repeat every 10 minutes until all slots are scanned.'
   );
   _missedRescanTimer = setTimeout(() => {
     _missedRescanTimer = null;
     _missedRescanAt = null;
     triggerMissedRescan(dates);
-  }, 60 * 1000);
+  }, 10 * 60 * 1000);
   updateNextScanDisplay();
 }
 
@@ -1338,6 +1735,14 @@ async function triggerMissedRescan(dates) {
           'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
         );
         applyPartialUpdate(dates, data);
+        // After applying the update, check if any watched slots are still null and schedule another round
+        const stillMissed = findMissedDates(appState);
+        if (stillMissed.length) {
+          scheduleMissedRescan(stillMissed);
+        } else {
+          clearRetryingClass([...dates]);
+          _retryingDates.clear();
+        }
       } else if (Date.now() >= deadline) {
         clearInterval(poll);
         _missedRescanActive = false;
@@ -1373,9 +1778,11 @@ function applyPartialUpdate(dates, newState) {
   appState.last_scanned = newState.last_scanned;
   appState.last_scan_started_at = newState.last_scan_started_at || null;
   appState.last_scan_kind = newState.last_scan_kind || null;
+  appState.recent_scan_history = Array.isArray(newState.recent_scan_history) ? newState.recent_scan_history : [];
   appState.pending_full_scan = !!newState.pending_full_scan;
   appState.scan_started_at = newState.scan_started_at || null;
   appState.scan_started_kind = newState.scan_started_kind || null;
+  if (Array.isArray(newState.auto_book_slots)) appState.auto_book_slots = newState.auto_book_slots;
 
   // Update only the DOM cells for these dates
   for (const date of dates) {
@@ -1386,8 +1793,34 @@ function applyPartialUpdate(dates, newState) {
       for (const cell of cells) {
         if (cell.dataset.time !== slot.time || cell.dataset.court !== slot.court) continue;
         const isFirstCourt = slot.court === appState.court_nums[0];
-        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '');
+        const isWknd = new Date(day.date + 'T12:00:00').getDay() % 6 === 0;
+        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '') + (isWknd ? ' weekend' : '');
         cell.title = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot, day.date);
+        // Sync watch icon
+        const existingWatch = cell.querySelector('.cell-watch-label');
+        const existingPendingDots = cell.querySelector('.cell-pending-dots');
+        if (slot.watching && !slot.mine) {
+          if (existingWatch) existingWatch.remove();
+          cell.appendChild(createWatchLabel(slot.available === null && !isPastSlot(day.date, slot.time)));
+        } else if (existingWatch) {
+          existingWatch.remove();
+        }
+        if (!slot.watching && slot.available === null && !isPastSlot(day.date, slot.time)) {
+          if (existingPendingDots) existingPendingDots.remove();
+          cell.appendChild(createPendingDots());
+        } else if (existingPendingDots) {
+          existingPendingDots.remove();
+        }
+        // Sync "$" auto-book label
+        const existingLbl = cell.querySelector('.cell-book-label');
+        if (slot.auto_booking && !existingLbl) {
+          const lbl = document.createElement('span');
+          lbl.className = 'cell-book-label';
+          lbl.textContent = '$';
+          cell.appendChild(lbl);
+        } else if (!slot.auto_booking && existingLbl) {
+          existingLbl.remove();
+        }
       }
     }
   }
@@ -1397,6 +1830,8 @@ function applyPartialUpdate(dates, newState) {
   renderVersionInfo();
   checkWatchedNotifications(appState);
   updateNextScanDisplay();
+  // Re-apply retrying indicator on cells that are still in the retry queue
+  if (_retryingDates.size) applyRetryingClass([..._retryingDates]);
 }
 
 // ── Fetch state ───────────────────────────────────────────────────────────────
@@ -1413,6 +1848,7 @@ async function refreshState() {
     appState.scan_completion_status = appState.scan_completion_status || null;
     appState.last_scan_started_at = appState.last_scan_started_at || null;
     if (!appState.last_scan_kind) appState.last_scan_kind = null;
+    appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
     appState.pending_full_scan = !!appState.pending_full_scan;
     appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
     if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) {
@@ -1422,11 +1858,25 @@ async function refreshState() {
       appState.court_preference = appState.court_nums.slice();
     }
     if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
+    if (!Array.isArray(appState.auto_book_slots)) appState.auto_book_slots = [];
     const recLink = document.getElementById('rec-link');
     if (recLink) recLink.href = appState.rec_url;
     const freqSelect = document.getElementById('freq-select');
     if (freqSelect && appState.scan_interval_hours != null) {
       freqSelect.value = String(appState.scan_interval_hours);
+      if (!freqSelect.dataset.wired) {
+        freqSelect.addEventListener('change', e => setFrequency(e.target.value));
+        freqSelect.dataset.wired = '1';
+      }
+    }
+    const autoWatchToggle = document.getElementById('auto-watch-toggle');
+    if (autoWatchToggle) {
+      const enabled = appState.auto_watch_weekends_enabled !== false;
+      autoWatchToggle.checked = enabled;
+      if (!autoWatchToggle.dataset.wired) {
+        autoWatchToggle.addEventListener('change', e => setAutoWatchWeekends(e.target.checked));
+        autoWatchToggle.dataset.wired = '1';
+      }
     }
     renderVersionInfo();
     renderGrid();
@@ -1438,7 +1888,17 @@ async function refreshState() {
       clearTimeout(_missedRescanTimer);
       _missedRescanTimer = null;
       _missedRescanAt = null;
+      clearRetryingClass([..._retryingDates]);
+      _retryingDates.clear();
     }
+
+    // On every state refresh, check for watched slots that still have no scan result
+    // and schedule a rescan if not already pending
+    if (!_missedRescanTimer && !appState.scan_started_at) {
+      const missed = findMissedDates(appState);
+      if (missed.length) scheduleMissedRescan(missed);
+    }
+
     updateNextScanDisplay();
   } catch (e) {
     toast('Error: ' + e.message);
@@ -1480,10 +1940,22 @@ function renderGrid() {
   }
 
   // Day rows
+  let extraRows = 0;
   for (let dayIndex = 0; dayIndex < appState.grid.length; dayIndex++) {
     const day = appState.grid[dayIndex];
-    const isWeekend = new Date(day.date + 'T12:00:00').getDay() % 6 === 0;
-    const row = headerRows + dayIndex + 1;
+    const dow = new Date(day.date + 'T12:00:00').getDay();
+    const isWeekend = dow % 6 === 0;
+
+    // Insert separator row after each Sunday (before the following day)
+    if (dayIndex > 0 && new Date(appState.grid[dayIndex - 1].date + 'T12:00:00').getDay() === 0) {
+      const sep = document.createElement('div');
+      sep.className = 'week-separator';
+      sep.style.gridRow = String(headerRows + dayIndex + extraRows + 1);
+      grid.appendChild(sep);
+      extraRows++;
+    }
+
+    const row = headerRows + dayIndex + 1 + extraRows;
 
     if (isWeekend) {
       const band = document.createElement('div');
@@ -1517,19 +1989,34 @@ function renderGrid() {
         };
         const cell = document.createElement('div');
         const isFirstCourt = court === appState.court_nums[0];
-        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '');
+        cell.className = 'cell day-start ' + cellClass(slot, day.date) + (isFirstCourt ? ' time-group-start' : '') + (isWeekend ? ' weekend' : '');
         cell.title     = day.label + '  ' + slot.time + '  Court #' + slot.court + '\n' + cellLabel(slot, day.date);
         cell.dataset.date = day.date;
         cell.dataset.time = slot.time;
         cell.dataset.court = slot.court;
         cell.style.gridRow = String(row);
         cell.style.gridColumn = String(2 + timeIndex * courtCount + courtIndex);
+        if (slot.watching && !slot.mine) {
+          cell.appendChild(createWatchLabel(slot.available === null && !isPastSlot(day.date, slot.time)));
+        } else if (slot.available === null && !isPastSlot(day.date, slot.time)) {
+          cell.appendChild(createPendingDots());
+        }
+        if (slot.auto_booking) {
+          const lbl = document.createElement('span');
+          lbl.className = 'cell-book-label';
+          lbl.textContent = '$';
+          cell.appendChild(lbl);
+        }
         cell.addEventListener('click', onCellClick);
         cell.addEventListener('contextmenu', onCellRightClick);
+        cell.addEventListener('mouseover', onCellMouseOver);
+        cell.addEventListener('mouseout', onCellMouseOut);
         grid.appendChild(cell);
       }
     }
   }
+  // Re-apply retrying indicator after full grid rebuild
+  if (_retryingDates.size) applyRetryingClass([..._retryingDates]);
 }
 
 function cellClass(slot, dateStr) {
@@ -1538,6 +2025,7 @@ function cellClass(slot, dateStr) {
            : 's-unknown';
   if (slot.mine) base += ' mine';
   if (slot.watching) base += ' watching';
+  if (slot.auto_booking) base += ' auto-booking';
   if (isPastSlot(dateStr, slot.time)) base += ' s-past';
   return base;
 }
@@ -1547,6 +2035,7 @@ function cellLabel(slot, dateStr) {
   let label = 'Court #' + slot.court + ' · ' + avail;
   if (slot.mine) label += ' · My reservation';
   if (slot.watching) label += ' · Watching';
+  if (slot.auto_booking) label += ' · Auto-booking';
   if (isPastSlot(dateStr, slot.time)) label += ' · Past';
   return label;
 }
@@ -1562,18 +2051,66 @@ function el(tag, text, cls) {
   return e;
 }
 
+function createWatchDots() {
+  const wrap = document.createElement('span');
+  wrap.className = 'watch-dots';
+  for (let i = 0; i < 3; i++) {
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    wrap.appendChild(dot);
+  }
+  return wrap;
+}
+
+function createPendingDots() {
+  const wrap = document.createElement('span');
+  wrap.className = 'cell-pending-dots';
+  wrap.appendChild(createWatchDots());
+  return wrap;
+}
+
+function createWatchLabel(showUnknownDots) {
+  const wrap = document.createElement('span');
+  wrap.className = 'cell-watch-label' + (showUnknownDots ? ' with-unknown-dots' : '');
+  const eye = document.createElement('span');
+  eye.className = 'watch-eye';
+  eye.textContent = '👁';
+  wrap.appendChild(eye);
+  if (showUnknownDots) wrap.appendChild(createWatchDots());
+  return wrap;
+}
+
 // ── Cell interaction ──────────────────────────────────────────────────────────
 function setMode(m) {
+  if (clickMode !== m) {
+    document.querySelectorAll('.timeslot-hover').forEach(c => c.classList.remove('timeslot-hover'));
+  }
   clickMode = m;
   document.getElementById('btn-watch').className = 'mode-btn' + (m === 'watch' ? ' active-watch' : '');
   document.getElementById('btn-mine').className  = 'mode-btn' + (m === 'mine'  ? ' active-mine'  : '');
+  document.getElementById('btn-book').className  = 'mode-btn' + (m === 'book'  ? ' active-book'  : '');
 }
 
 function onCellClick(e) {
   e.preventDefault();
   const { date, time, court } = e.currentTarget.dataset;
   if (e.shiftKey || clickMode === 'mine') toggleMine(date, time, court);
+  else if (clickMode === 'book') toggleAutoBook(date, time);
   else toggleWatch(date, time, court);
+}
+
+function onCellMouseOver(e) {
+  if (clickMode !== 'book') return;
+  const { date, time } = e.currentTarget.dataset;
+  document.querySelectorAll(`.cell[data-date="${date}"][data-time="${time}"]`)
+    .forEach(c => c.classList.add('timeslot-hover'));
+}
+
+function onCellMouseOut(e) {
+  if (clickMode !== 'book') return;
+  const { date, time } = e.currentTarget.dataset;
+  document.querySelectorAll(`.cell[data-date="${date}"][data-time="${time}"]`)
+    .forEach(c => c.classList.remove('timeslot-hover'));
 }
 
 function onCellRightClick(e) {
@@ -1625,6 +2162,45 @@ async function toggleMine(date, time, court) {
   });
 }
 
+async function toggleAutoBook(date, time) {
+  // auto_booking is per date+time (all courts share it) — find any slot for this date+time
+  const day = appState.grid.find(d => d.date === date);
+  if (!day) return;
+  const anySlot = day.slots.find(s => s.time === time);
+  if (!anySlot) return;
+  const wasBooking = !!anySlot.auto_booking;
+  // Toggle auto_booking for ALL courts in this date+time
+  for (const s of day.slots) {
+    if (s.time === time) s.auto_booking = !wasBooking;
+  }
+  renderGrid();
+  const todayStr = localToday();
+  if (!wasBooking) {
+    toast('Auto-book set: ' + time + ' on ' + date);
+  } else {
+    toast('Auto-book removed: ' + time + ' on ' + date);
+  }
+  // Collect unique date+time pairs marked for auto-booking
+  const seen = new Set();
+  const autoBookSlots = [];
+  for (const d of appState.grid) {
+    if (d.date < todayStr) continue;
+    for (const s of d.slots) {
+      const key = d.date + '|' + s.time;
+      if (s.auto_booking && !seen.has(key)) {
+        seen.add(key);
+        autoBookSlots.push({ date: d.date, time: s.time });
+      }
+    }
+  }
+  appState.auto_book_slots = autoBookSlots;
+  await apiFetch('/auto-book', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slots: autoBookSlots }),
+  });
+}
+
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg) {
   const el = document.getElementById('toast');
@@ -1649,6 +2225,8 @@ async function forceScan() {
     clearTimeout(_missedRescanTimer);
     _missedRescanTimer = null;
     _missedRescanAt = null;
+    clearRetryingClass([..._retryingDates]);
+    _retryingDates.clear();
     addProgressLog(
       'Canceled pending partial rescan',
       'The page canceled the waiting ad-hoc partial rescan because a full scan was requested instead.'
@@ -1713,6 +2291,7 @@ async function forceScan() {
           appState.scan_started_kind = data.scan_started_kind || null;
           appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
           appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
+          appState.recent_scan_history = Array.isArray(data.recent_scan_history) ? data.recent_scan_history : appState.recent_scan_history;
           appState.pending_full_scan = !!data.pending_full_scan;
           renderScanStatus();
           renderScanButton();
@@ -1751,6 +2330,7 @@ async function forceScan() {
             appState.scan_completion_status = appState.scan_completion_status || null;
             appState.last_scan_started_at = appState.last_scan_started_at || null;
             if (!appState.last_scan_kind) appState.last_scan_kind = null;
+            appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
             appState.pending_full_scan = !!appState.pending_full_scan;
             appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
             if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) appState.court_nums = ['6', '4', '5'];
@@ -1761,6 +2341,9 @@ async function forceScan() {
             renderVersionInfo();
             toast('Scan complete');
             updateNextScanDisplay();
+            // Check if any watched slots are still unscanned and schedule repeat rescan
+            const missedAfterScan = findMissedDates(appState);
+            if (missedAfterScan.length) scheduleMissedRescan(missedAfterScan);
           } else if (Date.now() >= deadline) {
             clearInterval(poll);
             _manualScanPending = false;
@@ -1812,6 +2395,8 @@ async function triggerDayRescan(dateStr) {
     clearTimeout(_missedRescanTimer);
     _missedRescanTimer = null;
     _missedRescanAt = null;
+    clearRetryingClass([..._retryingDates]);
+    _retryingDates.clear();
     addProgressLog(
       'Canceled pending partial rescan',
       'The page canceled the waiting partial rescan because you clicked the date row for ' + dateStr + '.'
@@ -1872,6 +2457,7 @@ async function triggerDayRescan(dateStr) {
       appState.scan_started_kind = data.scan_started_kind || null;
       appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
       appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
+      appState.recent_scan_history = Array.isArray(data.recent_scan_history) ? data.recent_scan_history : appState.recent_scan_history;
       appState.pending_full_scan = !!data.pending_full_scan;
       renderScanStatus();
       renderScanButton();
@@ -1903,15 +2489,53 @@ async function triggerDayRescan(dateStr) {
   }, 20 * 1000);
 }
 
+function toggleHeaderDetails() {
+  const header = document.getElementById('app-header');
+  const btn = document.getElementById('header-toggle');
+  if (!header || !btn) return;
+  const open = header.classList.toggle('header-open');
+  btn.classList.toggle('open', open);
+}
+
+async function setAutoWatchWeekends(enabled) {
+  const toggle = document.getElementById('auto-watch-toggle');
+  const prev = appState.auto_watch_weekends_enabled !== false;
+  if (toggle) toggle.disabled = true;
+  try {
+    const r = await apiFetch('/auto-watch-weekends', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled }),
+    });
+    if (!r.ok) {
+      if (toggle) toggle.checked = prev;
+      toast('Failed to save (' + r.status + ')');
+      return;
+    }
+    const data = await r.json();
+    appState.auto_watch_weekends_enabled = !!data.auto_watch_weekends_enabled;
+    toast(appState.auto_watch_weekends_enabled
+      ? 'Auto-watch weekend 9 AM enabled'
+      : 'Auto-watch weekend 9 AM disabled');
+    refreshState();
+  } catch (e) {
+    if (toggle) toggle.checked = prev;
+    toast('Error: ' + e.message);
+  } finally {
+    if (toggle) toggle.disabled = false;
+  }
+}
+
 async function setFrequency(val) {
   const freqSelect = document.getElementById('freq-select');
+  if (!freqSelect || freqSelect.disabled) return;
   const prev = String(appState.scan_interval_hours ?? 1);
   freqSelect.disabled = true;
   try {
     const r = await apiFetch('/scan-interval', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hours: parseFloat(val) }),
+      body: JSON.stringify({ scan_interval_hours: parseFloat(val) }),
     });
     if (!r.ok) {
       freqSelect.value = prev;
