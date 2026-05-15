@@ -673,6 +673,7 @@
     </button>
     <div class="spacer"></div>
     <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
+    <button class="btn" onclick="jumpToTelegramLog()" id="btn-bot-log" title="Jump to Telegram bot call log" style="font-size:0.72rem;padding:4px 10px;">Bot Log</button>
     <button class="btn" onclick="toggleLogPanel()" id="btn-log-toggle" title="Show API log" style="font-size:0.72rem;padding:4px 10px;">API Log</button>
     <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
   </div>
@@ -1360,6 +1361,15 @@ function toggleLog() {
   document.getElementById('log-panel').classList.toggle('collapsed');
   updateLogToggleBtn();
   updateToastPosition();
+}
+
+function jumpToTelegramLog() {
+  const el = document.getElementById('telegram-calls-table');
+  if (!el || !el.innerHTML.trim()) {
+    toast('No bot calls in the last 24 h');
+    return;
+  }
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function toggleLogPanel() {
