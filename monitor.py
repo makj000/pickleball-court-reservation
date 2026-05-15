@@ -32,7 +32,8 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
+SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 EMAIL    = os.environ["EMAIL"]
@@ -49,7 +50,9 @@ HEADLESS      = True
 DEFAULT_TIME_FILTER = "8:00 AM"
 NOTIFY_NUMBER = "+14154380400"
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
-STATE_KEY     = "state.json"
+STATE_KEY           = "state.json"
+TELEGRAM_USAGE_KEY  = "telegram_usage.json"
+TELEGRAM_USAGE_MAX  = 100
 SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
@@ -502,8 +505,12 @@ def _normalize_state(state: dict) -> dict:
     normalized["last_scan_started_at"] = state.get("last_scan_started_at")
     normalized["last_scan_kind"] = state.get("last_scan_kind") or None
     recent_scan_history = []
-    for entry in (state.get("recent_scan_history") or [])[:10]:
+    history_cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat().replace("+00:00", "Z")
+    for entry in (state.get("recent_scan_history") or [])[:SCAN_HISTORY_MAX]:
         if not isinstance(entry, dict):
+            continue
+        cmp_ts = entry.get("completed_at") or entry.get("started_at") or ""
+        if cmp_ts and cmp_ts < history_cutoff:
             continue
         targets = []
         for target in (entry.get("targets") or []):
@@ -639,7 +646,7 @@ def _record_scan_history(
         "error": error,
         "targets": targets,
     })
-    state["recent_scan_history"] = history[:10]
+    state["recent_scan_history"] = history[:SCAN_HISTORY_MAX]
 
 
 def load_state() -> dict:
@@ -744,13 +751,14 @@ def _auto_watch_upcoming_weekends(state: dict) -> bool:
 
 
 def _detect_missed_dates(avail: dict) -> list[str]:
-    """Return dates where any time slot has all-None court availability."""
+    """Return dates where any focused-policy time slot has all-None court availability."""
     today_str = date.today().isoformat()
     return [
         d for d, day_avail in avail.items()
         if d >= today_str and any(
             all(v is None for v in court_avail.values())
-            for court_avail in day_avail.values()
+            for time_key, court_avail in day_avail.items()
+            if _matches_focused_scan_policy(d, time_key)
         )
     ]
 
@@ -766,9 +774,19 @@ def _invoke_rescan_lambda(date_strs: list[str], *, delay_seconds: int = 60) -> N
 
 # ── Login ─────────────────────────────────────────────────────────────────────
 
-async def login(page) -> None:
-    print("Logging in…")
+async def login(page, context=None) -> None:
     await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+
+    # If a cached session was loaded, check if we're already authenticated
+    if os.path.exists(_SESSION_FILE):
+        already_in = await page.get_by_role("button", name="Log In").count() == 0
+        if already_in:
+            print("Session restored from cache — skipping login.\n")
+            return
+        print("Cached session expired — logging in…")
+    else:
+        print("Logging in…")
+
     await page.wait_for_timeout(2_000)
     await page.get_by_role("button", name="Log In").first.click()
     await page.wait_for_timeout(500)
@@ -782,7 +800,12 @@ async def login(page) -> None:
     await page.get_by_role("button", name="Log in & continue").click(timeout=8_000)
     await page.wait_for_load_state("domcontentloaded", timeout=20_000)
     await page.wait_for_timeout(1_000)
-    print("Logged in.\n")
+
+    if context is not None:
+        await context.storage_state(path=_SESSION_FILE)
+        print("Session saved to cache.\n")
+    else:
+        print("Logged in.\n")
 
 
 # ── Date navigation ───────────────────────────────────────────────────────────
@@ -1145,21 +1168,57 @@ def _user_agent() -> str:
     )
 
 
+_BLOCK_RESOURCE_TYPES = {"stylesheet", "image", "font", "media"}
+_BLOCK_URL_PATTERNS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "analytics.google.com",
+    "segment.io",
+    "segment.com",
+    "amplitude.com",
+    "mixpanel.com",
+    "hotjar.com",
+    "intercom.io",
+    "intercomcdn.com",
+    "fullstory.com",
+    "heap.io",
+    "sentry.io",
+    "datadog-browser-agent",
+)
+
+
+async def _block_non_essential(route, request):
+    if request.resource_type in _BLOCK_RESOURCE_TYPES:
+        await route.abort()
+        return
+    if any(p in request.url for p in _BLOCK_URL_PATTERNS):
+        await route.abort()
+        return
+    await route.continue_()
+
+
+_SESSION_FILE = "/tmp/pl_session.json"
+
+
 async def _new_page(pw):
     browser = await pw.chromium.launch(headless=HEADLESS, args=_browser_args())
+    session = _SESSION_FILE if os.path.exists(_SESSION_FILE) else None
     context = await browser.new_context(
         viewport={"width": 1280, "height": 900},
         user_agent=_user_agent(),
+        storage_state=session,
     )
-    return browser, await context.new_page()
+    page = await context.new_page()
+    await page.route("**/*", _block_non_essential)
+    return browser, context, page
 
 
 # ── Full scan (existing /scan endpoint) ───────────────────────────────────────
 
 async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
     async with async_playwright() as pw:
-        browser, page = await _new_page(pw)
-        await login(page)
+        browser, context, page = await _new_page(pw)
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
 
         all_results: dict[str, list[dict]] = {}
         targets = targets or load_check_dates()
@@ -1217,8 +1276,13 @@ async def _scan_dates_quick(
                 auto_book_set.add((ab_date, ab_time))
 
     async with async_playwright() as pw:
-        browser, page = await _new_page(pw)
-        await login(page)
+        browser, context, page = await _new_page(pw)
+        logged_in = False
+        if auto_book_set:
+            await login(page, context)
+            logged_in = True
+        else:
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
         results: dict[str, dict[str, dict[str, bool | None]]] = {}
         booked: list[dict] = []
 
@@ -1243,6 +1307,9 @@ async def _scan_dates_quick(
                     for court in COURT_PREFERENCE:
                         if court_avail.get(court) is not True:
                             continue
+                        if not logged_in:
+                            await login(page, context)
+                            logged_in = True
                         try:
                             success = await book_slot(page, target, time_text, court)
                         except Exception as book_exc:
@@ -1678,6 +1745,446 @@ def _run_scheduled_worker() -> None:
         print("No open watched or auto-book slots in this scan.")
 
 
+# ── Telegram bot (webhook) ────────────────────────────────────────────────────
+
+ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", os.environ.get("API_PASSWORD", ""))
+BOT_MODEL             = "claude-haiku-4-5-20251001"
+BOT_MAX_HISTORY_TURNS = 12
+BOT_HISTORY_PREFIX    = "telegram_history/"
+
+BOT_SYSTEM_PROMPT = """You are a helpful assistant managing a pickleball court monitor.
+
+Capabilities (via tools):
+- Read current monitor state (slot availability, watched/auto-book lists).
+- Trigger an ad-hoc scan.
+- Add or remove watched slots (date + time + court 4/5/6).
+- Add or remove auto-book slots (date + time). The monitor will book them when an open court appears on the next scan.
+- Toggle weekend 9 AM auto-watch.
+
+Conventions:
+- Times are "8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "4:00 PM", "5:00 PM", "6:00 PM".
+- Courts: "4", "5", "6" (preference order: 6 > 4 > 5).
+- Dates: YYYY-MM-DD. Resolve relative dates ("next Saturday", "this Sunday") using today's Pacific date.
+- Before any write (watch/auto-book), confirm with the user. Auto-booking is irreversible once a court opens.
+- Call get_state first if you're unsure about current watched/auto-book lists.
+
+Keep replies short. Use plain text."""
+
+BOT_TOOLS: list[dict] = [
+    {
+        "name": "get_state",
+        "description": "Return current monitor state: availability, watched_slots, auto_book_slots, auto_watch_weekends_enabled, last_scanned.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "scan_now",
+        "description": "Trigger an immediate scan. Pass `dates` (YYYY-MM-DD list) to scan specific dates, or omit to scan all visible slots.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"dates": {"type": "array", "items": {"type": "string"}}},
+            "required": [],
+        },
+    },
+    {
+        "name": "add_watched_slots",
+        "description": "Add (date, time, court) triplets to the watched list. Court must be '4', '5', or '6'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {"type": "string"},
+                            "time": {"type": "string"},
+                            "court": {"type": "string"},
+                        },
+                        "required": ["date", "time", "court"],
+                    },
+                }
+            },
+            "required": ["slots"],
+        },
+    },
+    {
+        "name": "remove_watched_slots",
+        "description": "Remove (date, time, court) triplets from the watched list.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {"type": "string"},
+                            "time": {"type": "string"},
+                            "court": {"type": "string"},
+                        },
+                        "required": ["date", "time", "court"],
+                    },
+                }
+            },
+            "required": ["slots"],
+        },
+    },
+    {
+        "name": "add_auto_book_slots",
+        "description": "Add (date, time) pairs to the auto-book list.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {"type": "string"},
+                            "time": {"type": "string"},
+                        },
+                        "required": ["date", "time"],
+                    },
+                }
+            },
+            "required": ["slots"],
+        },
+    },
+    {
+        "name": "remove_auto_book_slots",
+        "description": "Remove (date, time) pairs from the auto-book list.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {"type": "string"},
+                            "time": {"type": "string"},
+                        },
+                        "required": ["date", "time"],
+                    },
+                }
+            },
+            "required": ["slots"],
+        },
+    },
+    {
+        "name": "set_auto_watch_weekends",
+        "description": "Enable or disable the weekend 9 AM auto-watch behavior.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"],
+        },
+    },
+]
+
+
+def _bot_compact_state() -> dict:
+    state = load_state()
+    today_str = date.today().isoformat()
+    watched = [
+        {"date": s["date"], "time": s["time"], "court": s["court"]}
+        for s in state.get("watched_slots", [])
+        if s.get("date", "") >= today_str
+    ]
+    open_slots = []
+    for date_str, day_avail in state.get("availability", {}).items():
+        if date_str < today_str:
+            continue
+        for time_text, court_avail in day_avail.items():
+            for court, avail in court_avail.items():
+                if avail is True:
+                    open_slots.append({"date": date_str, "time": time_text, "court": court})
+    return {
+        "today": today_str,
+        "last_scanned": state.get("last_scanned"),
+        "scan_in_progress": bool(state.get("scan_started_at")),
+        "watched_slots": watched,
+        "auto_book_slots": state.get("auto_book_slots", []),
+        "auto_watch_weekends_enabled": state.get("auto_watch_weekends_enabled", True),
+        "open_slots": sorted(open_slots, key=lambda x: (x["date"], x["time"], x["court"])),
+    }
+
+
+def _bot_run_tool(name: str, args: dict):
+    if name == "get_state":
+        return _bot_compact_state()
+    if name == "scan_now":
+        date_strs = args.get("dates") or []
+        payload = (
+            json.dumps({"_rescan_dates": date_strs}).encode()
+            if date_strs
+            else json.dumps({"_scheduled": True}).encode()
+        )
+        boto3.client("lambda", region_name="us-west-2").invoke(
+            FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+            InvocationType="Event",
+            Payload=payload,
+        )
+        return {"ok": True, "message": "Scan started"}
+    if name == "add_watched_slots":
+        state = load_state()
+        existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+        for s in args.get("slots", []):
+            existing.add((s["date"], s["time"], s["court"]))
+        state["watched_slots"] = _normalize_slot_records(
+            [{"date": d, "time": t, "court": c} for d, t, c in sorted(existing)],
+            expand_legacy=False,
+        )
+        state["watched_slots_updated_at"] = _utc_now_iso() if _has_future_watched_slots(state) else None
+        save_state(state)
+        return {"ok": True, "watched": len(state["watched_slots"])}
+    if name == "remove_watched_slots":
+        state = load_state()
+        rm = {(s["date"], s["time"], s["court"]) for s in args.get("slots", [])}
+        state["watched_slots"] = [
+            s for s in state.get("watched_slots", [])
+            if (s["date"], s["time"], s["court"]) not in rm
+        ]
+        state["watched_slots_updated_at"] = _utc_now_iso() if _has_future_watched_slots(state) else None
+        save_state(state)
+        return {"ok": True, "watched": len(state["watched_slots"])}
+    if name == "add_auto_book_slots":
+        state = load_state()
+        existing = {(s["date"], s["time"]) for s in state.get("auto_book_slots", [])}
+        for s in args.get("slots", []):
+            existing.add((s["date"], s["time"]))
+        state["auto_book_slots"] = [{"date": d, "time": t} for d, t in sorted(existing)]
+        save_state(state)
+        return {"ok": True, "auto_book": len(state["auto_book_slots"])}
+    if name == "remove_auto_book_slots":
+        state = load_state()
+        rm = {(s["date"], s["time"]) for s in args.get("slots", [])}
+        state["auto_book_slots"] = [
+            s for s in state.get("auto_book_slots", [])
+            if (s["date"], s["time"]) not in rm
+        ]
+        save_state(state)
+        return {"ok": True, "auto_book": len(state["auto_book_slots"])}
+    if name == "set_auto_watch_weekends":
+        state = load_state()
+        state["auto_watch_weekends_enabled"] = bool(args.get("enabled"))
+        if args.get("enabled"):
+            _auto_watch_upcoming_weekends(state)
+        save_state(state)
+        return {"ok": True, "auto_watch_weekends_enabled": bool(args.get("enabled"))}
+    return {"error": f"unknown tool: {name}"}
+
+
+def _bot_content_to_dicts(content) -> list[dict]:
+    result = []
+    for block in content or []:
+        if isinstance(block, dict):
+            result.append(block)
+        elif hasattr(block, "model_dump"):
+            result.append(block.model_dump())
+        else:
+            d: dict = {"type": getattr(block, "type", "text")}
+            if hasattr(block, "text"):
+                d["text"] = block.text
+            if hasattr(block, "id"):
+                d["id"] = block.id
+            if hasattr(block, "name"):
+                d["name"] = block.name
+            if hasattr(block, "input"):
+                d["input"] = block.input
+            result.append(d)
+    return result
+
+
+def _load_chat_history(chat_id: str) -> list[dict]:
+    if not STATE_BUCKET:
+        return []
+    s3 = boto3.client("s3", region_name="us-west-2")
+    try:
+        obj = s3.get_object(Bucket=STATE_BUCKET, Key=BOT_HISTORY_PREFIX + chat_id + ".json")
+        data = json.loads(obj["Body"].read())
+        return data if isinstance(data, list) else []
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket"):
+            return []
+        raise
+
+
+def _save_chat_history(chat_id: str, history: list[dict]) -> None:
+    if not STATE_BUCKET:
+        return
+    trimmed = history[-(BOT_MAX_HISTORY_TURNS * 2):]
+    s3 = boto3.client("s3", region_name="us-west-2")
+    s3.put_object(
+        Bucket=STATE_BUCKET,
+        Key=BOT_HISTORY_PREFIX + chat_id + ".json",
+        Body=json.dumps(trimmed),
+        ContentType="application/json",
+    )
+
+
+def _load_telegram_usage() -> list[dict]:
+    if not STATE_BUCKET:
+        return []
+    s3 = boto3.client("s3", region_name="us-west-2")
+    try:
+        obj = s3.get_object(Bucket=STATE_BUCKET, Key=TELEGRAM_USAGE_KEY)
+        data = json.loads(obj["Body"].read())
+        return data if isinstance(data, list) else []
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket"):
+            return []
+        raise
+
+
+def _record_telegram_usage(record: dict) -> None:
+    if not STATE_BUCKET:
+        return
+    s3 = boto3.client("s3", region_name="us-west-2")
+    try:
+        obj = s3.get_object(Bucket=STATE_BUCKET, Key=TELEGRAM_USAGE_KEY)
+        history = json.loads(obj["Body"].read())
+        if not isinstance(history, list):
+            history = []
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket"):
+            history = []
+        else:
+            raise
+    history.insert(0, record)
+    s3.put_object(
+        Bucket=STATE_BUCKET,
+        Key=TELEGRAM_USAGE_KEY,
+        Body=json.dumps(history[:TELEGRAM_USAGE_MAX]),
+        ContentType="application/json",
+    )
+
+
+def _tg_send_to(chat_id: str, text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    req = Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=10) as resp:
+        resp.read()
+
+
+def _bot_reply(chat_id: str, user_text: str) -> str:
+    from anthropic import Anthropic
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    history = _load_chat_history(chat_id)
+    history.append({"role": "user", "content": user_text})
+    now_pt = datetime.now(tz=PT)
+    date_hint = f"Current Pacific time: {now_pt.strftime('%Y-%m-%d %A %H:%M %Z')}."
+    cached_tools = [
+        {**t, "cache_control": {"type": "ephemeral"}} if i == len(BOT_TOOLS) - 1 else t
+        for i, t in enumerate(BOT_TOOLS)
+    ]
+    system_blocks = [
+        {"type": "text", "text": BOT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": date_hint},
+    ]
+    total_in = total_out = total_cache_read = total_cache_write = 0
+    all_tools: list[str] = []
+    started_at = _utc_now_iso()
+    while True:
+        response = client.messages.create(
+            model=BOT_MODEL,
+            max_tokens=1024,
+            system=system_blocks,
+            tools=cached_tools,
+            messages=history,
+        )
+        content_dicts = _bot_content_to_dicts(response.content)
+        u = response.usage
+        total_in          += u.input_tokens
+        total_out         += u.output_tokens
+        total_cache_read  += getattr(u, "cache_read_input_tokens", 0) or 0
+        total_cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
+        tools_called = [b.get("name") for b in content_dicts if b.get("type") == "tool_use"]
+        all_tools.extend(tools_called)
+        print(
+            f"Bot [{chat_id}] tokens: in={u.input_tokens} out={u.output_tokens}"
+            + (f" cache_read={u.cache_read_input_tokens}" if getattr(u, "cache_read_input_tokens", None) else "")
+            + (f" cache_write={u.cache_creation_input_tokens}" if getattr(u, "cache_creation_input_tokens", None) else "")
+            + (f" tools={tools_called}" if tools_called else "")
+        )
+        if response.stop_reason != "tool_use":
+            text_out = "".join(
+                b.get("text", "") for b in content_dicts if b.get("type") == "text"
+            ).strip()
+            history.append({"role": "assistant", "content": content_dicts})
+            _save_chat_history(chat_id, history)
+            _record_telegram_usage({
+                "at": started_at,
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+                "cache_read_tokens": total_cache_read,
+                "cache_write_tokens": total_cache_write,
+                "tools": all_tools,
+                "reply_preview": (text_out or "")[:80],
+            })
+            return text_out or "(no reply)"
+        history.append({"role": "assistant", "content": content_dicts})
+        tool_results = []
+        for block in content_dicts:
+            if block.get("type") != "tool_use":
+                continue
+            try:
+                result = _bot_run_tool(block["name"], block.get("input", {}))
+                content_str = json.dumps(result, default=str)
+                is_error = False
+            except Exception as exc:
+                content_str = f"{type(exc).__name__}: {exc}"
+                is_error = True
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block["id"],
+                "content": content_str,
+                "is_error": is_error,
+            })
+        history.append({"role": "user", "content": tool_results})
+
+
+def handle_telegram(event) -> dict:
+    secret = get_header(event, "x-telegram-bot-api-secret-token")
+    if TELEGRAM_WEBHOOK_SECRET and secret != TELEGRAM_WEBHOOK_SECRET:
+        return {"statusCode": 403, "headers": CORS_HEADERS, "body": json.dumps({"error": "Forbidden"})}
+    body = get_body(event)
+    msg = body.get("message") or body.get("edited_message")
+    if not msg:
+        return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    allowed = {
+        cid.strip()
+        for cid in (os.environ.get("TELEGRAM_ALLOWED_IDS") or os.environ.get("TELEGRAM_CHAT_ID", "")).split(",")
+        if cid.strip()
+    }
+    if allowed and chat_id not in allowed:
+        print(f"Telegram: ignoring message from chat {chat_id}")
+        return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+    if text in ("/reset", "/clear", "/start"):
+        _save_chat_history(chat_id, [])
+        _tg_send_to(chat_id, "Conversation reset.")
+        return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+    try:
+        answer = _bot_reply(chat_id, text)
+    except Exception as exc:
+        print(f"Telegram bot error for chat {chat_id}: {exc}")
+        answer = f"Error: {type(exc).__name__}: {exc}"
+    _tg_send_to(chat_id, answer)
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _check_auth(event) -> bool:
@@ -1757,6 +2264,7 @@ def handle_state(event) -> dict:
             "rec_url":             BASE_URL,
             "auto_book_slots":     state.get("auto_book_slots", []),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
+            "telegram_call_history": _load_telegram_usage()[:50],
         }),
     }
 
@@ -2048,6 +2556,9 @@ def handler(event, context):
 
     if method == "OPTIONS":
         return {"statusCode": 204, "headers": CORS_HEADERS, "body": ""}
+
+    if path == "/telegram" and method == "POST":
+        return handle_telegram(event)
 
     if not _check_auth(event):
         return {

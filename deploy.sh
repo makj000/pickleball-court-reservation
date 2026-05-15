@@ -64,4 +64,23 @@ aws lambda invoke \
   /tmp/pickleball-deploy-refresh.json \
   --region $REGION >/dev/null
 
-echo "==> Done. Lambda is live and state refresh started."
+echo "==> Registering Telegram webhook..."
+# Load .env for TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET
+set -a; source "$(dirname "$0")/.env" 2>/dev/null || true; set +a
+LAMBDA_URL=$(aws lambda get-function-url-config \
+  --function-name $FUNCTION \
+  --region $REGION \
+  --query 'FunctionUrl' \
+  --output text 2>/dev/null || echo "")
+if [ -z "$LAMBDA_URL" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+  echo "  Skipped: LAMBDA_URL or TELEGRAM_BOT_TOKEN not available."
+else
+  WEBHOOK_URL="${LAMBDA_URL}telegram"
+  SECRET="${TELEGRAM_WEBHOOK_SECRET:-${API_PASSWORD:-}}"
+  RESULT=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+    --data-urlencode "url=${WEBHOOK_URL}" \
+    ${SECRET:+--data-urlencode "secret_token=${SECRET}"})
+  echo "  $RESULT"
+fi
+
+echo "==> Done. Lambda is live, state refresh started, Telegram webhook registered."
