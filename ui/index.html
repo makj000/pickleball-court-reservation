@@ -155,16 +155,40 @@
     }
 
     /* ── Upcoming scans table ── */
-    #upcoming-scans-table, #telegram-calls-table { margin-top: 20px; padding-bottom: 12px; }
+    #upcoming-scans-table { margin-top: 20px; padding-bottom: 12px; }
+
+    /* ── Grid + Telegram side-by-side ── */
+    .grid-row {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+    }
+    .grid-row > .grid { flex: 0 0 auto; }
+    #telegram-calls-table {
+      flex: 0 0 320px;
+      width: 320px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-left: 18px;
+      border-left: 1px solid #e5e7eb;
+      margin-left: 18px;
+      box-sizing: border-box;
+    }
+    #telegram-calls-table:empty { display: none; }
+    .tg-table td { padding: 4px 8px 4px 0; white-space: nowrap; }
+    .tg-table td.tg-tools, .tg-table td.tg-reply { white-space: normal; }
+    .tg-table th { padding: 0 8px 4px 0; }
     .tg-table .tok-in  { color: #1d4ed8; }
     .tg-table .tok-cache { color: #0891b2; font-size: 0.7rem; }
     .tg-table .tok-out { color: #15803d; }
     .tg-tool { display: inline-block; background: #ede9fe; color: #5b21b6; font-size: 0.67rem; border-radius: 3px; padding: 1px 4px; margin: 1px 2px 1px 0; white-space: nowrap; }
-    .tg-preview { color: #6b7280; font-style: italic; font-size: 0.7rem; }
+    .tg-preview { color: #6b7280; font-style: italic; font-size: 0.7rem; white-space: nowrap; }
     #upcoming-scans-table .section-label {
       font-size: 0.70rem; font-weight: 600; color: #6b7280;
       text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
     }
+    .scan-log-toggle { margin-left: 8px; font-size: 0.65rem; font-weight: 500; color: #6366f1; text-decoration: none; text-transform: none; letter-spacing: 0; }
+    .scan-log-toggle:hover { text-decoration: underline; }
     .scans-table { border-collapse: collapse; font-size: 0.75rem; color: #374151; }
     .scans-table th {
       text-align: left; font-weight: 600; color: #9ca3af; font-size: 0.68rem;
@@ -682,9 +706,11 @@
 <div id="content-shell" class="dock-right">
   <!-- Grid -->
   <div class="grid-wrapper">
-    <div class="grid" id="grid"></div>
+    <div class="grid-row">
+      <div class="grid" id="grid"></div>
+      <div id="telegram-calls-table"></div>
+    </div>
     <div id="upcoming-scans-table"></div>
-    <div id="telegram-calls-table"></div>
   </div>
 
   <!-- Info sidebar (desktop: right column; mobile: collapsible) -->
@@ -697,6 +723,9 @@
         <label id="freq-label">
           Scans run
           <select id="freq-select">
+            <option value="0.004167">every 15 sec</option>
+            <option value="0.016667">every 1 min</option>
+            <option value="0.083333">every 5 min</option>
             <option value="0.25">every 15 min</option>
             <option value="0.5">every 30 min</option>
             <option value="1">hourly</option>
@@ -707,6 +736,10 @@
         <label id="auto-watch-label">
           <input type="checkbox" id="auto-watch-toggle" checked>
           Auto-watch weekend 9 AM
+        </label>
+        <label id="focus-newest-label">
+          <input type="checkbox" id="focus-newest-toggle">
+          Focus newest weekend only
         </label>
       </div>
       <span id="next-scan"></span>
@@ -1133,7 +1166,7 @@ function isFocusedScanSlot(dateStr, timeStr) {
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, pending_partial_rescan_dates: [], pending_partial_rescan_at: null, incomplete_dates: [], scan_completion_status: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], pending_full_scan: false, scan_interval_hours: 1, rec_url: '', auto_book_slots: [], telegram_call_history: [] };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, pending_partial_rescan_dates: [], pending_partial_rescan_at: null, incomplete_dates: [], scan_completion_status: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], pending_full_scan: false, scan_interval_hours: 1, rec_url: '', auto_book_slots: [], telegram_call_history: [], focus_newest_weekend: false };
 let clickMode = 'watch';
 let toastTimer = null;
 let _missedRescanTimer = null;
@@ -1504,8 +1537,11 @@ async function checkWatchedNotifications(state) {
 // ── Upcoming scans footer ─────────────────────────────────────────────────────
 function nextHourlyProbeMs(fromMs) {
   const interval = Number(appState.scan_interval_hours) || 1;
+  if (interval < 0.25) {
+    return fromMs + interval * 60 * 60 * 1000;
+  }
   const d = new Date(fromMs);
-  if (interval <= 0.25) {
+  if (interval === 0.25) {
     d.setUTCSeconds(0, 0);
     const m = d.getUTCMinutes();
     const next = Math.floor(m / 15) * 15 + 15;
@@ -1557,14 +1593,18 @@ function computeUpcomingScans(hoursAhead = 24) {
   const events = [];
   const cutoffMs = now + hoursAhead * 60 * 60 * 1000;
   const interval = Number(appState.scan_interval_hours) || 1;
-  const intervalLabel = interval === 0.25 ? '15-min probe'
-                      : interval === 0.5  ? '30-min probe'
-                      : interval === 1    ? 'hourly probe'
+  const intervalLabel = interval <= 0.005  ? '15-sec probe'
+                      : interval <= 0.02   ? '1-min probe'
+                      : interval <= 0.09   ? '5-min probe'
+                      : interval === 0.25  ? '15-min probe'
+                      : interval === 0.5   ? '30-min probe'
+                      : interval === 1     ? 'hourly probe'
                       : `${interval}-hour probe`;
 
+  const maxEntries = scanLogExpanded.upcoming ? Math.ceil(hoursAhead / interval) + 1 : 10;
   let nextMs = nextHourlyProbeMs(now);
   let guard = 0;
-  while (nextMs <= cutoffMs && guard++ < 200) {
+  while (nextMs <= cutoffMs && events.length < maxEntries && guard++ < 5000) {
     events.push({ ms: nextMs, label: intervalLabel, type: 'probe' });
     nextMs = nextHourlyProbeMs(nextMs + 1000);
   }
@@ -1622,30 +1662,24 @@ function scanBadgeClass(kind, status = 'completed') {
   return kind === 'probe' ? 'probe' : kind === 'missed_rescan' ? 'missed_rescan' : kind === 'ad_hoc' ? 'ad_hoc' : 'scheduled';
 }
 
+let scanLogExpanded = { past: false, upcoming: false };
+
 function renderUpcomingScans() {
   const container = document.getElementById('upcoming-scans-table');
   if (!container) return;
-  const scans = computeUpcomingScans(24);
-  const upcomingRows = scans.map(s => {
-    const d = new Date(s.ms);
-    const dayStr  = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-    const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const badge   = s.type === 'probe' ? s.label : 'scheduled';
-    return `<tr>
-      <td>${dayStr}</td>
-      <td>${timeStr}</td>
-      <td><span class="scan-badge ${s.type}">${badge}</span></td>
-    </tr>`;
-  }).join('');
+
+  // ── Past scans ────────────────────────────────────────────────────────────
+  const allPast = (appState.recent_scan_history || []);
   const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
-  const recentRows = (appState.recent_scan_history || [])
-    .filter(scan => {
-      const ts = scan.completed_at || scan.started_at;
-      return ts && new Date(ts).getTime() >= cutoffMs;
-    })
-    .slice()
-    .reverse()
-    .map(scan => {
+  const pastExpanded = scanLogExpanded.past;
+  const pastVisible = (pastExpanded
+    ? allPast.filter(scan => { const ts = scan.completed_at || scan.started_at; return ts && new Date(ts).getTime() >= cutoffMs; })
+    : allPast.slice(0, 10)
+  ).slice().reverse();
+  const pastHasMore = !pastExpanded && allPast.filter(scan => { const ts = scan.completed_at || scan.started_at; return ts && new Date(ts).getTime() >= cutoffMs; }).length > 10;
+  const pastCanCollapse = pastExpanded && allPast.length > 10;
+
+  const recentRows = pastVisible.map(scan => {
     const completedAt = scan.completed_at ? new Date(scan.completed_at) : null;
     const startedAt = scan.started_at ? new Date(scan.started_at) : null;
     const dayStr = completedAt
@@ -1669,17 +1703,58 @@ function renderUpcomingScans() {
       <td class="scan-targets">${formatScanTargetLines(scan.targets)}</td>
     </tr>`;
   }).join('');
+
+  const pastToggle = pastHasMore
+    ? `<a href="#" class="scan-log-toggle" data-section="past">show last 24 hours</a>`
+    : pastCanCollapse
+      ? `<a href="#" class="scan-log-toggle" data-section="past">show less</a>`
+      : '';
+
+  // ── Upcoming scans ────────────────────────────────────────────────────────
+  const upcomingExpanded = scanLogExpanded.upcoming;
+  const allUpcoming = computeUpcomingScans(24);
+  const upcomingVisible = upcomingExpanded ? allUpcoming : allUpcoming.slice(0, 10);
+  const upcomingHasMore = !upcomingExpanded && allUpcoming.length > 10;
+  const upcomingCanCollapse = upcomingExpanded && allUpcoming.length > 10;
+
+  const upcomingRows = upcomingVisible.map(s => {
+    const d = new Date(s.ms);
+    const dayStr  = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const badge   = s.type === 'probe' ? s.label : 'scheduled';
+    return `<tr>
+      <td>${dayStr}</td>
+      <td>${timeStr}</td>
+      <td><span class="scan-badge ${s.type}">${badge}</span></td>
+    </tr>`;
+  }).join('');
+
+  const upcomingToggle = upcomingHasMore
+    ? `<a href="#" class="scan-log-toggle" data-section="upcoming">show next 24 hours</a>`
+    : upcomingCanCollapse
+      ? `<a href="#" class="scan-log-toggle" data-section="upcoming">show less</a>`
+      : '';
+
   container.innerHTML =
-    `<div class="section-label" style="margin-top:14px;">Previous Scans (last 24 hours)</div>` +
+    `<div class="section-label" style="margin-top:14px;">Previous Scans${pastToggle}</div>` +
     `<table class="scans-table">` +
     `<thead><tr><th>Day</th><th>Time</th><th>Duration</th><th>Type</th><th>Status</th><th>Targets</th></tr></thead>` +
-    `<tbody>${recentRows || '<tr><td colspan="6">No scans in the last 24 hours</td></tr>'}</tbody>` +
+    `<tbody>${recentRows || '<tr><td colspan="6">No recent scans</td></tr>'}</tbody>` +
     `</table>` +
-    `<div class="section-label" style="margin-top:14px;">Upcoming Scans</div>` +
+    `<div class="section-label" style="margin-top:14px;">Upcoming Scans${upcomingToggle}</div>` +
     `<table class="scans-table">` +
     `<thead><tr><th>Day</th><th>Time</th><th>Type</th></tr></thead>` +
     `<tbody>${upcomingRows}</tbody>` +
     `</table>`;
+
+  container.querySelectorAll('.scan-log-toggle').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const section = e.target.dataset.section;
+      scanLogExpanded[section] = !scanLogExpanded[section];
+      renderUpcomingScans();
+    });
+  });
 }
 
 function renderTelegramCalls() {
@@ -1704,12 +1779,12 @@ function renderTelegramCalls() {
       <td class="tok-in">${(c.input_tokens||0).toLocaleString()}</td>
       <td class="tok-cache">${cached ? cached.toLocaleString() : '—'}</td>
       <td class="tok-out">${(c.output_tokens||0).toLocaleString()}</td>
-      <td>${toolStr}</td>
-      <td>${preview}</td>
+      <td class="tg-tools">${toolStr}</td>
+      <td class="tg-reply">${preview}</td>
     </tr>`;
   }).join('');
   container.innerHTML =
-    `<div class="section-label" style="margin-top:14px;">Telegram Bot Calls (last 24h)</div>` +
+    `<div class="section-label" style="margin-top:0;margin-bottom:6px;">Telegram Bot Calls (last 24h)</div>` +
     `<table class="scans-table tg-table">` +
     `<thead><tr><th>Time</th><th>In</th><th>Cache</th><th>Out</th><th>Tools</th><th>Reply</th></tr></thead>` +
     `<tbody>${rows}</tbody></table>`;
@@ -1990,7 +2065,11 @@ async function refreshState() {
     if (recLink) recLink.href = appState.rec_url;
     const freqSelect = document.getElementById('freq-select');
     if (freqSelect && appState.scan_interval_hours != null) {
-      freqSelect.value = String(appState.scan_interval_hours);
+      const iv = Number(appState.scan_interval_hours);
+      const closest = [...freqSelect.options].reduce((best, o) =>
+        Math.abs(Number(o.value) - iv) < Math.abs(Number(best.value) - iv) ? o : best
+      );
+      freqSelect.value = closest.value;
       if (!freqSelect.dataset.wired) {
         freqSelect.addEventListener('change', e => setFrequency(e.target.value));
         freqSelect.dataset.wired = '1';
@@ -2003,6 +2082,14 @@ async function refreshState() {
       if (!autoWatchToggle.dataset.wired) {
         autoWatchToggle.addEventListener('change', e => setAutoWatchWeekends(e.target.checked));
         autoWatchToggle.dataset.wired = '1';
+      }
+    }
+    const focusNewestToggle = document.getElementById('focus-newest-toggle');
+    if (focusNewestToggle) {
+      focusNewestToggle.checked = !!appState.focus_newest_weekend;
+      if (!focusNewestToggle.dataset.wired) {
+        focusNewestToggle.addEventListener('change', e => setFocusNewestWeekend(e.target.checked));
+        focusNewestToggle.dataset.wired = '1';
       }
     }
     renderVersionInfo();
@@ -2646,6 +2733,34 @@ async function setAutoWatchWeekends(enabled) {
       ? 'Auto-watch weekend 9 AM enabled'
       : 'Auto-watch weekend 9 AM disabled');
     refreshState();
+  } catch (e) {
+    if (toggle) toggle.checked = prev;
+    toast('Error: ' + e.message);
+  } finally {
+    if (toggle) toggle.disabled = false;
+  }
+}
+
+async function setFocusNewestWeekend(enabled) {
+  const toggle = document.getElementById('focus-newest-toggle');
+  const prev = !!appState.focus_newest_weekend;
+  if (toggle) toggle.disabled = true;
+  try {
+    const r = await apiFetch('/focus-newest-weekend', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled }),
+    });
+    if (!r.ok) {
+      if (toggle) toggle.checked = prev;
+      toast('Failed to save (' + r.status + ')');
+      return;
+    }
+    const data = await r.json();
+    appState.focus_newest_weekend = !!data.focus_newest_weekend;
+    toast(appState.focus_newest_weekend
+      ? 'Focusing on newest weekend only'
+      : 'Scanning all watched weekends');
   } catch (e) {
     if (toggle) toggle.checked = prev;
     toast('Error: ' + e.message);

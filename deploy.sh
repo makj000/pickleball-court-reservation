@@ -55,15 +55,6 @@ aws lambda wait function-updated \
   --function-name $FUNCTION \
   --region $REGION
 
-echo "==> Triggering forced state refresh..."
-aws lambda invoke \
-  --function-name $FUNCTION \
-  --invocation-type Event \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"_scheduled":true}' \
-  /tmp/pickleball-deploy-refresh.json \
-  --region $REGION >/dev/null
-
 echo "==> Registering Telegram webhook..."
 # Load .env for TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET
 set -a; source "$(dirname "$0")/.env" 2>/dev/null || true; set +a
@@ -83,4 +74,4 @@ else
   echo "  $RESULT"
 fi
 
-echo "==> Done. Lambda is live, state refresh started, Telegram webhook registered."
+echo "==> Done. Lambda is live, Telegram webhook registered."

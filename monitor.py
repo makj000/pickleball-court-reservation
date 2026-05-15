@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urljoin
@@ -32,7 +33,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "1.2.7"
+APP_VERSION = "2.0.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -71,6 +72,13 @@ SLOT_TIMES = [
 
 COURT_PREFERENCE = ["6", "4", "5"]
 TARGET_COURTS = COURT_PREFERENCE[:]
+
+# rec.us API site UUIDs for each court number (no auth required)
+COURT_SITE_IDS: dict[str, str] = {
+    "6": "a474166c-53fb-4444-9f49-e5da379deab0",
+    "4": "ce22b935-aeb9-44ae-852d-bf2e7c91617c",
+    "5": "445abe2b-cb2f-450d-a376-0f643890731c",
+}
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
 COURT_RE = re.compile(r"^court\s+(\d+)", re.IGNORECASE)
@@ -397,7 +405,9 @@ def _empty_state() -> dict:
         "scan_interval_hours": 1.0,
         "auto_watched_weekends": [],  # ISO date strings already auto-watched; user removals are respected
         "auto_watch_weekends_enabled": True,
+        "focus_newest_weekend": False, # when True, only scan the latest weekend day (skip older ones)
         "auto_book_slots":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}] — slots to auto-book
+        "seen_open_days":      [],   # ISO dates where we first observed ≥1 open slot
     }
 
 
@@ -572,8 +582,13 @@ def _normalize_state(state: dict) -> dict:
         d for d in (state.get("auto_watched_weekends") or [])
         if isinstance(d, str) and d >= today_str
     )
+    normalized["seen_open_days"] = sorted(
+        d for d in (state.get("seen_open_days") or [])
+        if isinstance(d, str) and d >= today_str
+    )
     raw_enabled = state.get("auto_watch_weekends_enabled")
     normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
+    normalized["focus_newest_weekend"] = bool(state.get("focus_newest_weekend", False))
     # Normalize auto_book_slots: {date, time} pairs, future only, valid times only
     auto_book_slots = []
     seen_ab: set[tuple[str, str]] = set()
@@ -750,6 +765,51 @@ def _auto_watch_upcoming_weekends(state: dict) -> bool:
     return True
 
 
+def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
+    """When we first see open slots on the newly published day (14 days out), auto-watch
+    9 AM for that day and the next day if they are weekend days. Returns True if modified."""
+    new_day_str = _new_day_iso()
+    day_avail = new_avail.get(new_day_str, {})
+    any_open = any(
+        v is True
+        for court_map in day_avail.values()
+        for v in (court_map.values() if isinstance(court_map, dict) else [])
+    )
+    if not any_open:
+        return False
+
+    seen_open = set(state.get("seen_open_days") or [])
+    if new_day_str in seen_open:
+        return False  # already triggered for this day
+
+    seen_open.add(new_day_str)
+    state["seen_open_days"] = sorted(seen_open)
+
+    existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+    auto_watched = set(state.get("auto_watched_weekends") or [])
+    new_slots = []
+    new_day = date.fromisoformat(new_day_str)
+    for d in (new_day, new_day + timedelta(days=1)):
+        if d.weekday() < 5:
+            continue
+        d_str = d.isoformat()
+        for court in COURT_PREFERENCE:
+            if (d_str, "9:00 AM", court) not in existing:
+                new_slots.append({"date": d_str, "time": "9:00 AM", "court": court})
+        auto_watched.add(d_str)
+
+    if new_slots:
+        state["watched_slots"] = _normalize_slot_records(
+            state.get("watched_slots", []) + new_slots,
+            expand_legacy=False,
+        )
+        state["watched_slots_updated_at"] = _utc_now_iso()
+        state["auto_watched_weekends"] = sorted(auto_watched)
+        days_str = sorted({s["date"] for s in new_slots})
+        print(f"New day {new_day_str} is open — auto-watched 9 AM for {days_str}.")
+    return True
+
+
 def _detect_missed_dates(avail: dict) -> list[str]:
     """Return dates where any focused-policy time slot has all-None court availability."""
     today_str = date.today().isoformat()
@@ -836,12 +896,13 @@ async def select_date(page, target: date) -> None:
 
 # ── Slot collection ───────────────────────────────────────────────────────────
 
-async def collect_all_slot_buttons(page) -> list[str]:
+async def collect_all_slot_buttons(page, stop_when_found: set[str] | None = None) -> list[str]:
+    """Collect visible time slot buttons. If stop_when_found is given, stop scrolling
+    as soon as all those times are visible — avoids paginating through unused slots."""
     seen: set[str] = set()
     slots: list[str] = []
 
     async def harvest():
-        # all_inner_texts() grabs all button text atomically — no index race condition
         texts = await page.locator("button").all_inner_texts()
         for text in texts:
             first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
@@ -852,6 +913,8 @@ async def collect_all_slot_buttons(page) -> list[str]:
     await harvest()
 
     for _ in range(20):
+        if stop_when_found and stop_when_found.issubset(seen):
+            break
         next_btn = page.get_by_role("button", name="Next slot")
         if await next_btn.count() == 0:
             break
@@ -1118,7 +1181,7 @@ async def scan_day_quick(
     label = target.strftime("%a %b %-d")
     print(f"  {label}… ", end="", flush=True)
     await select_date(page, target)
-    visible_times = set(await collect_all_slot_buttons(page))
+    visible_times = set(await collect_all_slot_buttons(page, stop_when_found=set(requested_times)))
     results: dict[str, dict[str, bool | None]] = {}
 
     for time_text in requested_times:
@@ -1253,6 +1316,152 @@ async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
     return all_results
 
 
+# ── Direct HTTP availability API ─────────────────────────────────────────────
+
+_REC_API_BASE = "https://api.rec.us/v1/sites"
+_API_TIMEOUT  = 10  # seconds per request
+
+
+def _time_text_to_hhmm(time_text: str) -> str:
+    """'9:00 AM' → '09:00'  (matches HH:MM prefix in API start_time strings)."""
+    try:
+        dt = datetime.strptime(time_text.strip(), "%I:%M %p")
+        return dt.strftime("%H:%M")
+    except ValueError:
+        return ""
+
+
+def _fetch_one_court_raw(court_num: str, site_id: str) -> tuple[str, dict[str, dict]]:
+    """Fetch 14-day availability for one court from rec.us API.
+
+    Returns (court_num, date_map) where date_map is {date_iso: {HH:MM:SS: {...}}}.
+    Keys present in the map are available; absent = booked/unavailable.
+    """
+    url = f"{_REC_API_BASE}/{site_id}/availability"
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=_API_TIMEOUT) as resp:
+        data = json.loads(resp.read().decode())
+    date_map = data.get("data") if isinstance(data, dict) else {}
+    return court_num, date_map or {}
+
+
+# Build a lookup from "HH:MM" → time_text (e.g. "09:00" → "9:00 AM") once at import time.
+_HHMM_TO_TIME_TEXT: dict[str, str] = {
+    _time_text_to_hhmm(t): t for t in SLOT_TIMES if _time_text_to_hhmm(t)
+}
+
+
+def _api_fetch_availability(
+    target_times_by_date: dict[str, list[str]] | None = None,
+) -> dict[str, dict[str, dict[str, bool | None]]]:
+    """Fetch availability for all courts in parallel via the rec.us REST API.
+
+    Returns {date_iso: {time_text: {court_num: True|False|None}}}.
+    A slot is True (open) if the API returns it; absent = False (booked/unavailable).
+    """
+    raw: dict[str, dict[str, dict]] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {
+            pool.submit(_fetch_one_court_raw, court_num, site_id): court_num
+            for court_num, site_id in COURT_SITE_IDS.items()
+        }
+        for future in as_completed(futures):
+            court_num, date_map = future.result()
+            raw[court_num] = date_map
+
+    wanted: dict[str, set[str]] | None = (
+        {d: set(times) for d, times in target_times_by_date.items()}
+        if target_times_by_date is not None
+        else None
+    )
+
+    # Seed result with all-False for every requested (date, time) pair
+    result: dict[str, dict[str, dict[str, bool | None]]] = {}
+    if wanted is not None:
+        for date_str, times in wanted.items():
+            result[date_str] = {
+                t: {c: False for c in TARGET_COURTS}
+                for t in times
+                if t in SLOT_TIMES
+            }
+
+    # Mark open slots True — API keys are "HH:MM:SS", we compare against "HH:MM" prefix
+    for court_num, date_map in raw.items():
+        for date_str, times_dict in date_map.items():
+            for time_key in times_dict:
+                hhmm = time_key[:5]  # "09:00:00" → "09:00"
+                time_text = _HHMM_TO_TIME_TEXT.get(hhmm)
+                if time_text is None:
+                    continue
+                if wanted is not None and (
+                    date_str not in wanted or time_text not in wanted[date_str]
+                ):
+                    continue
+                result.setdefault(date_str, {}).setdefault(
+                    time_text, {c: False for c in TARGET_COURTS}
+                )[court_num] = True
+
+    return result
+
+
+def _api_scan(
+    target_times_by_date: dict[str, list[str]] | None = None,
+    auto_book_slots: list[dict] | None = None,
+) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
+    """Scan via HTTP API and book any newly open auto-book slots via Playwright.
+
+    Returns (availability, booked_slots) matching the _scan_dates_quick contract.
+    """
+    new_avail = _api_fetch_availability(target_times_by_date)
+
+    if not auto_book_slots:
+        return new_avail, []
+
+    today_str = date.today().isoformat()
+    auto_book_set: set[tuple[str, str]] = {
+        (ab["date"], ab["time"])
+        for ab in auto_book_slots
+        if ab.get("date", "") >= today_str and ab.get("time", "") in SLOT_TIMES
+    }
+
+    booked: list[dict] = []
+    to_book = [
+        (date_str, time_text, new_avail[date_str][time_text])
+        for date_str, time_map in new_avail.items()
+        for time_text, court_avail in time_map.items()
+        if (date_str, time_text) in auto_book_set and _preferred_open_court(court_avail) is not None
+    ]
+
+    if not to_book:
+        return new_avail, []
+
+    # Only launch Playwright when there is actually something to book
+    import asyncio as _asyncio
+
+    async def _do_book():
+        async with async_playwright() as pw:
+            browser, context, page = await _new_page(pw)
+            await login(page, context)
+            for date_str, time_text, court_avail in to_book:
+                for court in COURT_PREFERENCE:
+                    if court_avail.get(court) is not True:
+                        continue
+                    try:
+                        success = await book_slot(page, date.fromisoformat(date_str), time_text, court)
+                    except Exception as exc:
+                        print(f"  Booking error {date_str} {time_text} Court {court}: {exc}")
+                        success = False
+                    if success:
+                        booked.append({"date": date_str, "time": time_text, "court": court})
+                        for c in new_avail.get(date_str, {}).get(time_text, {}):
+                            new_avail[date_str][time_text][c] = False
+                        break
+            await browser.close()
+
+    _asyncio.run(_do_book())
+    return new_avail, booked
+
+
 # ── Quick scan (for scheduled worker) ────────────────────────────────────────
 
 async def _scan_dates_quick(
@@ -1378,14 +1587,16 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
     if delay_seconds > 0:
         time.sleep(delay_seconds)
 
-    targets = []
+    valid_strs = []
     for d_str in date_strs:
         try:
-            targets.append(date.fromisoformat(d_str))
+            date.fromisoformat(d_str)
+            valid_strs.append(d_str)
         except ValueError:
             continue
-    if not targets:
+    if not valid_strs:
         return
+    date_strs = valid_strs
     history_targets = _history_targets_from_map({d_str: SLOT_TIMES[:] for d_str in date_strs})
 
     state = load_state()
@@ -1406,8 +1617,12 @@ def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
 
     print(f"Rescanning {len(targets)} missed date(s): {date_strs}")
     auto_book_slots = state.get("auto_book_slots") or []
+    rescan_times = {d_str: SLOT_TIMES[:] for d_str in date_strs}
     try:
-        new_avail, booked_slots = asyncio.run(_scan_dates_quick(targets, auto_book_slots=auto_book_slots))
+        new_avail, booked_slots = _api_scan(
+            target_times_by_date=rescan_times,
+            auto_book_slots=auto_book_slots,
+        )
         state = load_state()
         availability = state.get("availability", {})
         availability.update(new_avail)
@@ -1512,6 +1727,14 @@ def _watched_and_auto_book_targets(state: dict) -> dict[str, list[str]]:
             existing.add(ab_time)
             watched_times[ab_date] = [t for t in SLOT_TIMES if t in existing]
 
+    if state.get("focus_newest_weekend"):
+        weekend_dates = [d for d in watched_times if date.fromisoformat(d).weekday() >= 5]
+        if len(weekend_dates) > 1:
+            newest = max(weekend_dates)
+            for d in weekend_dates:
+                if d != newest:
+                    del watched_times[d]
+
     return watched_times
 
 
@@ -1569,7 +1792,6 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
     _auto_watch_upcoming_weekends(state)
     scan_targets = _full_scan_targets()
     history_targets = _history_targets_from_map(scan_targets)
-    targets = [date.fromisoformat(d_str) for d_str in sorted(scan_targets)]
     started_at = _utc_now_iso()
 
     state["pending_full_scan"] = False
@@ -1586,8 +1808,9 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
     )
     auto_book_slots = state.get("auto_book_slots") or []
     try:
-        new_avail, booked_slots = asyncio.run(
-            _scan_dates_quick(targets, target_times_by_date=scan_targets, auto_book_slots=auto_book_slots)
+        new_avail, booked_slots = _api_scan(
+            target_times_by_date=scan_targets,
+            auto_book_slots=auto_book_slots,
         )
 
         state = load_state()
@@ -1674,7 +1897,6 @@ def _run_scheduled_worker() -> None:
         return
 
     history_targets = _history_targets_from_map(watched_times)
-    targets = [date.fromisoformat(d_str) for d_str in sorted(watched_times)]
     started_at = _utc_now_iso()
     state["pending_full_scan"] = False
     state["scan_started_at"] = started_at
@@ -1688,8 +1910,9 @@ def _run_scheduled_worker() -> None:
     )
     auto_book_slots = state.get("auto_book_slots") or []
     try:
-        new_avail, booked_slots = asyncio.run(
-            _scan_dates_quick(targets, target_times_by_date=watched_times, auto_book_slots=auto_book_slots)
+        new_avail, booked_slots = _api_scan(
+            target_times_by_date=watched_times,
+            auto_book_slots=auto_book_slots,
         )
 
         state = load_state()
@@ -1700,6 +1923,7 @@ def _run_scheduled_worker() -> None:
                 day_availability[time_text] = _normalize_time_availability(court_availability)
             availability[date_str] = day_availability
         state["availability"] = availability
+        _auto_watch_on_new_day_openings(state, new_avail)
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "scheduled"
@@ -2264,6 +2488,7 @@ def handle_state(event) -> dict:
             "rec_url":             BASE_URL,
             "auto_book_slots":     state.get("auto_book_slots", []),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
+            "focus_newest_weekend": bool(state.get("focus_newest_weekend", False)),
             "telegram_call_history": _load_telegram_usage()[:50],
         }),
     }
@@ -2341,6 +2566,25 @@ def handle_auto_book(event) -> dict:
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "auto_book": len(normalized)})}
 
 
+def handle_focus_newest_weekend(event) -> dict:
+    body = get_body(event)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return {
+            "statusCode": 400,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"ok": False, "error": "enabled must be true or false"}),
+        }
+    state = load_state()
+    state["focus_newest_weekend"] = enabled
+    save_state(state)
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({"ok": True, "focus_newest_weekend": enabled}),
+    }
+
+
 def handle_auto_watch_weekends(event) -> dict:
     body = get_body(event)
     enabled = body.get("enabled")
@@ -2362,7 +2606,10 @@ def handle_auto_watch_weekends(event) -> dict:
     }
 
 
-ALLOWED_SCAN_INTERVALS = (0.25, 0.5, 1.0, 2.0, 3.0)
+_INTERVAL_15S  = round(15 / 3600, 6)   # 0.004167 hr
+_INTERVAL_1MIN = round(1  / 60,   6)   # 0.016667 hr
+_INTERVAL_5MIN = round(5  / 60,   6)   # 0.083333 hr
+ALLOWED_SCAN_INTERVALS = (_INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0)
 
 
 def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
@@ -2382,6 +2629,22 @@ def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
     if interval == 3.0:
         return now.hour % 3 == 0
     return True
+
+
+def _schedule_self_probe(interval_hours: float) -> None:
+    """Sleep for the configured interval then async-invoke this Lambda to continue the chain."""
+    if not _is_within_scan_window():
+        return
+    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    if not fn:
+        return
+    sleep_secs = max(1, round(interval_hours * 3600))
+    time.sleep(sleep_secs)
+    boto3.client("lambda", region_name="us-west-2").invoke(
+        FunctionName=fn,
+        InvocationType="Event",
+        Payload=json.dumps({"_self_probe": True}).encode(),
+    )
 
 
 def handle_scan_interval(event) -> dict:
@@ -2430,7 +2693,6 @@ def _run_targeted_daily_scan() -> None:
         if target.weekday() >= 5:
             times_by_date.setdefault(target.isoformat(), ["9:00 AM"])
 
-    targets = [date.fromisoformat(d_str) for d_str in sorted(times_by_date)]
     history_targets = _history_targets_from_map(times_by_date)
     started_at = _utc_now_iso()
 
@@ -2441,7 +2703,7 @@ def _run_targeted_daily_scan() -> None:
         + "…"
     )
     try:
-        new_avail, _ = asyncio.run(_scan_dates_quick(targets, target_times_by_date=times_by_date))
+        new_avail, _ = _api_scan(target_times_by_date=times_by_date)
         elapsed = time.monotonic() - t0
 
         for date_str in sorted(times_by_date):
@@ -2543,12 +2805,21 @@ def handler(event, context):
         return
 
     # EventBridge tick (fires every 15 min); honor configured scan_interval_hours.
-    if event.get("source") == "aws.events":
+    # Also handles self-probe chain for sub-15-min intervals.
+    if event.get("source") == "aws.events" or event.get("_self_probe"):
         state = load_state()
-        if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
-            print(f"Skipping tick: interval={state.get('scan_interval_hours')} hr.")
+        interval = float(state.get("scan_interval_hours") or 1.0)
+        if not event.get("_self_probe") and not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
+            print(f"Skipping tick: interval={interval} hr.")
             return
-        _run_targeted_daily_scan()
+        # Sub-15-min: only scan watched slots (fast). At normal cadence (≥15 min),
+        # run the broader targeted scan for new-day discovery.
+        if interval < 0.25:
+            _run_scheduled_worker()
+        else:
+            _run_targeted_daily_scan()
+        if interval < 0.25:
+            _schedule_self_probe(interval)
         return
 
     method = get_method(event)
@@ -2581,6 +2852,9 @@ def handler(event, context):
 
     if path == "/auto-watch-weekends" and method == "PUT":
         return handle_auto_watch_weekends(event)
+
+    if path == "/focus-newest-weekend" and method == "PUT":
+        return handle_focus_newest_weekend(event)
 
     if path == "/auto-book" and method == "PUT":
         return handle_auto_book(event)
