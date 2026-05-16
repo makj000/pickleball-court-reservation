@@ -33,7 +33,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -59,6 +59,7 @@ SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
 SQS_DELAY_MAX_SECONDS = 15 * 60
 SQS_STALE_GRACE_SECONDS = 5 * 60
+PUBLISH_PROBE_BURST_DELAYS_SECONDS = tuple(range(60, 11 * 60, 60))
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
 CORS_HEADERS = {
@@ -444,6 +445,7 @@ def _empty_state() -> dict:
         "scan_interval_hours": 1.0,
         "queued_scheduled_probe_at": None,
         "queued_scheduled_probe_token": None,
+        "queued_publish_probe_date": None,
         "auto_watched_weekends": [],  # ISO date strings already auto-watched; user removals are respected
         "auto_watch_weekends_enabled": True,
         "focus_newest_weekend": False, # when True, only scan the latest weekend day (skip older ones)
@@ -592,6 +594,7 @@ def _normalize_state(state: dict) -> dict:
     normalized["scan_interval_hours"] = state.get("scan_interval_hours", 1.0)
     normalized["queued_scheduled_probe_at"] = state.get("queued_scheduled_probe_at")
     normalized["queued_scheduled_probe_token"] = state.get("queued_scheduled_probe_token")
+    normalized["queued_publish_probe_date"] = state.get("queued_publish_probe_date")
     if state.get("scan_started_at"):
         normalized["scan_started_at"] = state["scan_started_at"]
         normalized["scan_started_kind"] = state.get("scan_started_kind") or None
@@ -1760,6 +1763,10 @@ def _new_day_iso(today: date | None = None) -> str:
     return ((today or date.today()) + timedelta(days=14)).isoformat()
 
 
+def _new_day_from_pt_now(now_pt: datetime | None = None) -> date:
+    return (now_pt or datetime.now(tz=PT)).date() + timedelta(days=14)
+
+
 def _matches_focused_scan_policy(date_str: str, time_text: str) -> bool:
     """Focused policy: scan the new day at all times, plus 9 AM on weekends only."""
     if date_str == _new_day_iso():
@@ -2538,6 +2545,7 @@ def handle_state(event) -> dict:
             "recent_scan_history": state.get("recent_scan_history", []),
             "scan_interval_hours": state.get("scan_interval_hours", 1.0),
             "queued_scheduled_probe_at": state.get("queued_scheduled_probe_at"),
+            "queued_publish_probe_date": state.get("queued_publish_probe_date"),
             "rec_url":             BASE_URL,
             "auto_book_slots":     state.get("auto_book_slots", []),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
@@ -2767,10 +2775,61 @@ def _run_queued_scheduled_probe(token: str) -> None:
         save_state(state)
 
 
+def _queue_publish_probe_burst_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
+    now_pt = now_pt or datetime.now(tz=PT)
+    if now_pt.hour != 8 or now_pt.minute != 0:
+        return False
+
+    target = _new_day_from_pt_now(now_pt)
+    if target.weekday() < 5:
+        return False
+
+    target_str = target.isoformat()
+    if state.get("queued_publish_probe_date") == target_str:
+        print(f"Publish probe burst already queued for {target_str}.")
+        return True
+    if not WORK_QUEUE_URL:
+        print("Work queue is not configured; cannot queue publish probe burst.")
+        return False
+
+    state["queued_publish_probe_date"] = target_str
+    save_state(state)
+    for delay_seconds in PUBLISH_PROBE_BURST_DELAYS_SECONDS:
+        _enqueue_work(
+            "publish_probe",
+            {
+                "date": target_str,
+                "minute": delay_seconds // 60,
+            },
+            delay_seconds=delay_seconds,
+        )
+    print(f"Queued publish probe burst for {target_str} at 8:01-8:10 AM PT.")
+    return True
+
+
+def _run_queued_publish_probe(target_date: str) -> None:
+    expected = _new_day_from_pt_now().isoformat()
+    if target_date != expected:
+        print(f"Skipping stale publish probe for {target_date}; expected {expected}.")
+        return
+    try:
+        target = date.fromisoformat(target_date)
+    except ValueError:
+        print(f"Skipping publish probe with invalid date: {target_date}")
+        return
+    if target.weekday() < 5:
+        print(f"Skipping publish probe for non-weekend new day: {target_date}")
+        return
+    print(f"Running queued publish probe for {target_date}.")
+    _run_targeted_daily_scan()
+
+
 def _run_queue_work(message: dict) -> None:
     kind = message.get("kind")
     if kind == "scheduled_probe":
         _run_queued_scheduled_probe(str(message.get("token") or ""))
+    elif kind == "publish_probe":
+        _run_queued_publish_probe(str(message.get("date") or ""))
     else:
         print(f"Ignoring unknown queue work kind: {kind}")
 
@@ -2944,10 +3003,14 @@ def handler(event, context):
     if event.get("source") == "aws.events":
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
+        _queue_publish_probe_burst_if_needed(state)
+        state = load_state()
+        interval = float(state.get("scan_interval_hours") or 1.0)
         if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
             print(f"Skipping tick: interval={interval} hr.")
             return
         if interval < 0.25:
+            state = load_state()
             if _queued_scheduled_probe_is_current(state, interval):
                 print(f"Skipping tick: scheduled probe already queued for {state.get('queued_scheduled_probe_at')}.")
                 return
