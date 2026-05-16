@@ -246,7 +246,8 @@
     }
     .grid {
       display: grid;
-      grid-template-columns: 94px repeat(var(--cell-cols, 21), 17px);
+      --cell-size: 21.25px;
+      grid-template-columns: 94px repeat(var(--cell-cols, 21), var(--cell-size));
       gap: 2px;
       min-width: 480px;
       position: relative;
@@ -313,7 +314,7 @@
       border-top-color: #f59e0b;
     }
     .cell {
-      height: 17px; border-radius: 3px; cursor: pointer;
+      height: var(--cell-size); border-radius: 3px; cursor: pointer;
       border: 1px solid transparent;
       transition: transform 0.1s, box-shadow 0.1s, opacity 0.15s;
       position: relative;
@@ -343,17 +344,17 @@
     .watching.s-open { animation: pulse-open 2s ease-in-out infinite; }
     .cell-watch-label {
       position: absolute;
-      inset: 0;
+      left: 2px;
+      bottom: 2px;
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 2px;
+      align-items: flex-end;
+      justify-content: flex-start;
+      gap: 1px;
       pointer-events: none;
       opacity: 0.8;
     }
     .watch-eye {
-      font-size: 7px;
+      font-size: 8px;
       line-height: 1;
       color: #555;
     }
@@ -381,7 +382,7 @@
       height: 3px;
     }
     .cell-watch-label.with-unknown-dots .watch-eye {
-      transform: translateY(1px);
+      transform: none;
     }
     .timeslot-hover { outline: 2px solid #a855f7; outline-offset: -1px; z-index: 2; }
     .s-past {
