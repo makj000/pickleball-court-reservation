@@ -1124,17 +1124,37 @@ function isFullScanBusy() {
 
 function scanKindLabel(kind) {
   switch (kind) {
-    case 'probe':
-      return 'Hourly probe';
-    case 'scheduled':
-      return 'Scheduled scan';
-    case 'ad_hoc':
-      return 'Ad-hoc full scan';
-    case 'missed_rescan':
-      return 'Ad-hoc partial rescan';
-    default:
-      return 'Scan';
+    case 'probe':       return 'Hourly probe';
+    case 'scheduled':   return 'Scheduled';
+    case 'ad_hoc':      return 'Ad-hoc full';
+    case 'missed_rescan': return 'Ad-hoc partial';
+    default:            return 'Unknown';
   }
+}
+
+function fmtShortDate(d) {
+  return (d.getMonth() + 1) + '/' + d.getDate();
+}
+
+function fmtShortTime(d) {
+  const h = d.getHours(), m = d.getMinutes();
+  const ampm = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 || 12;
+  return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`;
+}
+
+function fmtTargetDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  return (d.getMonth() + 1) + '/' + d.getDate() + days[d.getDay()];
+}
+
+function fmtTargetTime(timeText) {
+  // "9:00 AM" → "9am", "4:00 PM" → "4pm", "10:00 AM" → "10am"
+  const m = timeText.match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+  if (!m) return timeText;
+  const ampm = m[3].toLowerCase();
+  return m[2] === '00' ? `${m[1]}${ampm}` : `${m[1]}:${m[2]}${ampm}`;
 }
 
 function slotStartAt(dateStr, timeStr) {
@@ -1625,10 +1645,7 @@ function formatScanTargetLines(targets) {
     return `<span class="scan-court-sq ${cls}" title="Court ${court}">${court}</span>`;
   }).join('');
 
-  const dayLabel = (dateStr) => {
-    const d = new Date(dateStr + 'T12:00:00');
-    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  };
+  const dayLabel = fmtTargetDate;
 
   const isWeekend9amOnly = (t) => Array.isArray(t.times) && t.times.length === 1 && t.times[0] === '9:00 AM';
 
@@ -1642,7 +1659,7 @@ function formatScanTargetLines(targets) {
       const courtAvail = (target.courts && typeof target.courts === 'object') ? target.courts['9:00 AM'] : null;
       return `<span class="scan-target-inline"><span class="scan-target-day">${dayLabel(target.date)}</span>${renderSquares(courtAvail)}</span>`;
     }).join('');
-    out.push(`<span class="scan-target-line"><span class="scan-target-time-label scan-target-row-label">9:00 AM</span>${chunks}</span>`);
+    out.push(`<span class="scan-target-line"><span class="scan-target-time-label scan-target-row-label">9am</span>${chunks}</span>`);
   }
 
   for (const target of otherTargets) {
@@ -1650,7 +1667,7 @@ function formatScanTargetLines(targets) {
     const times = target.times || [];
     const timeChunks = times.map(time => {
       const courtAvail = courtsByTime ? (courtsByTime[time] || null) : null;
-      return `<span class="scan-target-time"><span class="scan-target-time-label">${time}</span>${renderSquares(courtAvail)}</span>`;
+      return `<span class="scan-target-time"><span class="scan-target-time-label">${fmtTargetTime(time)}</span>${renderSquares(courtAvail)}</span>`;
     }).join('');
     out.push(`<span class="scan-target-line"><span class="scan-target-day">${dayLabel(target.date)}</span>${timeChunks}</span>`);
   }
@@ -1682,24 +1699,21 @@ function renderUpcomingScans() {
   const recentRows = pastVisible.map(scan => {
     const completedAt = scan.completed_at ? new Date(scan.completed_at) : null;
     const startedAt = scan.started_at ? new Date(scan.started_at) : null;
-    const dayStr = completedAt
-      ? completedAt.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
-      : '—';
-    const timeStr = completedAt
-      ? completedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : '—';
+    const dayStr  = completedAt ? fmtShortDate(completedAt) : '—';
+    const timeStr = completedAt ? fmtShortTime(completedAt) : '—';
     let durationStr = '—';
     if (startedAt && completedAt) {
-      const secs = Math.max(0, Math.round((completedAt - startedAt) / 1000));
-      durationStr = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+      const ms = Math.max(0, Math.round(completedAt - startedAt));
+      durationStr = ms < 60000 ? `${ms}ms` : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
     }
-    const statusLabel = scan.status === 'failed' ? 'failed' : 'success';
+    const statusChar = scan.status === 'failed' ? 'F' : 'S';
+    const statusCls  = scan.status === 'failed' ? 'failed' : 'success';
     return `<tr>
       <td>${dayStr}</td>
       <td>${timeStr}</td>
       <td>${durationStr}</td>
       <td><span class="scan-badge ${scanBadgeClass(scan.kind, 'completed')}">${scanKindLabel(scan.kind)}</span></td>
-      <td><span class="scan-badge ${scan.status === 'failed' ? 'failed' : 'success'}">${statusLabel}</span></td>
+      <td><span class="scan-badge ${statusCls}">${statusChar}</span></td>
       <td class="scan-targets">${formatScanTargetLines(scan.targets)}</td>
     </tr>`;
   }).join('');
@@ -1738,7 +1752,7 @@ function renderUpcomingScans() {
   container.innerHTML =
     `<div class="section-label" style="margin-top:14px;">Previous Scans${pastToggle}</div>` +
     `<table class="scans-table">` +
-    `<thead><tr><th>Day</th><th>Time</th><th>Duration</th><th>Type</th><th>Status</th><th>Targets</th></tr></thead>` +
+    `<thead><tr><th>Day</th><th>Time</th><th>Duration</th><th>Type</th><th title="Status">S</th><th>Targets</th></tr></thead>` +
     `<tbody>${recentRows || '<tr><td colspan="6">No recent scans</td></tr>'}</tbody>` +
     `</table>` +
     `<div class="section-label" style="margin-top:14px;">Upcoming Scans${upcomingToggle}</div>` +
@@ -1875,89 +1889,40 @@ async function triggerMissedRescan(dates) {
   renderScanStatus();
   renderScanButton();
   updateNextScanDisplay();
-  const prevLastScanned = appState.last_scanned;
-  addProgressLog(
-    'Requesting missed-slot rescan',
-    'Sending POST /force-scan for dates: ' + dates.join(', ') + '. The UI will poll GET /state every 20 seconds for up to 5 minutes.'
-  );
+  addProgressLog('Requesting missed-slot rescan', 'Sending POST /force-scan for dates: ' + dates.join(', ') + '.');
   try {
     const r = await apiFetch('/force-scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dates }),
     });
-    if (r.status !== 202) {
-      _missedRescanActive = false;
-      _localScanRequestedAt = null;
-      addProgressLog('Missed-slot rescan request failed', 'POST /force-scan returned status ' + r.status + '.');
+    _missedRescanActive = false;
+    _localScanRequestedAt = null;
+    if (!r.ok) {
+      addProgressLog('Missed-slot rescan failed', 'POST /force-scan returned status ' + r.status + '.');
       renderScanStatus();
       renderScanButton();
       updateNextScanDisplay();
       return;
     }
+    const data = await r.json();
+    addProgressLog('Missed-slot rescan completed', 'Scan finished. last_scanned: ' + data.last_scanned + '.');
+    applyPartialUpdate(dates, data);
+    const stillMissed = findMissedDates(appState);
+    if (stillMissed.length) {
+      scheduleMissedRescan(stillMissed);
+    } else {
+      clearRetryingClass([...dates]);
+      _retryingDates.clear();
+    }
   } catch (e) {
     _missedRescanActive = false;
     _localScanRequestedAt = null;
-    addProgressLog('Missed-slot rescan request failed', e.message || 'Unknown error.');
+    addProgressLog('Missed-slot rescan failed', e.message || 'Unknown error.');
     renderScanStatus();
     renderScanButton();
     updateNextScanDisplay();
-    return;
   }
-
-  // Poll for rescan completion (up to 5 minutes)
-  const deadline = Date.now() + 5 * 60 * 1000;
-  const poll = setInterval(async () => {
-    try {
-      const pr = await apiFetch('/state');
-      if (!pr.ok) return;
-      const data = await pr.json();
-      appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
-      appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
-      appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
-      appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
-      appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
-      appState.app_version = data.app_version || appState.app_version || null;
-      appState.scan_started_at = data.scan_started_at || null;
-      appState.scan_started_kind = data.scan_started_kind || null;
-      appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
-      appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
-      appState.pending_full_scan = !!data.pending_full_scan;
-      renderScanStatus();
-      renderScanButton();
-      renderVersionInfo();
-      updateNextScanDisplay();
-      if (data.last_scanned && data.last_scanned !== prevLastScanned) {
-        clearInterval(poll);
-        _missedRescanActive = false;
-        _localScanRequestedAt = null;
-        addProgressLog(
-          'Missed-slot rescan completed',
-          'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
-        );
-        applyPartialUpdate(dates, data);
-        // After applying the update, check if any watched slots are still null and schedule another round
-        const stillMissed = findMissedDates(appState);
-        if (stillMissed.length) {
-          scheduleMissedRescan(stillMissed);
-        } else {
-          clearRetryingClass([...dates]);
-          _retryingDates.clear();
-        }
-      } else if (Date.now() >= deadline) {
-        clearInterval(poll);
-        _missedRescanActive = false;
-        _localScanRequestedAt = null;
-        addProgressLog(
-          'Missed-slot rescan still pending',
-          'Timed out after 5 minutes waiting for GET /state to show a new last_scanned timestamp.'
-        );
-        renderScanStatus();
-        renderScanButton();
-        updateNextScanDisplay();
-      }
-    } catch (_) {}
-  }, 20 * 1000);
 }
 
 function applyPartialUpdate(dates, newState) {
@@ -2036,68 +2001,66 @@ function applyPartialUpdate(dates, newState) {
 }
 
 // ── Fetch state ───────────────────────────────────────────────────────────────
+function _applyStateData(data) {
+  appState = data;
+  if (!appState.app_version) appState.app_version = null;
+  appState.watched_slots_updated_at = appState.watched_slots_updated_at || null;
+  appState.pending_partial_rescan_dates = Array.isArray(appState.pending_partial_rescan_dates) ? appState.pending_partial_rescan_dates : [];
+  appState.pending_partial_rescan_at = appState.pending_partial_rescan_at || null;
+  appState.incomplete_dates = Array.isArray(appState.incomplete_dates) ? appState.incomplete_dates : [];
+  appState.scan_completion_status = appState.scan_completion_status || null;
+  appState.last_scan_started_at = appState.last_scan_started_at || null;
+  if (!appState.last_scan_kind) appState.last_scan_kind = null;
+  appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
+  appState.telegram_call_history = Array.isArray(appState.telegram_call_history) ? appState.telegram_call_history : [];
+  appState.pending_full_scan = !!appState.pending_full_scan;
+  appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
+  if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) appState.court_nums = ['6', '4', '5'];
+  if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
+  if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
+  if (!Array.isArray(appState.auto_book_slots)) appState.auto_book_slots = [];
+  const recLink = document.getElementById('rec-link');
+  if (recLink) recLink.href = appState.rec_url;
+  const freqSelect = document.getElementById('freq-select');
+  if (freqSelect && appState.scan_interval_hours != null) {
+    const iv = Number(appState.scan_interval_hours);
+    const closest = [...freqSelect.options].reduce((best, o) =>
+      Math.abs(Number(o.value) - iv) < Math.abs(Number(best.value) - iv) ? o : best
+    );
+    freqSelect.value = closest.value;
+    if (!freqSelect.dataset.wired) {
+      freqSelect.addEventListener('change', e => setFrequency(e.target.value));
+      freqSelect.dataset.wired = '1';
+    }
+  }
+  const autoWatchToggle = document.getElementById('auto-watch-toggle');
+  if (autoWatchToggle) {
+    autoWatchToggle.checked = appState.auto_watch_weekends_enabled !== false;
+    if (!autoWatchToggle.dataset.wired) {
+      autoWatchToggle.addEventListener('change', e => setAutoWatchWeekends(e.target.checked));
+      autoWatchToggle.dataset.wired = '1';
+    }
+  }
+  const focusNewestToggle = document.getElementById('focus-newest-toggle');
+  if (focusNewestToggle) {
+    focusNewestToggle.checked = !!appState.focus_newest_weekend;
+    if (!focusNewestToggle.dataset.wired) {
+      focusNewestToggle.addEventListener('change', e => setFocusNewestWeekend(e.target.checked));
+      focusNewestToggle.dataset.wired = '1';
+    }
+  }
+}
+
 async function refreshState() {
   try {
     const r = await apiFetch('/state');
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
-    appState = await r.json();
-    if (!appState.app_version) appState.app_version = null;
-    appState.watched_slots_updated_at = appState.watched_slots_updated_at || null;
-    appState.pending_partial_rescan_dates = Array.isArray(appState.pending_partial_rescan_dates) ? appState.pending_partial_rescan_dates : [];
-    appState.pending_partial_rescan_at = appState.pending_partial_rescan_at || null;
-    appState.incomplete_dates = Array.isArray(appState.incomplete_dates) ? appState.incomplete_dates : [];
-    appState.scan_completion_status = appState.scan_completion_status || null;
-    appState.last_scan_started_at = appState.last_scan_started_at || null;
-    if (!appState.last_scan_kind) appState.last_scan_kind = null;
-    appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
-    appState.telegram_call_history = Array.isArray(appState.telegram_call_history) ? appState.telegram_call_history : [];
-    appState.pending_full_scan = !!appState.pending_full_scan;
-    appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
-    if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) {
-      appState.court_nums = ['6', '4', '5'];
-    }
-    if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) {
-      appState.court_preference = appState.court_nums.slice();
-    }
-    if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
-    if (!Array.isArray(appState.auto_book_slots)) appState.auto_book_slots = [];
-    const recLink = document.getElementById('rec-link');
-    if (recLink) recLink.href = appState.rec_url;
-    const freqSelect = document.getElementById('freq-select');
-    if (freqSelect && appState.scan_interval_hours != null) {
-      const iv = Number(appState.scan_interval_hours);
-      const closest = [...freqSelect.options].reduce((best, o) =>
-        Math.abs(Number(o.value) - iv) < Math.abs(Number(best.value) - iv) ? o : best
-      );
-      freqSelect.value = closest.value;
-      if (!freqSelect.dataset.wired) {
-        freqSelect.addEventListener('change', e => setFrequency(e.target.value));
-        freqSelect.dataset.wired = '1';
-      }
-    }
-    const autoWatchToggle = document.getElementById('auto-watch-toggle');
-    if (autoWatchToggle) {
-      const enabled = appState.auto_watch_weekends_enabled !== false;
-      autoWatchToggle.checked = enabled;
-      if (!autoWatchToggle.dataset.wired) {
-        autoWatchToggle.addEventListener('change', e => setAutoWatchWeekends(e.target.checked));
-        autoWatchToggle.dataset.wired = '1';
-      }
-    }
-    const focusNewestToggle = document.getElementById('focus-newest-toggle');
-    if (focusNewestToggle) {
-      focusNewestToggle.checked = !!appState.focus_newest_weekend;
-      if (!focusNewestToggle.dataset.wired) {
-        focusNewestToggle.addEventListener('change', e => setFocusNewestWeekend(e.target.checked));
-        focusNewestToggle.dataset.wired = '1';
-      }
-    }
+    _applyStateData(await r.json());
     renderVersionInfo();
     renderGrid();
     renderScanStatus();
     renderScanButton();
     checkWatchedNotifications(appState);
-
     if (_missedRescanTimer && appState.scan_started_at) {
       clearTimeout(_missedRescanTimer);
       _missedRescanTimer = null;
@@ -2105,14 +2068,10 @@ async function refreshState() {
       clearRetryingClass([..._retryingDates]);
       _retryingDates.clear();
     }
-
-    // On every state refresh, check for watched slots that still have no scan result
-    // and schedule a rescan if not already pending
     if (!_missedRescanTimer && !appState.scan_started_at) {
       const missed = findMissedDates(appState);
       if (missed.length) scheduleMissedRescan(missed);
     }
-
     updateNextScanDisplay();
   } catch (e) {
     toast('Error: ' + e.message);
@@ -2425,171 +2384,53 @@ function toast(msg) {
 }
 
 async function forceScan() {
-  if (isFullScanBusy() || appState.pending_full_scan) {
+  if (isFullScanBusy()) {
     toast('A scan is already running');
-    addProgressLog(
-      'Ad-hoc scan not started',
-      'The page did not submit a new full scan because a full scan is already running or already queued.'
-    );
-    renderScanButton();
     return;
   }
-  // Cancel any pending missed rescan — a full scan covers those dates
   if (_missedRescanTimer) {
     clearTimeout(_missedRescanTimer);
     _missedRescanTimer = null;
     _missedRescanAt = null;
     clearRetryingClass([..._retryingDates]);
     _retryingDates.clear();
-    addProgressLog(
-      'Canceled pending partial rescan',
-      'The page canceled the waiting ad-hoc partial rescan because a full scan was requested instead.'
-    );
   }
-  const queueAfterPartial = currentScanKind() === 'missed_rescan' && !!appState.scan_started_at;
-  if (!queueAfterPartial) {
-    _missedRescanActive = false;
-    _manualScanPending = true;
-    _localScanRequestedAt = new Date().toISOString();
-  }
+  _missedRescanActive = false;
+  _manualScanPending = true;
+  _localScanRequestedAt = new Date().toISOString();
   renderScanStatus();
   renderScanButton();
   updateNextScanDisplay();
-  const prevLastScanned = appState.last_scanned;
-  addProgressLog(
-    queueAfterPartial ? 'Queueing ad-hoc full scan after partial rescan' : 'Requesting ad-hoc scan',
-    queueAfterPartial
-      ? 'Sending POST /force-scan while an ad-hoc partial rescan is already running. The backend should queue the full scan to run next.'
-      : 'Sending POST /force-scan. The UI will poll GET /state every 30 seconds for up to 3 minutes.'
-  );
+  addProgressLog('Requesting ad-hoc scan', 'Sending POST /force-scan.');
   try {
     const r = await apiFetch('/force-scan', { method: 'POST' });
-    if (r.status === 202) {
-      const data = await r.json().catch(() => ({}));
-      const queuedAfterPartial = !!data.queued_after_partial;
-      if (queuedAfterPartial) {
-        appState.pending_full_scan = true;
-        _manualScanPending = false;
-        _localScanRequestedAt = null;
-        toast('Full scan queued after partial rescan');
-        addProgressLog(
-          'Ad-hoc full scan queued',
-          'POST /force-scan returned 202 and the backend queued a full scan to start after the current ad-hoc partial rescan finishes.'
-        );
-      } else {
-        toast('Scan started — refreshing in ~2 min');
-        addProgressLog(
-          'Ad-hoc scan accepted',
-          'POST /force-scan returned 202. Waiting for GET /state to report a newer last_scanned timestamp.'
-        );
-      }
-      renderScanStatus();
-      renderScanButton();
-      updateNextScanDisplay();
-      // Poll every 30s for up to 3 minutes, stop when last_scanned changes
-      const deadline = Date.now() + 3 * 60 * 1000;
-      let lastSeenScanned = prevLastScanned;
-      let partialCompletionSeen = false;
-      const poll = setInterval(async () => {
-        try {
-          const pr = await apiFetch('/state');
-          if (!pr.ok) return;
-          const data = await pr.json();
-          appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
-          appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
-          appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
-          appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
-          appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
-          appState.app_version = data.app_version || appState.app_version || null;
-          appState.scan_started_at = data.scan_started_at || null;
-          appState.scan_started_kind = data.scan_started_kind || null;
-          appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
-          appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
-          appState.recent_scan_history = Array.isArray(data.recent_scan_history) ? data.recent_scan_history : appState.recent_scan_history;
-          appState.pending_full_scan = !!data.pending_full_scan;
-          renderScanStatus();
-          renderScanButton();
-          renderVersionInfo();
-          updateNextScanDisplay();
-          if (data.last_scanned && data.last_scanned !== lastSeenScanned) {
-            if (queueAfterPartial && !partialCompletionSeen && data.last_scan_kind === 'missed_rescan') {
-              partialCompletionSeen = true;
-              lastSeenScanned = data.last_scanned;
-              if (!data.scan_started_at && !data.pending_full_scan) {
-                appState.pending_full_scan = true;
-              }
-              addProgressLog(
-                'Partial rescan finished; waiting for queued full scan',
-                'GET /state reported a partial-rescan completion at ' + data.last_scanned + '. The UI is still waiting for the queued ad-hoc full scan to finish.'
-              );
-              renderScanStatus();
-              renderScanButton();
-              updateNextScanDisplay();
-              return;
-            }
-            clearInterval(poll);
-            _manualScanPending = false;
-            _localScanRequestedAt = null;
-            appState.pending_full_scan = !!data.pending_full_scan;
-            addProgressLog(
-              'Ad-hoc scan completed',
-              'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
-            );
-            appState = data;
-            appState.app_version = appState.app_version || null;
-            appState.watched_slots_updated_at = appState.watched_slots_updated_at || null;
-            appState.pending_partial_rescan_dates = Array.isArray(appState.pending_partial_rescan_dates) ? appState.pending_partial_rescan_dates : [];
-            appState.pending_partial_rescan_at = appState.pending_partial_rescan_at || null;
-            appState.incomplete_dates = Array.isArray(appState.incomplete_dates) ? appState.incomplete_dates : [];
-            appState.scan_completion_status = appState.scan_completion_status || null;
-            appState.last_scan_started_at = appState.last_scan_started_at || null;
-            if (!appState.last_scan_kind) appState.last_scan_kind = null;
-            appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
-            appState.pending_full_scan = !!appState.pending_full_scan;
-            appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
-            if (!Array.isArray(appState.court_nums) || !appState.court_nums.length) appState.court_nums = ['6', '4', '5'];
-            if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
-            renderGrid();
-            renderScanStatus();
-            renderScanButton();
-            renderVersionInfo();
-            toast('Scan complete');
-            updateNextScanDisplay();
-            // Check if any watched slots are still unscanned and schedule repeat rescan
-            const missedAfterScan = findMissedDates(appState);
-            if (missedAfterScan.length) scheduleMissedRescan(missedAfterScan);
-          } else if (Date.now() >= deadline) {
-            clearInterval(poll);
-            _manualScanPending = false;
-            _localScanRequestedAt = null;
-            toast('Scan may still be running — refresh manually');
-            addProgressLog(
-              'Ad-hoc scan still pending',
-              'Timed out after 3 minutes waiting for GET /state to show a new last_scanned timestamp.'
-            );
-            renderScanStatus();
-            renderScanButton();
-            updateNextScanDisplay();
-          }
-        } catch (_) {}
-      }, 30 * 1000);
-    } else {
+    _manualScanPending = false;
+    _localScanRequestedAt = null;
+    if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       toast('Error: ' + (data.error || r.status));
-      _manualScanPending = false;
-      _localScanRequestedAt = null;
-      appState.pending_full_scan = !!appState.pending_full_scan && queueAfterPartial;
-      addProgressLog('Ad-hoc scan request failed', 'POST /force-scan returned status ' + (data.error || r.status) + '.');
+      addProgressLog('Ad-hoc scan failed', 'POST /force-scan returned status ' + r.status + '.');
       renderScanStatus();
       renderScanButton();
       updateNextScanDisplay();
+      return;
     }
+    const data = await r.json();
+    addProgressLog('Ad-hoc scan completed', 'Scan finished. last_scanned: ' + data.last_scanned + '.');
+    _applyStateData(data);
+    renderVersionInfo();
+    renderGrid();
+    renderScanStatus();
+    renderScanButton();
+    toast('Scan complete');
+    updateNextScanDisplay();
+    const missedAfterScan = findMissedDates(appState);
+    if (missedAfterScan.length) scheduleMissedRescan(missedAfterScan);
   } catch (e) {
     _manualScanPending = false;
     _localScanRequestedAt = null;
-    appState.pending_full_scan = false;
     toast('Error: ' + e.message);
-    addProgressLog('Ad-hoc scan request failed', e.message || 'Unknown error.');
+    addProgressLog('Ad-hoc scan failed', e.message || 'Unknown error.');
     renderScanStatus();
     renderScanButton();
     updateNextScanDisplay();
@@ -2597,12 +2438,8 @@ async function forceScan() {
 }
 
 async function triggerDayRescan(dateStr) {
-  if (currentScanStartedAt() || appState.pending_full_scan) {
+  if (isFullScanBusy()) {
     toast('Wait for the current scan to finish');
-    addProgressLog(
-      'Day rescan not started',
-      'The page did not submit a one-day rescan for ' + dateStr + ' because another scan is already running or a full scan is queued.'
-    );
     return;
   }
   if (_missedRescanTimer) {
@@ -2611,96 +2448,41 @@ async function triggerDayRescan(dateStr) {
     _missedRescanAt = null;
     clearRetryingClass([..._retryingDates]);
     _retryingDates.clear();
-    addProgressLog(
-      'Canceled pending partial rescan',
-      'The page canceled the waiting partial rescan because you clicked the date row for ' + dateStr + '.'
-    );
-    renderScanStatus();
-    renderScanButton();
-    updateNextScanDisplay();
   }
-
   _missedRescanActive = true;
   _localScanRequestedAt = new Date().toISOString();
   renderScanStatus();
   renderScanButton();
   updateNextScanDisplay();
-  const prevLastScanned = appState.last_scanned;
-  addProgressLog(
-    'Requesting day rescan',
-    'Sending POST /force-scan for ' + dateStr + ' after clicking its date row. The UI will poll GET /state every 20 seconds for up to 5 minutes.'
-  );
+  addProgressLog('Requesting day rescan', 'Sending POST /force-scan for ' + dateStr + '.');
   try {
     const r = await apiFetch('/force-scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dates: [dateStr] }),
     });
-    if (r.status !== 202) {
-      _missedRescanActive = false;
-      _localScanRequestedAt = null;
-      addProgressLog('Day rescan request failed', 'POST /force-scan returned status ' + r.status + '.');
+    _missedRescanActive = false;
+    _localScanRequestedAt = null;
+    if (!r.ok) {
+      addProgressLog('Day rescan failed', 'POST /force-scan returned status ' + r.status + '.');
       renderScanStatus();
       renderScanButton();
       updateNextScanDisplay();
       return;
     }
+    const data = await r.json();
+    addProgressLog('Day rescan completed', 'Scan finished. last_scanned: ' + data.last_scanned + '.');
+    applyPartialUpdate([dateStr], data);
+    toast('Day rescan complete');
+    updateNextScanDisplay();
   } catch (e) {
     _missedRescanActive = false;
     _localScanRequestedAt = null;
-    addProgressLog('Day rescan request failed', e.message || 'Unknown error.');
+    addProgressLog('Day rescan failed', e.message || 'Unknown error.');
     renderScanStatus();
     renderScanButton();
     updateNextScanDisplay();
-    return;
   }
-
-  const deadline = Date.now() + 5 * 60 * 1000;
-  const poll = setInterval(async () => {
-    try {
-      const pr = await apiFetch('/state');
-      if (!pr.ok) return;
-      const data = await pr.json();
-      appState.watched_slots_updated_at = data.watched_slots_updated_at || appState.watched_slots_updated_at || null;
-      appState.pending_partial_rescan_dates = Array.isArray(data.pending_partial_rescan_dates) ? data.pending_partial_rescan_dates : appState.pending_partial_rescan_dates;
-      appState.pending_partial_rescan_at = data.pending_partial_rescan_at || null;
-      appState.incomplete_dates = Array.isArray(data.incomplete_dates) ? data.incomplete_dates : appState.incomplete_dates;
-      appState.scan_completion_status = data.scan_completion_status || appState.scan_completion_status || null;
-      appState.app_version = data.app_version || appState.app_version || null;
-      appState.scan_started_at = data.scan_started_at || null;
-      appState.scan_started_kind = data.scan_started_kind || null;
-      appState.last_scan_started_at = data.last_scan_started_at || appState.last_scan_started_at || null;
-      appState.last_scan_kind = data.last_scan_kind || appState.last_scan_kind || null;
-      appState.recent_scan_history = Array.isArray(data.recent_scan_history) ? data.recent_scan_history : appState.recent_scan_history;
-      appState.pending_full_scan = !!data.pending_full_scan;
-      renderScanStatus();
-      renderScanButton();
-      renderVersionInfo();
-      updateNextScanDisplay();
-      if (data.last_scanned && data.last_scanned !== prevLastScanned) {
-        clearInterval(poll);
-        _missedRescanActive = false;
-        _localScanRequestedAt = null;
-        addProgressLog(
-          'Day rescan completed',
-          'GET /state reported a new last_scanned timestamp: ' + data.last_scanned + '.'
-        );
-        applyPartialUpdate([dateStr], data);
-        toast('Day rescan complete');
-      } else if (Date.now() >= deadline) {
-        clearInterval(poll);
-        _missedRescanActive = false;
-        _localScanRequestedAt = null;
-        addProgressLog(
-          'Day rescan still pending',
-          'Timed out after 5 minutes waiting for GET /state to show a new last_scanned timestamp.'
-        );
-        renderScanStatus();
-        renderScanButton();
-        updateNextScanDisplay();
-      }
-    } catch (_) {}
-  }, 20 * 1000);
 }
 
 function toggleHeaderDetails() {
