@@ -33,7 +33,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -51,11 +51,14 @@ HEADLESS      = True
 DEFAULT_TIME_FILTER = "8:00 AM"
 NOTIFY_NUMBER = "+14154380400"
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
+WORK_QUEUE_URL = os.environ.get("PICKLEBALL_QUEUE_URL") or os.environ.get("WORK_QUEUE_URL", "")
 STATE_KEY           = "state.json"
 TELEGRAM_USAGE_KEY  = "telegram_usage.json"
 TELEGRAM_USAGE_MAX  = 100
 SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
+SQS_DELAY_MAX_SECONDS = 15 * 60
+SQS_STALE_GRACE_SECONDS = 5 * 60
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
 CORS_HEADERS = {
@@ -206,6 +209,26 @@ def build_scan_payload(*, targets, target_time, results):
         "summary": summary,
         "days": days,
     }
+
+
+def _mark_booked_slots_in_scan_results(
+    *,
+    targets: list[date],
+    results: dict[str, list[dict]],
+    booked_slots: list[dict],
+) -> None:
+    booked_keys = {(b["date"], b["time"]) for b in booked_slots}
+    if not booked_keys:
+        return
+    for target in targets:
+        date_str = target.isoformat()
+        label = target.strftime("%A, %B %-d")
+        for slot in results.get(label, []):
+            if (date_str, slot.get("time")) not in booked_keys:
+                continue
+            slot["court_avail"] = _empty_court_availability(False)
+            slot["courts"] = []
+            slot["preferred_court"] = None
 
 
 def _is_lambda_url_request(event) -> bool:
@@ -410,8 +433,6 @@ def _empty_state() -> dict:
     return {
         "watched_slots":       [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
         "watched_slots_updated_at": None,
-        "pending_partial_rescan_dates": [],
-        "pending_partial_rescan_at": None,
         "my_reservations":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
         "availability":        {},   # {"YYYY-MM-DD": {"H:MM AM": {"6": true, "4": false, "5": true}}}
         "notified_slots":      [],   # ["YYYY-MM-DD|H:MM AM|6"] — already SMS'd, avoids repeat texts
@@ -419,9 +440,10 @@ def _empty_state() -> dict:
         "last_scan_started_at": None,
         "last_scan_kind":      None,
         "recent_scan_history": [],
-        "pending_full_scan":   False,
         "scan_started_kind":   None,
         "scan_interval_hours": 1.0,
+        "queued_scheduled_probe_at": None,
+        "queued_scheduled_probe_token": None,
         "auto_watched_weekends": [],  # ISO date strings already auto-watched; user removals are respected
         "auto_watch_weekends_enabled": True,
         "focus_newest_weekend": False, # when True, only scan the latest weekend day (skip older ones)
@@ -525,11 +547,6 @@ def _normalize_notified_slots(notified_slots) -> list[str]:
 def _normalize_state(state: dict) -> dict:
     normalized = _empty_state()
     normalized["watched_slots_updated_at"] = state.get("watched_slots_updated_at")
-    normalized["pending_partial_rescan_dates"] = sorted(
-        d for d in (state.get("pending_partial_rescan_dates") or [])
-        if isinstance(d, str)
-    )
-    normalized["pending_partial_rescan_at"] = state.get("pending_partial_rescan_at")
     normalized["last_scanned"] = state.get("last_scanned")
     normalized["last_scan_started_at"] = state.get("last_scan_started_at")
     normalized["last_scan_kind"] = state.get("last_scan_kind") or None
@@ -572,8 +589,9 @@ def _normalize_state(state: dict) -> dict:
             "targets": targets,
         })
     normalized["recent_scan_history"] = recent_scan_history
-    normalized["pending_full_scan"] = bool(state.get("pending_full_scan"))
     normalized["scan_interval_hours"] = state.get("scan_interval_hours", 1.0)
+    normalized["queued_scheduled_probe_at"] = state.get("queued_scheduled_probe_at")
+    normalized["queued_scheduled_probe_token"] = state.get("queued_scheduled_probe_token")
     if state.get("scan_started_at"):
         normalized["scan_started_at"] = state["scan_started_at"]
         normalized["scan_started_kind"] = state.get("scan_started_kind") or None
@@ -829,26 +847,20 @@ def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
     return True
 
 
-def _detect_missed_dates(avail: dict) -> list[str]:
-    """Return dates where any focused-policy time slot has all-None court availability."""
-    today_str = date.today().isoformat()
-    return [
-        d for d, day_avail in avail.items()
-        if d >= today_str and any(
-            all(v is None for v in court_avail.values())
-            for time_key, court_avail in day_avail.items()
-            if _matches_focused_scan_policy(d, time_key)
-        )
-    ]
-
-
-def _invoke_rescan_lambda(date_strs: list[str], *, delay_seconds: int = 60) -> None:
-    lambda_client = boto3.client("lambda", region_name="us-west-2")
-    lambda_client.invoke(
-        FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
-        InvocationType="Event",
-        Payload=json.dumps({"_rescan_dates": date_strs, "_delay_seconds": delay_seconds}).encode(),
+def _enqueue_work(kind: str, payload: dict | None = None, *, delay_seconds: int = 0) -> bool:
+    """Queue internal Lambda work without sleeping inside a running invocation."""
+    if not WORK_QUEUE_URL:
+        print(f"Work queue is not configured; cannot enqueue {kind}.")
+        return False
+    delay = max(0, min(int(delay_seconds), SQS_DELAY_MAX_SECONDS))
+    body = {"kind": kind, **(payload or {})}
+    boto3.client("sqs", region_name="us-west-2").send_message(
+        QueueUrl=WORK_QUEUE_URL,
+        DelaySeconds=delay,
+        MessageBody=json.dumps(body),
     )
+    print(f"Queued {kind}" + (f" in {delay}s." if delay else "."))
+    return True
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
@@ -1528,26 +1540,22 @@ def _api_fetch_availability(
             court_num, date_map = future.result()
             raw[court_num] = date_map
 
-    # `watched` tracks specifically requested (date, time) pairs so we can seed them
-    # all-False (confirmed booked) even if absent from the API response.
-    watched: dict[str, set[str]] | None = (
-        {
-            d: set(SLOT_TIMES) if date.fromisoformat(d).weekday() >= 5 else set(times)
-            for d, times in target_times_by_date.items()
-        }
-        if target_times_by_date is not None
-        else None
-    )
+    date_strs = {
+        (date.today() + timedelta(days=offset)).isoformat()
+        for offset in range(16)
+    }
+    if target_times_by_date is not None:
+        date_strs.update(target_times_by_date.keys())
+    for date_map in raw.values():
+        date_strs.update(date_map.keys())
 
-    # Seed watched slots as all-False; API will flip open ones to True below.
-    result: dict[str, dict[str, dict[str, bool | None]]] = {}
-    if watched is not None:
-        for date_str, times in watched.items():
-            result[date_str] = {
-                t: {c: False for c in TARGET_COURTS}
-                for t in times
-                if t in SLOT_TIMES
-            }
+    result: dict[str, dict[str, dict[str, bool | None]]] = {
+        date_str: {
+            time_text: {court: False for court in TARGET_COURTS}
+            for time_text in SLOT_TIMES
+        }
+        for date_str in sorted(date_strs)
+    }
 
     # Mark open slots True for ALL dates the API returns — no date filter.
     # This gives us free coverage of weekdays we didn't explicitly watch.
@@ -1748,100 +1756,6 @@ def _notify_booked_slots(booked_slots: list[dict]) -> None:
 
 # ── Scheduled worker ──────────────────────────────────────────────────────────
 
-def _run_rescan_dates(date_strs: list[str], *, delay_seconds: int = 0) -> None:
-    """Rescan specific dates (used for missed-slot retry)."""
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-
-    valid_strs = []
-    for d_str in date_strs:
-        try:
-            date.fromisoformat(d_str)
-            valid_strs.append(d_str)
-        except ValueError:
-            continue
-    if not valid_strs:
-        return
-    date_strs = valid_strs
-    history_targets = _history_targets_from_map({d_str: SLOT_TIMES[:] for d_str in date_strs})
-
-    state = load_state()
-    if _active_scan_started_at(state):
-        print("Active scan in progress. Skipping rescan.")
-        return
-
-    started_at = _utc_now_iso()
-    pending_dates = [
-        d for d in (state.get("pending_partial_rescan_dates") or [])
-        if d not in set(date_strs)
-    ]
-    state["pending_partial_rescan_dates"] = pending_dates
-    state["pending_partial_rescan_at"] = None if not pending_dates else state.get("pending_partial_rescan_at")
-    state["scan_started_at"] = started_at
-    state["scan_started_kind"] = "missed_rescan"
-    save_state(state)
-
-    print(f"Rescanning {len(targets)} missed date(s): {date_strs}")
-    auto_book_slots = state.get("auto_book_slots") or []
-    rescan_times = {d_str: SLOT_TIMES[:] for d_str in date_strs}
-    try:
-        new_avail, booked_slots = _api_scan(
-            target_times_by_date=rescan_times,
-            auto_book_slots=auto_book_slots,
-        )
-        state = load_state()
-        availability = state.get("availability", {})
-        availability.update(new_avail)
-        state["availability"] = availability
-        state["last_scan_started_at"] = started_at
-        state["last_scanned"] = _utc_now_iso()
-        state["last_scan_kind"] = "missed_rescan"
-        _record_scan_history(
-            state,
-            kind="missed_rescan",
-            started_at=started_at,
-            completed_at=state["last_scanned"],
-            status="completed",
-            targets=_attach_history_results(history_targets, new_avail),
-        )
-        open_target_lines = _alert_lines_for_open_targets(state, new_avail)
-        _apply_booked_slots(state, booked_slots)
-        pending_full_scan = bool(state.get("pending_full_scan"))
-        if state.get("scan_started_at") == started_at:
-            state.pop("scan_started_at", None)
-            state.pop("scan_started_kind", None)
-        save_state(state)
-        _notify_booked_slots(booked_slots)
-        if open_target_lines:
-            msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
-            notify(msg)
-        else:
-            print("No open watched or auto-book slots in this scan.")
-        print(f"Rescan complete for: {date_strs}")
-        if pending_full_scan:
-            state = load_state()
-            state["pending_full_scan"] = False
-            save_state(state)
-            print("Queued full scan will start after partial rescan.")
-            _run_full_refresh_worker(force=True)
-    except Exception as exc:
-        state = load_state()
-        if state.get("scan_started_at") == started_at:
-            state.pop("scan_started_at", None)
-            state.pop("scan_started_kind", None)
-            _record_scan_history(
-                state,
-                kind="missed_rescan",
-                started_at=started_at,
-                completed_at=_utc_now_iso(),
-                status="failed",
-                targets=history_targets,
-                error=str(exc),
-            )
-            save_state(state)
-        raise
-
-
 def _new_day_iso(today: date | None = None) -> str:
     return ((today or date.today()) + timedelta(days=14)).isoformat()
 
@@ -1879,19 +1793,24 @@ def _future_watched_time_map(state: dict) -> dict[str, list[str]]:
     }
 
 
+def _auto_book_time_map(auto_book_slots: list[dict]) -> dict[str, list[str]]:
+    today_str = date.today().isoformat()
+    auto_book_by_date: dict[str, set[str]] = {}
+    for slot in auto_book_slots:
+        slot_date = slot.get("date", "")
+        slot_time = slot.get("time", "")
+        if not slot_date or not slot_time or slot_date < today_str or slot_time not in SLOT_TIMES:
+            continue
+        auto_book_by_date.setdefault(slot_date, set()).add(slot_time)
+    return {
+        slot_date: [time_text for time_text in SLOT_TIMES if time_text in times]
+        for slot_date, times in auto_book_by_date.items()
+    }
+
+
 def _watched_and_auto_book_targets(state: dict) -> dict[str, list[str]]:
     watched_times = _future_watched_time_map(state)
-
-    today_str = date.today().isoformat()
-    for ab in (state.get("auto_book_slots") or []):
-        ab_date = ab.get("date", "")
-        ab_time = ab.get("time", "")
-        if not ab_date or not ab_time or ab_date < today_str or ab_time not in SLOT_TIMES:
-            continue
-        existing = set(watched_times.get(ab_date, []))
-        if ab_time not in existing:
-            existing.add(ab_time)
-            watched_times[ab_date] = [t for t in SLOT_TIMES if t in existing]
+    auto_book_times = _auto_book_time_map(state.get("auto_book_slots") or [])
 
     if state.get("focus_newest_weekend"):
         weekend_dates = [d for d in watched_times if date.fromisoformat(d).weekday() >= 5]
@@ -1901,18 +1820,12 @@ def _watched_and_auto_book_targets(state: dict) -> dict[str, list[str]]:
                 if d != newest:
                     del watched_times[d]
 
+    for ab_date, ab_times in auto_book_times.items():
+        existing = set(watched_times.get(ab_date, []))
+        existing.update(ab_times)
+        watched_times[ab_date] = [t for t in SLOT_TIMES if t in existing]
+
     return watched_times
-
-
-def _scan_completion_status(state: dict) -> tuple[str, list[str]]:
-    incomplete_dates = _detect_missed_dates(state.get("availability", {}))
-    if state.get("scan_started_at"):
-        return "running", incomplete_dates
-    if state.get("pending_partial_rescan_dates"):
-        return "partial_rescan_scheduled", incomplete_dates
-    if incomplete_dates:
-        return "incomplete", incomplete_dates
-    return "complete", incomplete_dates
 
 
 def _is_within_scan_window() -> bool:
@@ -1938,13 +1851,10 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
 
 def _full_scan_targets() -> dict[str, list[str]]:
     today = date.today()
-    new_day = _new_day_iso(today)
-    targets: dict[str, list[str]] = {new_day: SLOT_TIMES[:]}
-    for day_offset in range(16):
-        target = today + timedelta(days=day_offset)
-        if target.weekday() >= 5:
-            targets.setdefault(target.isoformat(), ["9:00 AM"])
-    return targets
+    return {
+        (today + timedelta(days=day_offset)).isoformat(): SLOT_TIMES[:]
+        for day_offset in range(16)
+    }
 
 
 def _run_full_refresh_worker(*, force: bool = False) -> None:
@@ -1960,9 +1870,6 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
     history_targets = _history_targets_from_map(scan_targets)
     started_at = _utc_now_iso()
 
-    state["pending_full_scan"] = False
-    state["pending_partial_rescan_dates"] = []
-    state["pending_partial_rescan_at"] = None
     state["scan_started_at"] = started_at
     state["scan_started_kind"] = "ad_hoc"
     save_state(state)
@@ -2002,21 +1909,8 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         if state.get("scan_started_at") == started_at:
             state.pop("scan_started_at", None)
             state.pop("scan_started_kind", None)
-        missed_dates = _detect_missed_dates(new_avail)
-        state["pending_partial_rescan_dates"] = missed_dates
-        state["pending_partial_rescan_at"] = (
-            (datetime.now(tz=timezone.utc) + timedelta(seconds=60)).isoformat(timespec="seconds").replace("+00:00", "Z")
-            if missed_dates else None
-        )
         save_state(state)
         _notify_booked_slots(booked_slots)
-
-        if missed_dates:
-            print(f"Scheduling rescan for {len(missed_dates)} missed date(s) in 60s: {missed_dates}")
-            try:
-                _invoke_rescan_lambda(missed_dates, delay_seconds=60)
-            except Exception as exc:
-                print(f"Failed to schedule rescan: {exc}")
     except Exception as exc:
         state = load_state()
         if state.get("scan_started_at") == started_at:
@@ -2063,7 +1957,6 @@ def _run_scheduled_worker() -> None:
         return
 
     started_at = _utc_now_iso()
-    state["pending_full_scan"] = False
     state["scan_started_at"] = started_at
     state["scan_started_kind"] = "scheduled"
     save_state(state)
@@ -2311,17 +2204,11 @@ def _bot_run_tool(name: str, args: dict):
         return _bot_compact_state()
     if name == "scan_now":
         date_strs = args.get("dates") or []
-        payload = (
-            json.dumps({"_rescan_dates": date_strs}).encode()
-            if date_strs
-            else json.dumps({"_scheduled": True}).encode()
-        )
-        boto3.client("lambda", region_name="us-west-2").invoke(
-            FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
-            InvocationType="Event",
-            Payload=payload,
-        )
-        return {"ok": True, "message": "Scan started"}
+        if date_strs:
+            for d_str in date_strs:
+                date.fromisoformat(d_str)
+        _run_full_refresh_worker(force=True)
+        return {"ok": True, "message": "Scan completed", "state": _bot_compact_state()}
     if name == "add_watched_slots":
         state = load_state()
         existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
@@ -2605,7 +2492,6 @@ def _check_auth(event) -> bool:
 def handle_state(event) -> dict:
     state = load_state()
     today = date.today()
-    completion_status, incomplete_dates = _scan_completion_status(state)
 
     watched_set   = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
     mine_set      = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
@@ -2644,18 +2530,14 @@ def handle_state(event) -> dict:
             "court_preference":    COURT_PREFERENCE,
             "app_version":         APP_VERSION,
             "watched_slots_updated_at": state.get("watched_slots_updated_at"),
-            "pending_partial_rescan_dates": state.get("pending_partial_rescan_dates", []),
-            "pending_partial_rescan_at": state.get("pending_partial_rescan_at"),
-            "incomplete_dates":     incomplete_dates,
-            "scan_completion_status": completion_status,
             "scan_started_at":     state.get("scan_started_at"),
             "scan_started_kind":   state.get("scan_started_kind"),
             "last_scanned":        state.get("last_scanned"),
             "last_scan_started_at": state.get("last_scan_started_at"),
             "last_scan_kind":      state.get("last_scan_kind"),
             "recent_scan_history": state.get("recent_scan_history", []),
-            "pending_full_scan":   bool(state.get("pending_full_scan")),
             "scan_interval_hours": state.get("scan_interval_hours", 1.0),
+            "queued_scheduled_probe_at": state.get("queued_scheduled_probe_at"),
             "rec_url":             BASE_URL,
             "auto_book_slots":     state.get("auto_book_slots", []),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
@@ -2802,20 +2684,110 @@ def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
     return True
 
 
-def _schedule_self_probe(interval_hours: float) -> None:
-    """Sleep for the configured interval then async-invoke this Lambda to continue the chain."""
-    if not _is_within_scan_window():
+def _scheduled_probe_delay_seconds(interval_hours: float) -> int:
+    return max(1, min(round(interval_hours * 3600), SQS_DELAY_MAX_SECONDS))
+
+
+def _clear_queued_scheduled_probe(state: dict) -> None:
+    state["queued_scheduled_probe_at"] = None
+    state["queued_scheduled_probe_token"] = None
+
+
+def _queued_scheduled_probe_is_current(state: dict, interval_hours: float) -> bool:
+    token = state.get("queued_scheduled_probe_token")
+    queued_at = _parse_utc_iso(state.get("queued_scheduled_probe_at"))
+    if not token or not queued_at:
+        return False
+    delay = _scheduled_probe_delay_seconds(interval_hours)
+    stale_after = max(delay * 2, SQS_STALE_GRACE_SECONDS)
+    return queued_at >= datetime.now(tz=timezone.utc) - timedelta(seconds=stale_after)
+
+
+def _queue_next_scheduled_probe(interval_hours: float, *, state: dict | None = None, force: bool = False) -> bool:
+    if interval_hours >= 0.25 or not _is_within_scan_window():
+        if state is not None and force:
+            _clear_queued_scheduled_probe(state)
+            save_state(state)
+        return False
+
+    state = state or load_state()
+    if not force and _queued_scheduled_probe_is_current(state, interval_hours):
+        print(f"Scheduled probe already queued for {state.get('queued_scheduled_probe_at')}.")
+        return True
+    if not _scheduled_scan_targets(state)[0]:
+        _clear_queued_scheduled_probe(state)
+        save_state(state)
+        print("No future watched or auto-book slots; not queueing scheduled probe.")
+        return False
+
+    delay_seconds = _scheduled_probe_delay_seconds(interval_hours)
+    token = str(time.time_ns())
+    queued_at = (
+        datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    state["queued_scheduled_probe_at"] = queued_at
+    state["queued_scheduled_probe_token"] = token
+    save_state(state)
+
+    if _enqueue_work("scheduled_probe", {"token": token}, delay_seconds=delay_seconds):
+        return True
+
+    latest = load_state()
+    if latest.get("queued_scheduled_probe_token") == token:
+        _clear_queued_scheduled_probe(latest)
+        save_state(latest)
+    return False
+
+
+def _run_queued_scheduled_probe(token: str) -> None:
+    state = load_state()
+    if not token or token != state.get("queued_scheduled_probe_token"):
+        print("Skipping stale scheduled probe queue item.")
         return
-    fn = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
-    if not fn:
+
+    interval = float(state.get("scan_interval_hours") or 1.0)
+    if interval >= 0.25 or not _is_within_scan_window():
+        _clear_queued_scheduled_probe(state)
+        save_state(state)
+        print(f"Cleared queued scheduled probe; interval={interval} hr or outside scan window.")
         return
-    sleep_secs = max(1, round(interval_hours * 3600))
-    time.sleep(sleep_secs)
-    boto3.client("lambda", region_name="us-west-2").invoke(
-        FunctionName=fn,
-        InvocationType="Event",
-        Payload=json.dumps({"_self_probe": True}).encode(),
-    )
+
+    _run_scheduled_worker()
+
+    state = load_state()
+    if token != state.get("queued_scheduled_probe_token"):
+        print("Scheduled probe changed while this item was running; not queueing another.")
+        return
+
+    interval = float(state.get("scan_interval_hours") or 1.0)
+    if interval < 0.25:
+        _queue_next_scheduled_probe(interval, state=state, force=True)
+    else:
+        _clear_queued_scheduled_probe(state)
+        save_state(state)
+
+
+def _run_queue_work(message: dict) -> None:
+    kind = message.get("kind")
+    if kind == "scheduled_probe":
+        _run_queued_scheduled_probe(str(message.get("token") or ""))
+    else:
+        print(f"Ignoring unknown queue work kind: {kind}")
+
+
+def _is_sqs_event(event: dict) -> bool:
+    records = (event or {}).get("Records") or []
+    return bool(records) and all(record.get("eventSource") == "aws:sqs" for record in records)
+
+
+def _handle_queue_event(event: dict) -> None:
+    for record in event.get("Records") or []:
+        try:
+            message = json.loads(record.get("body") or "{}")
+        except json.JSONDecodeError:
+            print("Ignoring queue item with invalid JSON body.")
+            continue
+        _run_queue_work(message)
 
 
 def handle_scan_interval(event) -> dict:
@@ -2836,13 +2808,21 @@ def handle_scan_interval(event) -> dict:
         }
     state = load_state()
     state["scan_interval_hours"] = requested
-    save_state(state)
+    _clear_queued_scheduled_probe(state)
+    if requested < 0.25:
+        queued = _queue_next_scheduled_probe(requested, state=state, force=True)
+        state = load_state()
+    else:
+        save_state(state)
+        queued = False
     return {
         "statusCode": 200,
         "headers": CORS_HEADERS,
         "body": json.dumps({
             "ok": True,
             "scan_interval_hours": requested,
+            "queued_scheduled_probe_at": state.get("queued_scheduled_probe_at"),
+            "scheduled_probe_queued": queued,
         }),
     }
 
@@ -2864,6 +2844,12 @@ def _run_targeted_daily_scan() -> None:
         if target.weekday() >= 5:
             times_by_date.setdefault(target.isoformat(), ["9:00 AM"])
 
+    auto_book_slots = state.get("auto_book_slots") or []
+    for date_str, times in _auto_book_time_map(auto_book_slots).items():
+        existing = set(times_by_date.get(date_str, []))
+        existing.update(times)
+        times_by_date[date_str] = [t for t in SLOT_TIMES if t in existing]
+
     history_targets = _history_targets_from_map(times_by_date)
     started_at = _utc_now_iso()
 
@@ -2874,7 +2860,10 @@ def _run_targeted_daily_scan() -> None:
         + "…"
     )
     try:
-        new_avail, _ = _api_scan(target_times_by_date=times_by_date)
+        new_avail, booked_slots = _api_scan(
+            target_times_by_date=times_by_date,
+            auto_book_slots=auto_book_slots,
+        )
         elapsed = time.monotonic() - t0
 
         for date_str in sorted(times_by_date):
@@ -2909,7 +2898,9 @@ def _run_targeted_daily_scan() -> None:
                 day_state[time_text] = _normalize_time_availability(court_avail)
             availability[date_str] = day_state
         state["availability"] = availability
+        _apply_booked_slots(state, booked_slots)
         save_state(state)
+        _notify_booked_slots(booked_slots)
         if open_target_lines:
             msg = "Pickleball slot(s) now available:\n" + "\n".join(open_target_lines)
             notify(msg)
@@ -2932,29 +2923,11 @@ def _run_targeted_daily_scan() -> None:
         raise
 
 
-# ── Legacy async worker ───────────────────────────────────────────────────────
-
-def _run_async_worker() -> None:
-    targets = load_check_dates()
-    results = asyncio.run(main(targets=targets, target_time=DEFAULT_TIME_FILTER))
-    if not results:
-        msg = f"Pickleball scan complete: No {DEFAULT_TIME_FILTER} slots available."
-    else:
-        lines = [
-            f"{day} {s['time']} -> {', '.join(s['courts']) or '(could not read courts)'}"
-            for day, slots in results.items()
-            for s in slots
-        ]
-        msg = f"Pickleball {DEFAULT_TIME_FILTER} available:\n" + "\n".join(lines)
-    notify(msg)
-
-
 # ── Lambda handler ────────────────────────────────────────────────────────────
 
 def handler(event, context):
-    # Internal: legacy async worker
-    if event.get("_async_worker"):
-        _run_async_worker()
+    if _is_sqs_event(event):
+        _handle_queue_event(event)
         return
 
     # Internal: targeted daily probe (8 AM & 9 AM, 14 days out)
@@ -2967,30 +2940,25 @@ def handler(event, context):
         _run_full_refresh_worker(force=True)
         return
 
-    # Internal: targeted rescan of specific dates (missed-slot retry)
-    if event.get("_rescan_dates"):
-        _run_rescan_dates(
-            event["_rescan_dates"],
-            delay_seconds=event.get("_delay_seconds", 0),
-        )
-        return
-
-    # EventBridge tick (fires every 15 min); honor configured scan_interval_hours.
-    # Also handles self-probe chain for sub-15-min intervals.
-    if event.get("source") == "aws.events" or event.get("_self_probe"):
+    # EventBridge tick (fires every 15 min); SQS handles sub-15-min follow-up probes.
+    if event.get("source") == "aws.events":
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
-        if not event.get("_self_probe") and not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
+        if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
             print(f"Skipping tick: interval={interval} hr.")
             return
-        # Sub-15-min: only scan watched slots (fast). At normal cadence (≥15 min),
-        # run the broader targeted scan for new-day discovery.
         if interval < 0.25:
+            if _queued_scheduled_probe_is_current(state, interval):
+                print(f"Skipping tick: scheduled probe already queued for {state.get('queued_scheduled_probe_at')}.")
+                return
             _run_scheduled_worker()
+            state = load_state()
+            _queue_next_scheduled_probe(float(state.get("scan_interval_hours") or 1.0), state=state, force=True)
         else:
+            if state.get("queued_scheduled_probe_token"):
+                _clear_queued_scheduled_probe(state)
+                save_state(state)
             _run_targeted_daily_scan()
-        if interval < 0.25:
-            _schedule_self_probe(interval)
         return
 
     method = get_method(event)
@@ -3031,46 +2999,61 @@ def handler(event, context):
         return handle_auto_book(event)
 
     if path == "/force-scan" and method == "POST":
-        body = get_body(event)
-        date_strs = body.get("dates") or []
-        if date_strs:
-            try:
-                for d in date_strs:
-                    date.fromisoformat(d)
-            except ValueError as exc:
-                return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": str(exc)})}
-            _run_rescan_dates(date_strs)
-        else:
-            _run_full_refresh_worker(force=True)
+        _run_full_refresh_worker(force=True)
         return handle_state(event)
 
     if path in ("/scan", "/prod/scan"):
         params = parse_query_params(event)
-        mode   = (params.get("mode") or "async").strip().lower()
+        mode   = (params.get("mode") or "sync").strip().lower()
 
-        if mode == "sync":
-            if not _is_lambda_url_request(event):
-                return _build_sync_redirect(event)
-            try:
-                targets     = parse_requested_dates(event)
-                target_time = parse_time_filter(event, default=None)
-            except ValueError as exc:
-                return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": str(exc)})}
-            results = asyncio.run(main(targets=targets, target_time=target_time))
-            payload = build_scan_payload(targets=targets, target_time=target_time, results=results)
-            return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps(payload)}
-
-        lambda_client = boto3.client("lambda", region_name="us-west-2")
-        lambda_client.invoke(
-            FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
-            InvocationType="Event",
-            Payload=json.dumps({"_async_worker": True}).encode(),
-        )
-        return {
-            "statusCode": 202,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"message": "Scan started. You will receive an SMS when complete."}),
-        }
+        if mode != "sync":
+            return {
+                "statusCode": 400,
+                "headers": CORS_HEADERS,
+                "body": json.dumps({"error": "Async scans have been removed; use mode=sync."}),
+            }
+        if not _is_lambda_url_request(event):
+            return _build_sync_redirect(event)
+        try:
+            targets     = parse_requested_dates(event)
+            target_time = parse_time_filter(event, default=None)
+        except ValueError as exc:
+            return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": str(exc)})}
+        state = load_state()
+        auto_book_slots = state.get("auto_book_slots") or []
+        booked_slots = []
+        auto_book_avail = {}
+        auto_book_targets = _auto_book_time_map(auto_book_slots)
+        if auto_book_targets:
+            auto_book_avail, booked_slots = _api_scan(
+                target_times_by_date=auto_book_targets,
+                auto_book_slots=auto_book_slots,
+            )
+        if auto_book_avail or booked_slots:
+            state = load_state()
+            if auto_book_avail:
+                availability = state.get("availability", {})
+                for date_str, day_avail in auto_book_avail.items():
+                    day_state = availability.get(date_str, {})
+                    for time_text, court_avail in day_avail.items():
+                        day_state[time_text] = _normalize_time_availability(court_avail)
+                    availability[date_str] = day_state
+                state["availability"] = availability
+            if booked_slots:
+                _apply_booked_slots(state, booked_slots)
+            save_state(state)
+        if booked_slots:
+            _notify_booked_slots(booked_slots)
+        results = asyncio.run(main(targets=targets, target_time=target_time))
+        if booked_slots:
+            _mark_booked_slots_in_scan_results(
+                targets=targets,
+                results=results,
+                booked_slots=booked_slots,
+            )
+        payload = build_scan_payload(targets=targets, target_time=target_time, results=results)
+        payload["booked_slots"] = booked_slots
+        return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps(payload)}
 
     return {"statusCode": 404, "headers": CORS_HEADERS, "body": json.dumps({"error": "Not found"})}
 

@@ -2,8 +2,7 @@ openapi: 3.1.0
 info:
   title: Pickleball Court Monitor
   description: >
-    Checks rec.us Foster City pickleball court availability and can either
-    return live JSON results or trigger the legacy async SMS scan.
+    Checks rec.us Foster City pickleball court availability and returns live JSON results.
     Runs a headless Playwright scan (~30s).
   version: 1.0.0
 servers:
@@ -15,19 +14,17 @@ paths:
       summary: Check pickleball court availability
       description: >
         Logs into rec.us, navigates to Foster City pickleball, and checks
-        court availability for the requested dates. Use mode=sync for a
-        browser-friendly JSON response. Sync requests may be redirected to a
-        direct Lambda URL so they can outlive API Gateway's timeout. Omit mode
-        to keep the legacy async SMS behavior.
+        court availability for the requested dates. Requests may be redirected
+        to a direct Lambda URL so they can outlive API Gateway's timeout.
       parameters:
         - in: query
           name: mode
           schema:
             type: string
-            enum: [sync, async]
-            default: async
+            enum: [sync]
+            default: sync
           description: >
-            sync returns JSON immediately; async triggers the background SMS scan.
+            sync returns JSON immediately. Async scans are no longer supported.
         - in: query
           name: days
           schema:
@@ -72,16 +69,6 @@ paths:
                     type: array
         "307":
           description: Redirect to the direct Lambda sync endpoint
-        "202":
-          description: Scan started — results will be sent via SMS when complete
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    example: "Scan started. You will receive an SMS when complete."
         "401":
           description: Unauthorized — invalid or missing Basic Auth credentials
     options:
