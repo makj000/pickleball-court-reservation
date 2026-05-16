@@ -1602,19 +1602,27 @@ def _api_scan(
     async def _do_book():
         jwt = _firebase_login()  # ~0.4s, no browser needed
         for date_str, time_text, court_avail in to_book:
-            for court in COURT_PREFERENCE:
-                if court_avail.get(court) is not True:
-                    continue
-                try:
-                    success = await book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
-                except Exception as exc:
-                    print(f"  Booking error {date_str} {time_text} Court {court}: {exc}")
-                    success = False
-                if success:
-                    booked.append({"date": date_str, "time": time_text, "court": court})
-                    for c in new_avail.get(date_str, {}).get(time_text, {}):
-                        new_avail[date_str][time_text][c] = False
-                    break
+            booked_court: str | None = None
+            for attempt in range(1, 6):  # up to 5 quick retries for 8am race conditions
+                for court in COURT_PREFERENCE:
+                    if court_avail.get(court) is not True:
+                        continue
+                    try:
+                        ok = await book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
+                    except Exception as exc:
+                        print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
+                        ok = False
+                    if ok:
+                        booked_court = court
+                        break  # stop trying other courts
+                if booked_court:
+                    break  # stop retrying
+                if attempt < 5:
+                    print(f"  All courts failed (attempt {attempt}/5), retrying…")
+            if booked_court:
+                booked.append({"date": date_str, "time": time_text, "court": booked_court})
+                for c in new_avail.get(date_str, {}).get(time_text, {}):
+                    new_avail[date_str][time_text][c] = False
 
     _asyncio.run(_do_book())
     return new_avail, booked
