@@ -37,8 +37,8 @@ APP_VERSION = "2.1.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-EMAIL    = os.environ["REC_US_LOGIN"]
-PASSWORD = os.environ["REC_US_PASSWORD"]
+EMAIL    = os.environ.get("REC_US_LOGIN") or os.environ["EMAIL"]
+PASSWORD = os.environ.get("REC_US_PASSWORD") or os.environ["PASSWORD"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
@@ -86,7 +86,12 @@ COURT_SPORT_IDS: dict[str, str] = {
     "4": "d3bfa8f9-03f4-4c80-ac27-fbb4dbfb9a15",
     "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
 }
-PARTICIPANT_USER_ID = "06ba5791-1e5b-45f3-8910-1b9c75d020cc"
+PARTICIPANT_USER_ID  = "06ba5791-1e5b-45f3-8910-1b9c75d020cc"
+FIREBASE_API_KEY     = "YOUR_FIREBASE_API_KEY"
+FIREBASE_SIGN_IN_URL = (
+    "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+    f"?key={FIREBASE_API_KEY}"
+)
 
 _TIME_TEXT_TO_HHMMSS: dict[str, str] = {
     "8:00 AM": "08:00:00", "9:00 AM": "09:00:00", "10:00 AM": "10:00:00",
@@ -994,6 +999,26 @@ async def get_courts_from_modal(page) -> dict[str, bool]:
     return court_availability
 
 
+def _firebase_login() -> str:
+    """Return a fresh rec.us Bearer token via Firebase REST auth (~0.4 s, no browser)."""
+    payload = json.dumps({
+        "returnSecureToken": True,
+        "email": EMAIL,
+        "password": PASSWORD,
+        "clientType": "CLIENT_TYPE_WEB",
+    }).encode()
+    hdrs = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.rec.us/",
+        "Origin": "https://www.rec.us",
+    }
+    req = Request(FIREBASE_SIGN_IN_URL, data=payload, headers=hdrs, method="POST")
+    with urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())["idToken"]
+
+
 def _rec_api(url: str, method: str = "GET", body=None, jwt: str = "") -> tuple[int, dict]:
     """Thin HTTP wrapper for the rec.us JSON API."""
     from urllib.error import HTTPError
@@ -1018,11 +1043,12 @@ def _rec_api(url: str, method: str = "GET", body=None, jwt: str = "") -> tuple[i
         return e.code, body_r
 
 
-async def book_slot_api(page, target_date: date, time_text: str, court: str) -> bool:
-    """Book a court via the rec.us API and complete checkout using account credits.
+async def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bool:
+    """Book a court fully via API + minimal Playwright (checkout only, no login).
 
-    Reuses the already-logged-in Playwright page (same session — no second login).
-    Returns True if the booking is confirmed (checkout successful).
+    Flow: Firebase JWT (already obtained) → POST /reservations → inject JWT cookie
+    into a fresh headless browser → navigate to checkout → apply credits → Confirm.
+    No Playwright login needed (~8s total vs ~35s with full browser login).
     """
     time_str = _TIME_TEXT_TO_HHMMSS.get(time_text)
     if not time_str:
@@ -1032,13 +1058,6 @@ async def book_slot_api(page, target_date: date, time_text: str, court: str) -> 
     court_sport_id = COURT_SPORT_IDS.get(court)
     if not court_sport_id:
         print(f"  book_slot_api: unknown court '{court}'")
-        return False
-
-    # Extract JWT from the active browser session
-    cookies = await page.context.cookies()
-    jwt = next((c["value"] for c in cookies if c["name"] == "access_token"), "")
-    if not jwt:
-        print("  book_slot_api: no access_token cookie found")
         return False
 
     date_str = target_date.isoformat()
@@ -1065,45 +1084,58 @@ async def book_slot_api(page, target_date: date, time_text: str, court: str) -> 
     order_id: str = od["id"]
     total: int = od.get("total", 0)
     max_credit: int = od.get("maxCreditAdjustmentAllowed", 0)
-    print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit available: ${max_credit/100:.2f}")
+    print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit: ${max_credit/100:.2f}")
 
-    # Navigate to checkout in the same session (no second login needed)
-    checkout_url = f"https://www.rec.us/app/orders/{order_id}/checkout"
-    await page.goto(checkout_url, wait_until="domcontentloaded")
-    await page.wait_for_timeout(7_000)
+    # Launch a minimal browser just for checkout — inject JWT cookie, skip login entirely
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True, args=_browser_args())
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=_user_agent(),
+        )
+        await ctx.add_cookies([{
+            "name": "access_token",
+            "value": jwt,
+            "domain": "www.rec.us",
+            "path": "/",
+        }])
+        page = await ctx.new_page()
+        await page.route("**/*", _block_non_essential)
 
-    # Apply eligible credits via the checkbox if credits are available
-    if max_credit > 0:
-        credit_cb = page.locator('[data-component="account-credit"] button[role="checkbox"]')
-        if await credit_cb.count() > 0:
-            state = await credit_cb.first.get_attribute("data-state")
-            if state != "checked":
-                await credit_cb.first.click(timeout=3_000)
-                await page.wait_for_timeout(3_000)
+        checkout_url = f"https://www.rec.us/app/orders/{order_id}/checkout"
+        await page.goto(checkout_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(7_000)
 
-    # Click "Confirm" (appears when total=$0 after credits) or "Continue to Payment"
-    for btn_text in ("Confirm", "Continue to Payment"):
-        btn = page.locator("button", has_text=btn_text)
-        if await btn.count() > 0 and await btn.first.get_attribute("disabled") is None:
-            await btn.first.click(timeout=5_000)
-            await page.wait_for_timeout(6_000)
-            break
+        # Apply eligible credits via the checkbox
+        if max_credit > 0:
+            credit_cb = page.locator('[data-component="account-credit"] button[role="checkbox"]')
+            if await credit_cb.count() > 0:
+                if await credit_cb.first.get_attribute("data-state") != "checked":
+                    await credit_cb.first.click(timeout=3_000)
+                    await page.wait_for_timeout(3_000)
 
-    # Verify success via page text (most reliable — order API may lag)
-    body_text = await page.inner_text("body")
+        # Click "Confirm" (total=$0 after credits) or "Continue to Payment"
+        for btn_text in ("Confirm", "Continue to Payment"):
+            btn = page.locator("button", has_text=btn_text)
+            if await btn.count() > 0 and await btn.first.get_attribute("disabled") is None:
+                await btn.first.click(timeout=5_000)
+                await page.wait_for_timeout(6_000)
+                break
+
+        body_text = await page.inner_text("body")
+        await browser.close()
+
     if "Checkout Successful" in body_text:
-        print(f"  Checkout Successful! Court {court} {date_str} {time_text} confirmed.")
+        print(f"  Confirmed! Court {court} {date_str} {time_text}.")
         return True
 
-    # Fallback: check order status via API
     s2, b2 = _rec_api(f"https://api.rec.us/v1/orders/{order_id}", jwt=jwt)
     od2 = b2.get("order", b2.get("data", b2))
-    status2 = od2.get("status", "") if isinstance(od2, dict) else ""
-    if status2 == "complete":
-        print(f"  Order complete. Court {court} {date_str} {time_text} confirmed.")
+    if isinstance(od2, dict) and od2.get("status") == "complete":
+        print(f"  Confirmed (API check). Court {court} {date_str} {time_text}.")
         return True
 
-    print(f"  Checkout not confirmed. Page: {body_text[:200]}")
+    print(f"  Not confirmed. Page: {body_text[:200]}")
     return False
 
 
@@ -1568,24 +1600,21 @@ def _api_scan(
     import asyncio as _asyncio
 
     async def _do_book():
-        async with async_playwright() as pw:
-            browser, context, page = await _new_page(pw)
-            await login(page, context)
-            for date_str, time_text, court_avail in to_book:
-                for court in COURT_PREFERENCE:
-                    if court_avail.get(court) is not True:
-                        continue
-                    try:
-                        success = await book_slot_api(page, date.fromisoformat(date_str), time_text, court)
-                    except Exception as exc:
-                        print(f"  Booking error {date_str} {time_text} Court {court}: {exc}")
-                        success = False
-                    if success:
-                        booked.append({"date": date_str, "time": time_text, "court": court})
-                        for c in new_avail.get(date_str, {}).get(time_text, {}):
-                            new_avail[date_str][time_text][c] = False
-                        break
-            await browser.close()
+        jwt = _firebase_login()  # ~0.4s, no browser needed
+        for date_str, time_text, court_avail in to_book:
+            for court in COURT_PREFERENCE:
+                if court_avail.get(court) is not True:
+                    continue
+                try:
+                    success = await book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
+                except Exception as exc:
+                    print(f"  Booking error {date_str} {time_text} Court {court}: {exc}")
+                    success = False
+                if success:
+                    booked.append({"date": date_str, "time": time_text, "court": court})
+                    for c in new_avail.get(date_str, {}).get(time_text, {}):
+                        new_avail[date_str][time_text][c] = False
+                    break
 
     _asyncio.run(_do_book())
     return new_avail, booked
