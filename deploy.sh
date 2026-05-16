@@ -6,6 +6,8 @@ REGION="us-west-2"
 FUNCTION="your-lambda-function-name"
 UI_BUCKET="your-ui-s3-bucket"
 FUNCTION_URL_INVOKE_SID="public-function-url-invoke"
+QUEUE_NAME="your-sqs-queue-name"
+QUEUE_POLICY_NAME="your-sqs-queue-policy"
 
 echo "==> Uploading UI to S3..."
 aws s3 cp ui/index.html s3://$UI_BUCKET/index.html \
@@ -26,6 +28,111 @@ then
     --action lambda:InvokeFunction \
     --principal '*' \
     --invoked-via-function-url \
+    --region $REGION >/dev/null
+fi
+
+echo "==> Ensuring SQS work queue..."
+QUEUE_URL=$(aws sqs get-queue-url \
+  --queue-name $QUEUE_NAME \
+  --region $REGION \
+  --query 'QueueUrl' \
+  --output text 2>/dev/null || true)
+if [ -z "$QUEUE_URL" ] || [ "$QUEUE_URL" = "None" ]; then
+  QUEUE_URL=$(aws sqs create-queue \
+    --queue-name $QUEUE_NAME \
+    --attributes VisibilityTimeout=1200,ReceiveMessageWaitTimeSeconds=20,MessageRetentionPeriod=86400 \
+    --region $REGION \
+    --query 'QueueUrl' \
+    --output text)
+fi
+QUEUE_ARN=$(aws sqs get-queue-attributes \
+  --queue-url "$QUEUE_URL" \
+  --attribute-names QueueArn \
+  --region $REGION \
+  --query 'Attributes.QueueArn' \
+  --output text)
+
+echo "==> Ensuring Lambda can use SQS..."
+ROLE_ARN=$(aws lambda get-function-configuration \
+  --function-name $FUNCTION \
+  --region $REGION \
+  --query 'Role' \
+  --output text)
+ROLE_NAME="${ROLE_ARN##*/}"
+POLICY_FILE=$(mktemp)
+cat > "$POLICY_FILE" <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "$QUEUE_ARN"
+    }
+  ]
+}
+POLICY
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$QUEUE_POLICY_NAME" \
+  --policy-document "file://$POLICY_FILE"
+rm -f "$POLICY_FILE"
+
+echo "==> Setting Lambda queue environment..."
+ENV_IN=$(mktemp)
+ENV_OUT=$(mktemp)
+aws lambda get-function-configuration \
+  --function-name $FUNCTION \
+  --region $REGION \
+  --query 'Environment.Variables' \
+  --output json > "$ENV_IN"
+python3 - "$ENV_IN" "$ENV_OUT" "$QUEUE_URL" <<'PY'
+import json
+import sys
+
+env_in, env_out, queue_url = sys.argv[1:]
+with open(env_in, "r", encoding="utf-8") as f:
+    variables = json.load(f) or {}
+variables["PICKLEBALL_QUEUE_URL"] = queue_url
+with open(env_out, "w", encoding="utf-8") as f:
+    json.dump({"Variables": variables}, f)
+PY
+aws lambda update-function-configuration \
+  --function-name $FUNCTION \
+  --environment "file://$ENV_OUT" \
+  --region $REGION \
+  --output text \
+  --query 'LastUpdateStatus'
+aws lambda wait function-updated \
+  --function-name $FUNCTION \
+  --region $REGION
+rm -f "$ENV_IN" "$ENV_OUT"
+
+echo "==> Ensuring SQS event source mapping..."
+MAPPING_UUID=$(aws lambda list-event-source-mappings \
+  --function-name $FUNCTION \
+  --event-source-arn "$QUEUE_ARN" \
+  --region $REGION \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)
+if [ -z "$MAPPING_UUID" ] || [ "$MAPPING_UUID" = "None" ]; then
+  aws lambda create-event-source-mapping \
+    --function-name $FUNCTION \
+    --event-source-arn "$QUEUE_ARN" \
+    --batch-size 1 \
+    --enabled \
+    --region $REGION >/dev/null
+else
+  aws lambda update-event-source-mapping \
+    --uuid "$MAPPING_UUID" \
+    --batch-size 1 \
+    --enabled \
     --region $REGION >/dev/null
 fi
 
