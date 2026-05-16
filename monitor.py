@@ -37,8 +37,8 @@ APP_VERSION = "2.0.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-EMAIL    = os.environ["EMAIL"]
-PASSWORD = os.environ["PASSWORD"]
+EMAIL    = os.environ["REC_US_LOGIN"]
+PASSWORD = os.environ["REC_US_PASSWORD"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
@@ -78,6 +78,20 @@ COURT_SITE_IDS: dict[str, str] = {
     "6": "a474166c-53fb-4444-9f49-e5da379deab0",
     "4": "ce22b935-aeb9-44ae-852d-bf2e7c91617c",
     "5": "445abe2b-cb2f-450d-a376-0f643890731c",
+}
+
+# rec.us API courtSportIds (used in booking POST body) — from v1/locations/availability
+COURT_SPORT_IDS: dict[str, str] = {
+    "6": "e4def6e2-b46d-4d1f-a44f-6bb65f603198",
+    "4": "d3bfa8f9-03f4-4c80-ac27-fbb4dbfb9a15",
+    "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
+}
+PARTICIPANT_USER_ID = "06ba5791-1e5b-45f3-8910-1b9c75d020cc"
+
+_TIME_TEXT_TO_HHMMSS: dict[str, str] = {
+    "8:00 AM": "08:00:00", "9:00 AM": "09:00:00", "10:00 AM": "10:00:00",
+    "11:00 AM": "11:00:00", "4:00 PM": "16:00:00", "5:00 PM": "17:00:00",
+    "6:00 PM": "18:00:00",
 }
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
@@ -691,7 +705,7 @@ def save_state(state: dict) -> None:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _parse_utc_iso(value: str | None) -> datetime | None:
@@ -978,6 +992,119 @@ async def get_courts_from_modal(page) -> dict[str, bool]:
         await page.keyboard.press("Escape")
     await page.wait_for_timeout(300)
     return court_availability
+
+
+def _rec_api(url: str, method: str = "GET", body=None, jwt: str = "") -> tuple[int, dict]:
+    """Thin HTTP wrapper for the rec.us JSON API."""
+    from urllib.error import HTTPError
+    data = json.dumps(body).encode() if body else None
+    hdrs: dict[str, str] = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+    if jwt:
+        hdrs["Authorization"] = "Bearer " + jwt
+    req = Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read())
+    except HTTPError as e:
+        raw = e.read() or b""
+        try:
+            body_r: dict = json.loads(raw) if raw else {}
+        except Exception:
+            body_r = {"raw": raw.decode(errors="replace")[:300]}
+        return e.code, body_r
+
+
+async def book_slot_api(page, target_date: date, time_text: str, court: str) -> bool:
+    """Book a court via the rec.us API and complete checkout using account credits.
+
+    Reuses the already-logged-in Playwright page (same session — no second login).
+    Returns True if the booking is confirmed (checkout successful).
+    """
+    time_str = _TIME_TEXT_TO_HHMMSS.get(time_text)
+    if not time_str:
+        print(f"  book_slot_api: unknown time_text '{time_text}'")
+        return False
+
+    court_sport_id = COURT_SPORT_IDS.get(court)
+    if not court_sport_id:
+        print(f"  book_slot_api: unknown court '{court}'")
+        return False
+
+    # Extract JWT from the active browser session
+    cookies = await page.context.cookies()
+    jwt = next((c["value"] for c in cookies if c["name"] == "access_token"), "")
+    if not jwt:
+        print("  book_slot_api: no access_token cookie found")
+        return False
+
+    date_str = target_date.isoformat()
+    start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    end_str = (start_dt + timedelta(hours=1)).strftime("%H:%M:%S")
+
+    print(f"  Booking Court {court} {date_str} {time_text} via API…")
+    s, order = _rec_api(
+        "https://api.rec.us/v1/reservations",
+        method="POST",
+        body={
+            "courtSportIds": [court_sport_id],
+            "from": {"date": date_str, "time": time_str},
+            "participantUserId": PARTICIPANT_USER_ID,
+            "to": {"date": date_str, "time": end_str},
+        },
+        jwt=jwt,
+    )
+    if s not in (200, 201):
+        print(f"  API booking failed [{s}]: {json.dumps(order)[:200]}")
+        return False
+
+    od = order.get("data", order)
+    order_id: str = od["id"]
+    total: int = od.get("total", 0)
+    max_credit: int = od.get("maxCreditAdjustmentAllowed", 0)
+    print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit available: ${max_credit/100:.2f}")
+
+    # Navigate to checkout in the same session (no second login needed)
+    checkout_url = f"https://www.rec.us/app/orders/{order_id}/checkout"
+    await page.goto(checkout_url, wait_until="domcontentloaded")
+    await page.wait_for_timeout(7_000)
+
+    # Apply eligible credits via the checkbox if credits are available
+    if max_credit > 0:
+        credit_cb = page.locator('[data-component="account-credit"] button[role="checkbox"]')
+        if await credit_cb.count() > 0:
+            state = await credit_cb.first.get_attribute("data-state")
+            if state != "checked":
+                await credit_cb.first.click(timeout=3_000)
+                await page.wait_for_timeout(3_000)
+
+    # Click "Confirm" (appears when total=$0 after credits) or "Continue to Payment"
+    for btn_text in ("Confirm", "Continue to Payment"):
+        btn = page.locator("button", has_text=btn_text)
+        if await btn.count() > 0 and await btn.first.get_attribute("disabled") is None:
+            await btn.first.click(timeout=5_000)
+            await page.wait_for_timeout(6_000)
+            break
+
+    # Verify success via page text (most reliable — order API may lag)
+    body_text = await page.inner_text("body")
+    if "Checkout Successful" in body_text:
+        print(f"  Checkout Successful! Court {court} {date_str} {time_text} confirmed.")
+        return True
+
+    # Fallback: check order status via API
+    s2, b2 = _rec_api(f"https://api.rec.us/v1/orders/{order_id}", jwt=jwt)
+    od2 = b2.get("order", b2.get("data", b2))
+    status2 = od2.get("status", "") if isinstance(od2, dict) else ""
+    if status2 == "complete":
+        print(f"  Order complete. Court {court} {date_str} {time_text} confirmed.")
+        return True
+
+    print(f"  Checkout not confirmed. Page: {body_text[:200]}")
+    return False
 
 
 async def book_slot(page, target_date: date, time_text: str, court: str) -> bool:
@@ -1369,33 +1496,35 @@ def _api_fetch_availability(
             court_num, date_map = future.result()
             raw[court_num] = date_map
 
-    wanted: dict[str, set[str]] | None = (
-        {d: set(times) for d, times in target_times_by_date.items()}
+    # `watched` tracks specifically requested (date, time) pairs so we can seed them
+    # all-False (confirmed booked) even if absent from the API response.
+    watched: dict[str, set[str]] | None = (
+        {
+            d: set(SLOT_TIMES) if date.fromisoformat(d).weekday() >= 5 else set(times)
+            for d, times in target_times_by_date.items()
+        }
         if target_times_by_date is not None
         else None
     )
 
-    # Seed result with all-False for every requested (date, time) pair
+    # Seed watched slots as all-False; API will flip open ones to True below.
     result: dict[str, dict[str, dict[str, bool | None]]] = {}
-    if wanted is not None:
-        for date_str, times in wanted.items():
+    if watched is not None:
+        for date_str, times in watched.items():
             result[date_str] = {
                 t: {c: False for c in TARGET_COURTS}
                 for t in times
                 if t in SLOT_TIMES
             }
 
-    # Mark open slots True — API keys are "HH:MM:SS", we compare against "HH:MM" prefix
+    # Mark open slots True for ALL dates the API returns — no date filter.
+    # This gives us free coverage of weekdays we didn't explicitly watch.
     for court_num, date_map in raw.items():
         for date_str, times_dict in date_map.items():
             for time_key in times_dict:
                 hhmm = time_key[:5]  # "09:00:00" → "09:00"
                 time_text = _HHMM_TO_TIME_TEXT.get(hhmm)
                 if time_text is None:
-                    continue
-                if wanted is not None and (
-                    date_str not in wanted or time_text not in wanted[date_str]
-                ):
                     continue
                 result.setdefault(date_str, {}).setdefault(
                     time_text, {c: False for c in TARGET_COURTS}
@@ -1447,7 +1576,7 @@ def _api_scan(
                     if court_avail.get(court) is not True:
                         continue
                     try:
-                        success = await book_slot(page, date.fromisoformat(date_str), time_text, court)
+                        success = await book_slot_api(page, date.fromisoformat(date_str), time_text, court)
                     except Exception as exc:
                         print(f"  Booking error {date_str} {time_text} Court {court}: {exc}")
                         success = False
@@ -1896,7 +2025,6 @@ def _run_scheduled_worker() -> None:
         print("No future watched slots or auto-book slots. Skipping cron scan.")
         return
 
-    history_targets = _history_targets_from_map(watched_times)
     started_at = _utc_now_iso()
     state["pending_full_scan"] = False
     state["scan_started_at"] = started_at
@@ -1913,6 +2041,12 @@ def _run_scheduled_worker() -> None:
         new_avail, booked_slots = _api_scan(
             target_times_by_date=watched_times,
             auto_book_slots=auto_book_slots,
+        )
+
+        # Build history targets from actual results so weekend days show all fetched times.
+        history_targets = _attach_history_results(
+            _history_targets_from_map({d: list(t.keys()) for d, t in new_avail.items()}),
+            new_avail,
         )
 
         state = load_state()
@@ -1933,7 +2067,7 @@ def _run_scheduled_worker() -> None:
             started_at=started_at,
             completed_at=state["last_scanned"],
             status="completed",
-            targets=_attach_history_results(history_targets, new_avail),
+            targets=history_targets,
         )
 
         open_target_lines = _alert_lines_for_open_targets(state, new_avail)
@@ -2868,26 +3002,10 @@ def handler(event, context):
                     date.fromisoformat(d)
             except ValueError as exc:
                 return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": str(exc)})}
-            payload = json.dumps({"_rescan_dates": date_strs, "_delay_seconds": 0}).encode()
+            _run_rescan_dates(date_strs)
         else:
-            state = load_state()
-            active_scan = _active_scan_started_at(state)
-            if active_scan and state.get("scan_started_kind") == "missed_rescan":
-                state["pending_full_scan"] = True
-                save_state(state)
-                return {
-                    "statusCode": 202,
-                    "headers": CORS_HEADERS,
-                    "body": json.dumps({"message": "Full scan queued after partial rescan", "queued_after_partial": True}),
-                }
-            payload = json.dumps({"_scheduled": True}).encode()
-        lambda_client = boto3.client("lambda", region_name="us-west-2")
-        lambda_client.invoke(
-            FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
-            InvocationType="Event",
-            Payload=payload,
-        )
-        return {"statusCode": 202, "headers": CORS_HEADERS, "body": json.dumps({"message": "Scan started"})}
+            _run_full_refresh_worker(force=True)
+        return handle_state(event)
 
     if path in ("/scan", "/prod/scan"):
         params = parse_query_params(event)
