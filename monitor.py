@@ -1116,9 +1116,6 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
             continue
         if booking.get("status") != "confirmed" or booking.get("canceledAt"):
             continue
-        if booking.get("timeStatus") == "past":
-            continue
-
         matching_reservations = []
         linked_reservation_id = booking.get("linkedReservationId")
         if linked_reservation_id and linked_reservation_id in reservations_by_id:
@@ -1141,7 +1138,7 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
                 if not court:
                     continue
                 slot = _slot_from_rec_reservation(reservation, court)
-                if slot:
+                if slot and slot["date"] >= date.today().isoformat():
                     slots.append(slot)
     return _normalize_slot_records(slots, expand_legacy=False)
 
@@ -1153,7 +1150,7 @@ def fetch_rec_my_reservations(jwt: str | None = None) -> list[dict]:
     page_num = 1
     page_size = 100
     while True:
-        query = urlencode({"pg[num]": page_num, "pg[size]": page_size})
+        query = f"pg[num]={page_num}&pg[size]={page_size}"
         page = _rec_api_required(
             f"https://api.rec.us/v1/users/{user_id}/bookings?{query}",
             jwt=jwt,
@@ -2442,10 +2439,11 @@ def handle_my_reservations_refresh(event) -> dict:
     try:
         sync_rec_my_reservations(state, strict=True)
     except Exception as exc:
+        print(f"handle_my_reservations_refresh failed: {exc}")
         return {
             "statusCode": 502,
             "headers": CORS_HEADERS,
-            "body": json.dumps({"error": "Failed to fetch rec.us reservations"}),
+            "body": json.dumps({"error": f"Failed to fetch rec.us reservations: {exc}"}),
         }
     save_state(state)
     slots = state.get("my_reservations", [])
