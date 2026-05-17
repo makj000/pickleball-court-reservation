@@ -33,7 +33,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.4.0"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
 SQS_DELAY_MAX_SECONDS = 15 * 60
 SQS_STALE_GRACE_SECONDS = 5 * 60
-PUBLISH_PROBE_BURST_DELAYS_SECONDS = tuple(range(60, 11 * 60, 60))
+PUBLISH_PROBE_BURST_DELAYS_SECONDS = (0, 15, 30, 45, 60, 90, 120, 180, 300)
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
 CORS_HEADERS = {
@@ -453,6 +453,8 @@ def _empty_state() -> dict:
         "focus_newest_weekend": False, # when True, only scan the latest weekend day (skip older ones)
         "auto_book_slots":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}] — slots to auto-book
         "seen_open_days":      [],   # ISO dates where we first observed ≥1 open slot
+        "cached_jwt":          None, # Firebase JWT pre-fetched before 8am release
+        "cached_jwt_expires_at": None,
     }
 
 
@@ -982,6 +984,25 @@ async def get_courts_from_modal(page) -> dict[str, bool]:
     return court_availability
 
 
+def _get_cached_jwt(state: dict) -> str | None:
+    jwt = state.get("cached_jwt")
+    expires_at = state.get("cached_jwt_expires_at")
+    if not jwt or not expires_at:
+        return None
+    try:
+        exp = datetime.fromisoformat(expires_at)
+        if datetime.now(tz=timezone.utc) < exp - timedelta(minutes=2):
+            return jwt
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _cache_jwt(state: dict, jwt: str) -> None:
+    state["cached_jwt"] = jwt
+    state["cached_jwt_expires_at"] = (datetime.now(tz=timezone.utc) + timedelta(minutes=55)).isoformat()
+
+
 def _firebase_login() -> str:
     """Return a fresh rec.us Bearer token via Firebase REST auth (~0.4 s, no browser)."""
     payload = json.dumps({
@@ -1486,7 +1507,8 @@ def _api_scan(
         return new_avail, []
 
     try:
-        jwt = _firebase_login()
+        state = load_state()
+        jwt = _get_cached_jwt(state) or _firebase_login()
     except Exception as exc:
         try:
             send_telegram(f"❌ Auto-book login failed: {exc}")
@@ -2659,12 +2681,40 @@ def _run_queued_publish_probe(target_date: str) -> None:
     _run_targeted_daily_scan()
 
 
+def _run_pre_login() -> None:
+    """Pre-fetch and cache a Firebase JWT so the 8am booking probe skips login."""
+    state = load_state()
+    try:
+        jwt = _firebase_login()
+        _cache_jwt(state, jwt)
+        save_state(state)
+        print("Pre-login complete; JWT cached until", state["cached_jwt_expires_at"])
+    except Exception as exc:
+        print(f"Pre-login failed: {exc}")
+
+
+def _queue_pre_login_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
+    """Queue a pre-login to fire at ~7:58 AM from the 7:45 AM EventBridge tick."""
+    now_pt = now_pt or datetime.now(tz=PT)
+    if now_pt.hour != 7 or now_pt.minute != 45:
+        return False
+    if not WORK_QUEUE_URL:
+        return False
+    delay = 780  # 13 min → lands at ~7:58 AM PT
+    queued = bool(_enqueue_work("pre_login", {}, delay_seconds=delay))
+    if queued:
+        print("Queued pre-login for ~7:58 AM PT.")
+    return queued
+
+
 def _run_queue_work(message: dict) -> None:
     kind = message.get("kind")
     if kind == "scheduled_probe":
         _run_queued_scheduled_probe(str(message.get("token") or ""))
     elif kind == "publish_probe":
         _run_queued_publish_probe(str(message.get("date") or ""))
+    elif kind == "pre_login":
+        _run_pre_login()
     else:
         print(f"Ignoring unknown queue work kind: {kind}")
 
@@ -2839,6 +2889,7 @@ def handler(event, context):
     if event.get("source") == "aws.events":
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
+        _queue_pre_login_if_needed(state)
         _queue_publish_probe_burst_if_needed(state)
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
