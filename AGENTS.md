@@ -35,7 +35,37 @@ AWS Lambda, packaged as a Docker container (Lambda Python 3.12 base image + Play
 
 ## Notifications
 
-Send SMS to a hardcoded number via AWS SNS when the async scan completes.
+All notifications go to Telegram (no SMS/SNS). Triggers:
+
+### Slot availability alerts (watched & auto-book slots only)
+- **Hourly scheduled scan** — if any watched or auto-book slot is open, sends:
+  `Pickleball slot(s) now available:\n{date} {time}: open Court {N} (watched/auto-book)`
+- **Targeted daily scan** (8 AM & 9 AM EventBridge tick) — same message format
+- **Ad-hoc full scan** (user-triggered) — same message format
+
+### Auto-booking flow
+- `🎯 Trying to book {date} {time} (courts: ...)` — sent before each booking attempt
+- `Auto-booked pickleball slot(s):\n{date} {time} Court {N}` — sent on booking success
+- `❌ Auto-book login failed: {exc}` — sent when Firebase login fails before booking
+- `❌ Failed to book {date} {time} after 5 attempts` — sent when all retries fail
+
+### 8 AM release probe session (7:58–8:02 AM window)
+Queued from the 7:45 AM EventBridge tick; fires ~7:58 AM via SQS (780s delay).
+- `❌ Release probe login failed: {exc}` — if Firebase login fails at session start
+- Booking attempt/success/failure messages same as auto-booking flow above (sent per probe)
+- **End-of-session summary** (always sent at ~8:02 AM):
+  ```
+  8am session done: {N} probes
+  ✅ Booked: {date} {time} Court {N}        ← if any booking succeeded
+  ⚠️ Saw open but not booked: {date} {time} ← if open slots seen but not booked
+  No openings found                          ← otherwise
+  ⚠️ {N} probe error(s)                     ← appended if any probe threw
+  ```
+
+### What does NOT trigger a notification
+- Slots that are neither watched nor in auto-book
+- Individual probe results during the 8 AM burst phase (only the end summary is sent)
+- Scheduled scan runs that find nothing open
 
 ## Supporting pieces
 
