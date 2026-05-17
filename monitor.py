@@ -1757,8 +1757,20 @@ def _api_scan(
     import asyncio as _asyncio
 
     async def _do_book():
-        jwt = _firebase_login()  # ~0.4s, no browser needed
+        try:
+            jwt = _firebase_login()  # ~0.4s, no browser needed
+        except Exception as exc:
+            try:
+                send_telegram(f"❌ Auto-book login failed: {exc}")
+            except Exception:
+                pass
+            raise
         for date_str, time_text, court_avail in to_book:
+            open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
+            try:
+                send_telegram(f"🎯 Trying to book {date_str} {time_text} (courts: {', '.join(open_courts)})")
+            except Exception:
+                pass
             booked_court: str | None = None
             for attempt in range(1, 6):  # up to 5 quick retries for 8am race conditions
                 for court in COURT_PREFERENCE:
@@ -1780,6 +1792,11 @@ def _api_scan(
                 booked.append({"date": date_str, "time": time_text, "court": booked_court})
                 for c in new_avail.get(date_str, {}).get(time_text, {}):
                     new_avail[date_str][time_text][c] = False
+            else:
+                try:
+                    send_telegram(f"❌ Failed to book {date_str} {time_text} after 5 attempts")
+                except Exception:
+                    pass
 
     _asyncio.run(_do_book())
     return new_avail, booked
