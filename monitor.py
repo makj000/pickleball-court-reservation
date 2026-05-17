@@ -2796,7 +2796,25 @@ def _run_release_probe_session() -> None:
         state["release_probe_log"] = (existing + probe_log)[-500:]
         state["last_release_probe_session"] = started_at
         save_state(state)
-        print(f"Release probe session complete: {len(probe_log)} probes.")
+        n = len(probe_log)
+        booked_all = [b for e in probe_log for b in (e.get("booked") or [])]
+        open_all   = sorted({s for e in probe_log for s in (e.get("open") or [])})
+        errors     = sum(1 for e in probe_log if e.get("result") == "error")
+        lines = [f"8am session done: {n} probes"]
+        if booked_all:
+            lines.append("✅ Booked: " + ", ".join(booked_all))
+        elif open_all:
+            lines.append("⚠️ Saw open but not booked: " + ", ".join(open_all))
+        else:
+            lines.append("No openings found")
+        if errors:
+            lines.append(f"⚠️ {errors} probe error(s)")
+        summary = "\n".join(lines)
+        print(summary)
+        try:
+            send_telegram(summary)
+        except Exception:
+            pass
 
 
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
