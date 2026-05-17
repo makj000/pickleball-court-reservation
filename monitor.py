@@ -870,42 +870,6 @@ def _enqueue_work(kind: str, payload: dict | None = None, *, delay_seconds: int 
     return True
 
 
-# ── Login ─────────────────────────────────────────────────────────────────────
-
-async def login(page, context=None) -> None:
-    await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
-
-    # If a cached session was loaded, check if we're already authenticated
-    if os.path.exists(_SESSION_FILE):
-        already_in = await page.get_by_role("button", name="Log In").count() == 0
-        if already_in:
-            print("Session restored from cache — skipping login.\n")
-            return
-        print("Cached session expired — logging in…")
-    else:
-        print("Logging in…")
-
-    await page.wait_for_timeout(2_000)
-    await page.get_by_role("button", name="Log In").first.click()
-    await page.wait_for_timeout(500)
-    await page.get_by_role("button", name="Log in with your email").click(timeout=10_000)
-    await page.wait_for_timeout(500)
-    await page.get_by_test_id("email").fill(EMAIL)
-    await page.get_by_role("button", name="Click here to log in with your password").click(timeout=8_000)
-    await page.wait_for_timeout(500)
-    await page.get_by_test_id("email").fill(EMAIL)
-    await page.get_by_test_id("password").fill(PASSWORD)
-    await page.get_by_role("button", name="Log in & continue").click(timeout=8_000)
-    await page.wait_for_load_state("domcontentloaded", timeout=20_000)
-    await page.wait_for_timeout(1_000)
-
-    if context is not None:
-        await context.storage_state(path=_SESSION_FILE)
-        print("Session saved to cache.\n")
-    else:
-        print("Logged in.\n")
-
-
 # ── Date navigation ───────────────────────────────────────────────────────────
 
 async def select_date(page, target: date) -> None:
@@ -1204,13 +1168,8 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     return True
 
 
-async def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bool:
-    """Book a court fully via API + minimal Playwright (checkout only, no login).
-
-    Flow: Firebase JWT (already obtained) → POST /reservations → inject JWT cookie
-    into a fresh headless browser → navigate to checkout → apply credits → Confirm.
-    No Playwright login needed (~8s total vs ~35s with full browser login).
-    """
+def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bool:
+    """Book a court fully via API (no browser)."""
     time_str = _TIME_TEXT_TO_HHMMSS.get(time_text)
     if not time_str:
         print(f"  book_slot_api: unknown time_text '{time_text}'")
@@ -1247,184 +1206,18 @@ async def book_slot_api(jwt: str, target_date: date, time_text: str, court: str)
     max_credit: int = od.get("maxCreditAdjustmentAllowed", 0)
     print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit: ${max_credit/100:.2f}")
 
-    # Launch a minimal browser just for checkout — inject JWT cookie, skip login entirely
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=_browser_args())
-        ctx = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=_user_agent(),
-        )
-        await ctx.add_cookies([{
-            "name": "access_token",
-            "value": jwt,
-            "domain": "www.rec.us",
-            "path": "/",
-        }])
-        page = await ctx.new_page()
-        await page.route("**/*", _block_non_essential)
-
-        checkout_url = f"https://www.rec.us/app/orders/{order_id}/checkout"
-        await page.goto(checkout_url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(7_000)
-
-        # Apply eligible credits via the checkbox
-        if max_credit > 0:
-            credit_cb = page.locator('[data-component="account-credit"] button[role="checkbox"]')
-            if await credit_cb.count() > 0:
-                if await credit_cb.first.get_attribute("data-state") != "checked":
-                    await credit_cb.first.click(timeout=3_000)
-                    await page.wait_for_timeout(3_000)
-
-        # Click "Confirm" (total=$0 after credits) or "Continue to Payment"
-        for btn_text in ("Confirm", "Continue to Payment"):
-            btn = page.locator("button", has_text=btn_text)
-            if await btn.count() > 0 and await btn.first.get_attribute("disabled") is None:
-                await btn.first.click(timeout=5_000)
-                await page.wait_for_timeout(6_000)
-                break
-
-        body_text = await page.inner_text("body")
-        await browser.close()
-
-    if "Checkout Successful" in body_text:
+    s2, result = _rec_api(
+        f"https://api.rec.us/v1/orders/{order_id}/pay",
+        method="POST",
+        body={"data": {}},
+        jwt=jwt,
+    )
+    if s2 == 200:
         print(f"  Confirmed! Court {court} {date_str} {time_text}.")
         return True
 
-    s2, b2 = _rec_api(f"https://api.rec.us/v1/orders/{order_id}", jwt=jwt)
-    od2 = b2.get("order", b2.get("data", b2))
-    if isinstance(od2, dict) and od2.get("status") == "complete":
-        print(f"  Confirmed (API check). Court {court} {date_str} {time_text}.")
-        return True
-
-    print(f"  Not confirmed. Page: {body_text[:200]}")
+    print(f"  Payment failed [{s2}]: {json.dumps(result)[:200]}")
     return False
-
-
-async def book_slot(page, target_date: date, time_text: str, court: str) -> bool:
-    """Navigate to the slot, open the modal, select the court, and confirm booking.
-
-    Returns True if the booking succeeded, False otherwise.
-    The caller is responsible for navigating to the correct date first.
-    """
-    print(f"  Attempting to book {target_date.isoformat()} {time_text} Court {court}…")
-    await select_date(page, target_date)
-    visible_times = set(await collect_all_slot_buttons(page))
-    if time_text not in visible_times:
-        print(f"  Time slot {time_text} not visible — possibly already taken.")
-        return False
-
-    btn = page.locator("button").filter(has_text=re.compile(re.escape(time_text)))
-    try:
-        await btn.first.click(timeout=4_000)
-    except PwTimeout:
-        print(f"  Could not click time slot button for {time_text}.")
-        return False
-
-    try:
-        dialog = page.locator('[role="dialog"]').first
-        await dialog.wait_for(timeout=5_000)
-        await page.wait_for_timeout(300)
-    except PwTimeout:
-        print(f"  Dialog did not appear for {time_text}.")
-        await page.keyboard.press("Escape")
-        return False
-
-    # Select the court from the combobox dropdown
-    court_combo = dialog.locator('button[role="combobox"]').last
-    selected_court = False
-    if await court_combo.count() > 0:
-        try:
-            await court_combo.click(timeout=2_000)
-            await page.wait_for_timeout(250)
-            options = page.locator('[role="option"]')
-            option_count = await options.count()
-            for i in range(option_count):
-                opt = options.nth(i)
-                text = (await opt.inner_text()).strip()
-                match = COURT_RE.match(text)
-                if match and _normalize_court_number(match.group(1)) == court:
-                    await opt.click(timeout=2_000)
-                    await page.wait_for_timeout(300)
-                    selected_court = True
-                    break
-            if not selected_court:
-                # Court not in dropdown options — not available
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(150)
-                print(f"  Court {court} not available in dropdown for {time_text}.")
-                try:
-                    close = page.locator(
-                        '[role="dialog"] button[aria-label*="close" i], '
-                        '[role="dialog"] button[aria-label*="dismiss" i], '
-                        '[role="dialog"] button:text-is("Cancel"), '
-                        '[role="dialog"] button:text-is("Close")'
-                    ).first
-                    await close.click(timeout=3_000)
-                except PwTimeout:
-                    await page.keyboard.press("Escape")
-                await page.wait_for_timeout(300)
-                return False
-        except PwTimeout:
-            print(f"  Timeout interacting with court combobox for {time_text}.")
-            await page.keyboard.press("Escape")
-            try:
-                close = page.locator(
-                    '[role="dialog"] button[aria-label*="close" i], '
-                    '[role="dialog"] button[aria-label*="dismiss" i], '
-                    '[role="dialog"] button:text-is("Cancel"), '
-                    '[role="dialog"] button:text-is("Close")'
-                ).first
-                await close.click(timeout=3_000)
-            except PwTimeout:
-                await page.keyboard.press("Escape")
-            await page.wait_for_timeout(300)
-            return False
-
-    # Click the Reserve / Book button in the dialog
-    reserve_btn = dialog.locator(
-        'button:text-is("Reserve"), button:text-is("Book"), '
-        'button:text-is("Reserve Now"), button:text-is("Book Now"), '
-        'button[type="submit"]'
-    ).first
-    try:
-        await reserve_btn.wait_for(timeout=4_000)
-        await reserve_btn.click(timeout=4_000)
-        await page.wait_for_timeout(1_500)
-    except PwTimeout:
-        print(f"  Could not find or click Reserve button for {time_text} Court {court}.")
-        await page.keyboard.press("Escape")
-        await page.wait_for_timeout(300)
-        return False
-
-    # Check for a confirmation dialog / success indicator
-    # rec.us may show a confirmation step — look for a "Confirm" button or success message
-    try:
-        confirm_btn = page.locator(
-            'button:text-is("Confirm"), button:text-is("Confirm Booking"), '
-            'button:text-is("Complete Booking"), button:text-is("Yes")'
-        ).first
-        if await confirm_btn.count() > 0:
-            await confirm_btn.click(timeout=4_000)
-            await page.wait_for_timeout(1_500)
-    except PwTimeout:
-        pass
-
-    # Dismiss any remaining dialog
-    try:
-        close = page.locator(
-            '[role="dialog"] button[aria-label*="close" i], '
-            '[role="dialog"] button[aria-label*="dismiss" i], '
-            '[role="dialog"] button:text-is("Done"), '
-            '[role="dialog"] button:text-is("Close")'
-        ).first
-        if await close.count() > 0:
-            await close.click(timeout=3_000)
-    except PwTimeout:
-        await page.keyboard.press("Escape")
-    await page.wait_for_timeout(300)
-
-    print(f"  Booked {target_date.isoformat()} {time_text} Court {court}.")
-    return True
 
 
 async def scan_day(page, target: date, target_time: str | None = None) -> list[dict]:
@@ -1475,67 +1268,6 @@ def _slots_to_availability(slots: list[dict]) -> dict[str, dict[str, bool | None
             else:
                 availability[time_text] = _empty_court_availability(None)
     return availability
-
-
-async def scan_day_quick(
-    page,
-    target: date,
-    target_times: list[str] | None = None,
-) -> dict[str, dict[str, bool | None]]:
-    """Build state booleans from the same slot scan path used by /scan."""
-    if not target_times:
-        slots = await scan_day(page, target, target_time=None)
-        return _slots_to_availability(slots)
-
-    requested_times = []
-    seen_times: set[str] = set()
-    for time_text in target_times:
-        if time_text not in SLOT_TIMES or time_text in seen_times:
-            continue
-        seen_times.add(time_text)
-        requested_times.append(time_text)
-
-    if not requested_times:
-        return {}
-
-    label = target.strftime("%a %b %-d")
-    print(f"  {label}… ", end="", flush=True)
-    await select_date(page, target)
-    visible_times = set(await collect_all_slot_buttons(page, stop_when_found=set(requested_times)))
-    results: dict[str, dict[str, bool | None]] = {}
-
-    for time_text in requested_times:
-        slot_t0 = time.monotonic()
-        if time_text not in visible_times:
-            results[time_text] = _empty_court_availability(False)
-            slot_elapsed = time.monotonic() - slot_t0
-            print(f"    {time_text} scanned in {slot_elapsed:.1f}s -> not visible")
-            continue
-        btn = page.locator("button").filter(has_text=re.compile(re.escape(time_text)))
-        try:
-            await btn.first.click(timeout=4_000)
-        except PwTimeout:
-            results[time_text] = _empty_court_availability(None)
-            slot_elapsed = time.monotonic() - slot_t0
-            print(f"    {time_text} scanned in {slot_elapsed:.1f}s -> click timeout")
-            continue
-        court_availability = await get_courts_from_modal(page)
-        results[time_text] = (
-            _normalize_time_availability(court_availability)
-            if any(court_availability.values())
-            else _empty_court_availability(None)
-        )
-        slot_elapsed = time.monotonic() - slot_t0
-        open_courts = [c for c, v in results[time_text].items() if v is True]
-        null_courts = [c for c, v in results[time_text].items() if v is None]
-        closed_courts = [c for c, v in results[time_text].items() if v is False]
-        print(
-            f"    {time_text} scanned in {slot_elapsed:.1f}s -> "
-            f"open={open_courts} null={null_courts} closed={closed_courts}"
-        )
-
-    print(f"{len(results)} watched slot(s): {', '.join(requested_times)}")
-    return results
 
 
 # ── Browser session helpers ───────────────────────────────────────────────────
@@ -1753,138 +1485,47 @@ def _api_scan(
     if not to_book:
         return new_avail, []
 
-    # Only launch Playwright when there is actually something to book
-    import asyncio as _asyncio
-
-    async def _do_book():
+    try:
+        jwt = _firebase_login()
+    except Exception as exc:
         try:
-            jwt = _firebase_login()  # ~0.4s, no browser needed
-        except Exception as exc:
-            try:
-                send_telegram(f"❌ Auto-book login failed: {exc}")
-            except Exception:
-                pass
-            raise
-        for date_str, time_text, court_avail in to_book:
-            open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
-            try:
-                send_telegram(f"🎯 Trying to book {date_str} {time_text} (courts: {', '.join(open_courts)})")
-            except Exception:
-                pass
-            booked_court: str | None = None
-            for attempt in range(1, 6):  # up to 5 quick retries for 8am race conditions
-                for court in COURT_PREFERENCE:
-                    if court_avail.get(court) is not True:
-                        continue
-                    try:
-                        ok = await book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
-                    except Exception as exc:
-                        print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
-                        ok = False
-                    if ok:
-                        booked_court = court
-                        break  # stop trying other courts
-                if booked_court:
-                    break  # stop retrying
-                if attempt < 5:
-                    print(f"  All courts failed (attempt {attempt}/5), retrying…")
-            if booked_court:
-                booked.append({"date": date_str, "time": time_text, "court": booked_court})
-                for c in new_avail.get(date_str, {}).get(time_text, {}):
-                    new_avail[date_str][time_text][c] = False
-            else:
+            send_telegram(f"❌ Auto-book login failed: {exc}")
+        except Exception:
+            pass
+        raise
+    for date_str, time_text, court_avail in to_book:
+        open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
+        try:
+            send_telegram(f"🎯 Trying to book {date_str} {time_text} (courts: {', '.join(open_courts)})")
+        except Exception:
+            pass
+        booked_court: str | None = None
+        for attempt in range(1, 6):  # up to 5 quick retries for 8am race conditions
+            for court in COURT_PREFERENCE:
+                if court_avail.get(court) is not True:
+                    continue
                 try:
-                    send_telegram(f"❌ Failed to book {date_str} {time_text} after 5 attempts")
-                except Exception:
-                    pass
-
-    _asyncio.run(_do_book())
-    return new_avail, booked
-
-
-# ── Quick scan (for scheduled worker) ────────────────────────────────────────
-
-async def _scan_dates_quick(
-    targets: list[date],
-    target_times_by_date: dict[str, list[str]] | None = None,
-    auto_book_slots: list[dict] | None = None,
-) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
-    """Returns (availability, booked_slots).
-
-    availability: {date_iso: {time: {court: available}}}
-    booked_slots: list of {date, time, court} that were successfully booked this session.
-    """
-    today_str = date.today().isoformat()
-    # Build a lookup: {(date_iso, time_text)} for quick membership check
-    auto_book_set: set[tuple[str, str]] = set()
-    if auto_book_slots:
-        for ab in auto_book_slots:
-            ab_date = ab.get("date", "")
-            ab_time = ab.get("time", "")
-            if ab_date >= today_str and ab_time in SLOT_TIMES:
-                auto_book_set.add((ab_date, ab_time))
-
-    async with async_playwright() as pw:
-        browser, context, page = await _new_page(pw)
-        logged_in = False
-        if auto_book_set:
-            await login(page, context)
-            logged_in = True
+                    ok = book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
+                except Exception as exc:
+                    print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
+                    ok = False
+                if ok:
+                    booked_court = court
+                    break  # stop trying other courts
+            if booked_court:
+                break  # stop retrying
+            if attempt < 5:
+                print(f"  All courts failed (attempt {attempt}/5), retrying…")
+        if booked_court:
+            booked.append({"date": date_str, "time": time_text, "court": booked_court})
+            for c in new_avail.get(date_str, {}).get(time_text, {}):
+                new_avail[date_str][time_text][c] = False
         else:
-            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
-        results: dict[str, dict[str, dict[str, bool | None]]] = {}
-        booked: list[dict] = []
-
-        for target in targets:
-            date_iso = target.isoformat()
-            print(f"  Quick scan {date_iso}…")
             try:
-                target_times = None
-                if target_times_by_date is not None:
-                    target_times = target_times_by_date.get(date_iso, [])
-                avail = await scan_day_quick(page, target, target_times=target_times)
-                results[date_iso] = avail
-
-                # Auto-book: check if any auto-book slot for this date is now available
-                for time_text, court_avail in avail.items():
-                    if (date_iso, time_text) not in auto_book_set:
-                        continue
-                    best_court = _preferred_open_court(court_avail)
-                    if best_court is None:
-                        continue
-                    # Attempt to book in preference order
-                    for court in COURT_PREFERENCE:
-                        if court_avail.get(court) is not True:
-                            continue
-                        if not logged_in:
-                            await login(page, context)
-                            logged_in = True
-                        try:
-                            success = await book_slot(page, target, time_text, court)
-                        except Exception as book_exc:
-                            print(f"  Booking error for {date_iso} {time_text} Court {court}: {book_exc}")
-                            success = False
-                        if success:
-                            booked.append({"date": date_iso, "time": time_text, "court": court})
-                            auto_book_set.discard((date_iso, time_text))  # remove so we don't double-book
-                            # Mark court as taken in availability so caller sees the updated state
-                            for c in results[date_iso].get(time_text, {}):
-                                results[date_iso][time_text][c] = False
-                            break
-            except Exception as exc:
-                print(f"  Error scanning {date_iso}: {exc}")
-                fallback_times = (
-                    target_times_by_date.get(date_iso, [])
-                    if target_times_by_date is not None
-                    else SLOT_TIMES
-                )
-                results[date_iso] = {
-                    t: _empty_court_availability(None)
-                    for t in fallback_times
-                    if t in SLOT_TIMES
-                }
-        await browser.close()
-    return results, booked
+                send_telegram(f"❌ Failed to book {date_str} {time_text} after 5 attempts")
+            except Exception:
+                pass
+    return new_avail, booked
 
 
 # ── Auto-book helpers ─────────────────────────────────────────────────────────
