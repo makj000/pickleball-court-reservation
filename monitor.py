@@ -59,7 +59,10 @@ SCAN_LOCK_TTL_SECONDS = 20 * 60
 SYNC_TOKEN_TTL_SECONDS = 300
 SQS_DELAY_MAX_SECONDS = 15 * 60
 SQS_STALE_GRACE_SECONDS = 5 * 60
-PUBLISH_PROBE_BURST_DELAYS_SECONDS = (0, 15, 30, 45, 60, 90, 120, 180, 300)
+_RELEASE_PRE_INTERVAL_S  = 15   # seconds between probes before 8:00 AM
+_RELEASE_BURST_UNTIL_S   = 30   # back-to-back until 8:00:30
+_RELEASE_POST_INTERVAL_S = 15   # seconds between probes after burst
+_RELEASE_END_S           = 120  # stop at 8:02:00
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 
 CORS_HEADERS = {
@@ -453,8 +456,11 @@ def _empty_state() -> dict:
         "focus_newest_weekend": False, # when True, only scan the latest weekend day (skip older ones)
         "auto_book_slots":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM"}] — slots to auto-book
         "seen_open_days":      [],   # ISO dates where we first observed ≥1 open slot
-        "cached_jwt":          None, # Firebase JWT pre-fetched before 8am release
-        "cached_jwt_expires_at": None,
+        "cached_jwt":              None, # Firebase JWT pre-fetched before 8am release
+        "cached_jwt_expires_at":   None,
+        "release_probe_session_date": None, # ISO date of queued session (dedup)
+        "last_release_probe_session": None, # ISO timestamp of last session start
+        "release_probe_log":       [],  # [{ts, phase, result, booked?, open?, error?}]
     }
 
 
@@ -1478,6 +1484,7 @@ def _api_fetch_availability(
 def _api_scan(
     target_times_by_date: dict[str, list[str]] | None = None,
     auto_book_slots: list[dict] | None = None,
+    jwt: str | None = None,
 ) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
     """Scan via HTTP API and book any newly open auto-book slots via Playwright.
 
@@ -1506,15 +1513,16 @@ def _api_scan(
     if not to_book:
         return new_avail, []
 
-    try:
-        state = load_state()
-        jwt = _get_cached_jwt(state) or _firebase_login()
-    except Exception as exc:
+    if jwt is None:
         try:
-            send_telegram(f"❌ Auto-book login failed: {exc}")
-        except Exception:
-            pass
-        raise
+            state = load_state()
+            jwt = _get_cached_jwt(state) or _firebase_login()
+        except Exception as exc:
+            try:
+                send_telegram(f"❌ Auto-book login failed: {exc}")
+            except Exception:
+                pass
+            raise
     for date_str, time_text, court_avail in to_book:
         open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
         try:
@@ -2632,78 +2640,187 @@ def _run_queued_scheduled_probe(token: str) -> None:
         save_state(state)
 
 
-def _queue_publish_probe_burst_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
-    now_pt = now_pt or datetime.now(tz=PT)
-    if now_pt.hour != 8 or now_pt.minute != 0:
-        return False
+def _run_release_probe_session() -> None:
+    """Single Lambda invocation that owns the 7:58–8:02 AM slot-release window.
 
-    target = _new_day_from_pt_now(now_pt)
-    if target.weekday() < 5:
-        return False
+    Phases:
+      pre  (7:58–8:00):   probe all watched/auto-book targets every 15 s
+      burst (8:00–8:00:30): back-to-back probes for the new weekend day's 9:00 AM slot only;
+                            exits early once that slot is booked or already in my_reservations
+      post (8:00:30–8:02): probe all watched/auto-book targets every 15 s
 
-    target_str = target.isoformat()
-    if state.get("queued_publish_probe_date") == target_str:
-        print(f"Publish probe burst already queued for {target_str}.")
-        return True
-    if not WORK_QUEUE_URL:
-        print("Work queue is not configured; cannot queue publish probe burst.")
-        return False
+    All probes share one JWT obtained at session start.
+    Results are appended to state["release_probe_log"] for auditing.
+    """
+    import time as _time
 
-    state["queued_publish_probe_date"] = target_str
-    save_state(state)
-    for delay_seconds in PUBLISH_PROBE_BURST_DELAYS_SECONDS:
-        _enqueue_work(
-            "publish_probe",
-            {
-                "date": target_str,
-                "minute": delay_seconds // 60,
-            },
-            delay_seconds=delay_seconds,
-        )
-    print(f"Queued publish probe burst for {target_str} at 8:01-8:10 AM PT.")
-    return True
+    now_pt = datetime.now(tz=PT)
+    eight_am = now_pt.replace(hour=8, minute=0, second=0, microsecond=0)
 
+    # Burst target: new day's 9:00 AM slot, but only on weekends.
+    new_day = now_pt.date() + timedelta(days=14)
+    burst_target: tuple[str, str] | None = (
+        (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
+    )
+    burst_done = False  # flipped when slot is booked or already reserved
 
-def _run_queued_publish_probe(target_date: str) -> None:
-    expected = _new_day_from_pt_now().isoformat()
-    if target_date != expected:
-        print(f"Skipping stale publish probe for {target_date}; expected {expected}.")
-        return
-    try:
-        target = date.fromisoformat(target_date)
-    except ValueError:
-        print(f"Skipping publish probe with invalid date: {target_date}")
-        return
-    if target.weekday() < 5:
-        print(f"Skipping publish probe for non-weekend new day: {target_date}")
-        return
-    print(f"Running queued publish probe for {target_date}.")
-    _run_targeted_daily_scan()
-
-
-def _run_pre_login() -> None:
-    """Pre-fetch and cache a Firebase JWT so the 8am booking probe skips login."""
+    # Login once upfront, using cached token if available.
     state = load_state()
     try:
-        jwt = _firebase_login()
-        _cache_jwt(state, jwt)
-        save_state(state)
-        print("Pre-login complete; JWT cached until", state["cached_jwt_expires_at"])
+        jwt = _get_cached_jwt(state) or _firebase_login()
+        if not state.get("cached_jwt"):
+            _cache_jwt(state, jwt)
+            save_state(state)
+        print(f"Release probe session: logged in, JWT expires {state.get('cached_jwt_expires_at', '?')}")
+        if burst_target:
+            print(f"  Burst target: {burst_target[0]} {burst_target[1]}")
     except Exception as exc:
-        print(f"Pre-login failed: {exc}")
+        try:
+            send_telegram(f"❌ Release probe login failed: {exc}")
+        except Exception:
+            pass
+        return
+
+    # Acquire scan lock so regular EventBridge scans yield.
+    state = load_state()
+    if _active_scan_started_at(state):
+        print("Release probe session: another scan in progress, skipping.")
+        return
+    started_at = _utc_now_iso()
+    state["scan_started_at"] = started_at
+    state["scan_started_kind"] = "release_probe"
+    save_state(state)
+
+    probe_log: list[dict] = []
+
+    def _one_probe(phase: str, targets_override: dict | None = None) -> list[dict]:
+        """Run one availability+booking probe. Returns list of booked slots."""
+        ts = _utc_now_iso()
+        st = load_state()
+        auto_book_slots = st.get("auto_book_slots") or []
+        targets = targets_override if targets_override is not None else _watched_and_auto_book_targets(st)
+        if not targets:
+            probe_log.append({"ts": ts, "phase": phase, "result": "no_targets"})
+            print(f"  [{phase}] no targets")
+            return []
+        try:
+            new_avail, booked = _api_scan(
+                target_times_by_date=targets,
+                auto_book_slots=auto_book_slots,
+                jwt=jwt,
+            )
+            st = load_state()
+            avail = st.get("availability", {})
+            for d, tm in new_avail.items():
+                day = avail.get(d, {})
+                for t, courts in tm.items():
+                    day[t] = _normalize_time_availability(courts)
+                avail[d] = day
+            st["availability"] = avail
+            open_slots = [
+                f"{d} {t}"
+                for d, tm in new_avail.items()
+                for t, courts in tm.items()
+                if any(v is True for v in courts.values())
+            ]
+            entry: dict = {
+                "ts": ts,
+                "phase": phase,
+                "result": "booked" if booked else ("open" if open_slots else "empty"),
+            }
+            if booked:
+                entry["booked"] = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked]
+            if open_slots:
+                entry["open"] = open_slots
+            probe_log.append(entry)
+            print(
+                f"  [{phase}] {entry['result']}"
+                + (f" — {entry.get('booked') or entry.get('open')}" if entry["result"] != "empty" else "")
+            )
+            _apply_booked_slots(st, booked)
+            save_state(st)
+            _notify_booked_slots(booked)
+            return booked
+        except Exception as exc:
+            probe_log.append({"ts": ts, "phase": phase, "result": "error", "error": str(exc)})
+            print(f"  [{phase}] error: {exc}")
+            return []
+
+    def _burst_slot_already_reserved(burst_date: str, burst_time: str) -> bool:
+        """True if my_reservations already contains this slot (booked now or previously)."""
+        st = load_state()
+        return any(
+            r.get("date") == burst_date and r.get("time") == burst_time
+            for r in (st.get("my_reservations") or [])
+        )
+
+    try:
+        while True:
+            now = datetime.now(tz=PT)
+            secs = (now - eight_am).total_seconds()
+
+            if secs >= _RELEASE_END_S:
+                break
+
+            in_burst_window = 0 <= secs < _RELEASE_BURST_UNTIL_S
+
+            if in_burst_window and burst_target and not burst_done:
+                burst_date, burst_time = burst_target
+                if _burst_slot_already_reserved(burst_date, burst_time):
+                    burst_done = True
+                    probe_log.append({
+                        "ts": _utc_now_iso(), "phase": "burst",
+                        "result": "already_reserved",
+                        "slot": f"{burst_date} {burst_time}",
+                    })
+                    print(f"  [burst] {burst_date} {burst_time} already reserved — stopping burst")
+                    # Fall through to a post-interval probe below
+                else:
+                    booked = _one_probe("burst", targets_override={burst_date: [burst_time]})
+                    if any(b.get("date") == burst_date and b.get("time") == burst_time for b in booked):
+                        burst_done = True
+                    continue  # back-to-back: no sleep, loop immediately
+
+            # Pre / post phase (also covers burst window once burst is done or N/A)
+            phase = "pre" if secs < 0 else "post"
+            interval = _RELEASE_PRE_INTERVAL_S if secs < 0 else _RELEASE_POST_INTERVAL_S
+            t0 = _time.monotonic()
+            _one_probe(phase)
+            elapsed = _time.monotonic() - t0
+            _time.sleep(max(0.0, interval - elapsed))
+
+    finally:
+        state = load_state()
+        if state.get("scan_started_at") == started_at:
+            state.pop("scan_started_at", None)
+            state.pop("scan_started_kind", None)
+        existing = state.get("release_probe_log") or []
+        state["release_probe_log"] = (existing + probe_log)[-500:]
+        state["last_release_probe_session"] = started_at
+        save_state(state)
+        print(f"Release probe session complete: {len(probe_log)} probes.")
 
 
-def _queue_pre_login_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
-    """Queue a pre-login to fire at ~7:58 AM from the 7:45 AM EventBridge tick."""
+def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
+    """Queue the release probe session from the 7:45 AM EventBridge tick (780 s delay → ~7:58 AM)."""
     now_pt = now_pt or datetime.now(tz=PT)
     if now_pt.hour != 7 or now_pt.minute != 45:
         return False
     if not WORK_QUEUE_URL:
+        print("Work queue not configured; cannot queue release probe session.")
         return False
-    delay = 780  # 13 min → lands at ~7:58 AM PT
-    queued = bool(_enqueue_work("pre_login", {}, delay_seconds=delay))
+    today_str = now_pt.date().isoformat()
+    if state.get("release_probe_session_date") == today_str:
+        print(f"Release probe session already queued for {today_str}.")
+        return True
+    if not _watched_and_auto_book_targets(state):
+        print("No watched/auto-book slots — skipping release probe session.")
+        return False
+    state["release_probe_session_date"] = today_str
+    save_state(state)
+    queued = bool(_enqueue_work("release_probe_session", {}, delay_seconds=780))
     if queued:
-        print("Queued pre-login for ~7:58 AM PT.")
+        print(f"Queued release probe session for ~7:58 AM PT ({today_str}).")
     return queued
 
 
@@ -2711,10 +2828,8 @@ def _run_queue_work(message: dict) -> None:
     kind = message.get("kind")
     if kind == "scheduled_probe":
         _run_queued_scheduled_probe(str(message.get("token") or ""))
-    elif kind == "publish_probe":
-        _run_queued_publish_probe(str(message.get("date") or ""))
-    elif kind == "pre_login":
-        _run_pre_login()
+    elif kind == "release_probe_session":
+        _run_release_probe_session()
     else:
         print(f"Ignoring unknown queue work kind: {kind}")
 
@@ -2776,6 +2891,10 @@ def handle_scan_interval(event) -> dict:
 def _run_targeted_daily_scan() -> None:
     """Probe scan: weekends at 9 AM plus the newly published day for all times."""
     state = load_state()
+    active_scan = _active_scan_started_at(state)
+    if active_scan:
+        print(f"Targeted daily scan: release probe session running since {active_scan.isoformat()}, skipping.")
+        return
     if _auto_watch_upcoming_weekends(state):
         save_state(state)
 
@@ -2889,8 +3008,7 @@ def handler(event, context):
     if event.get("source") == "aws.events":
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
-        _queue_pre_login_if_needed(state)
-        _queue_publish_probe_burst_if_needed(state)
+        _queue_release_probe_session_if_needed(state)
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)
         if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
