@@ -2138,7 +2138,9 @@ async function syncMine() {
   try {
     const r = await apiFetch('/my-reservations');
     if (!r.ok) {
-      toast('Sync failed (' + r.status + ')');
+      let detail = '';
+      try { detail = (await r.json()).error || ''; } catch (_) {}
+      toast('Sync failed (' + r.status + ')' + (detail ? ': ' + detail : ''));
       return;
     }
     const data = await r.json();
