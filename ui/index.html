@@ -121,9 +121,11 @@
       border: none; background: white; cursor: pointer; color: #6b7280;
       transition: background 0.15s, color 0.15s, box-shadow 0.15s;
     }
+    .mode-btn:disabled { opacity: 0.5; cursor: default; }
     #btn-watch { color: #9a3412; }
     .mode-btn.active-watch { background: #fff7ed; color: #9a3412; box-shadow: inset 0 0 0 1px #fdba74; }
     #btn-mine { color: #166534; }
+    #btn-sync-mine { color: #1d4ed8; border-left: 1px solid #d1d5db; }
     .mode-btn.active-mine  { background: #f0fdf4; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
     #btn-book { color: #92400e; }
     .mode-btn.active-book  { background: #fffbeb; color: #92400e; box-shadow: inset 0 0 0 1px #fcd34d; }
@@ -765,6 +767,7 @@
         <div class="mode-control">
           <div class="mode-toggle">
             <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Click cells to mark as your reservation">✓</button>
+            <button class="mode-btn" id="btn-sync-mine" onclick="syncMine()" title="Sync my rec.us reservations">↻</button>
           </div>
           <span class="mode-hint">shift+click = mine</span>
         </div>
@@ -2127,6 +2130,25 @@ async function toggleMine(date, time, court) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slots: mine }),
   });
+}
+
+async function syncMine() {
+  const btn = document.getElementById('btn-sync-mine');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await apiFetch('/my-reservations');
+    if (!r.ok) {
+      toast('Sync failed (' + r.status + ')');
+      return;
+    }
+    const data = await r.json();
+    toast('Synced my reservations: ' + (data.mine || 0));
+    await refreshState();
+  } catch (e) {
+    toast('Sync error: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function toggleAutoBook(date, time) {

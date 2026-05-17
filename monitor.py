@@ -33,7 +33,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 SCAN_HISTORY_MAX = 300  # safety cap; UI filters to past 24h, normalize trims older.
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -435,6 +435,8 @@ def _empty_state() -> dict:
         "watched_slots":       [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
         "watched_slots_updated_at": None,
         "my_reservations":     [],   # [{"date": "YYYY-MM-DD", "time": "H:MM AM", "court": "6"}]
+        "my_reservations_synced_at": None,
+        "my_reservations_source": None,
         "availability":        {},   # {"YYYY-MM-DD": {"H:MM AM": {"6": true, "4": false, "5": true}}}
         "notified_slots":      [],   # ["YYYY-MM-DD|H:MM AM|6"] — already SMS'd, avoids repeat texts
         "last_scanned":        None,
@@ -616,6 +618,8 @@ def _normalize_state(state: dict) -> dict:
         expand_legacy=False,
         default_court=COURT_PREFERENCE[0],
     )
+    normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
+    normalized["my_reservations_source"] = state.get("my_reservations_source")
     normalized["notified_slots"] = _normalize_notified_slots(state.get("notified_slots"))
     today_str = date.today().isoformat()
     normalized["auto_watched_weekends"] = sorted(
@@ -1056,6 +1060,148 @@ def _rec_api(url: str, method: str = "GET", body=None, jwt: str = "") -> tuple[i
         except Exception:
             body_r = {"raw": raw.decode(errors="replace")[:300]}
         return e.code, body_r
+
+
+def _rec_api_required(url: str, *, jwt: str) -> dict:
+    status, body = _rec_api(url, jwt=jwt)
+    if status != 200:
+        raise RuntimeError(f"rec.us API failed [{status}]: {json.dumps(body)[:200]}")
+    return body
+
+
+def _rec_user_id(jwt: str) -> str:
+    body = _rec_api_required("https://api.rec.us/v1/users/me", jwt=jwt)
+    user = body.get("data") or body.get("user") or body
+    user_id = user.get("id") if isinstance(user, dict) else None
+    if not user_id:
+        raise RuntimeError("rec.us user id not found")
+    return user_id
+
+
+def _slot_from_rec_reservation(reservation: dict, court: str) -> dict | None:
+    time_range = reservation.get("reservationTimestampRange")
+    if not isinstance(time_range, list) or not time_range:
+        return None
+    start_text = str(time_range[0])
+    parts = start_text.split()
+    if len(parts) < 2:
+        return None
+    date_text, time_text = parts[0], parts[1]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_text):
+        return None
+    slot_time = _HHMM_TO_TIME_TEXT.get(time_text[:5])
+    if slot_time is None:
+        return None
+    return {"date": date_text, "time": slot_time, "court": court}
+
+
+def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
+    included = page.get("included") if isinstance(page, dict) else {}
+    included = included if isinstance(included, dict) else {}
+    reservations = [
+        r for r in included.get("reservations", [])
+        if isinstance(r, dict) and not r.get("canceledAt")
+    ]
+    sites = {
+        s.get("id"): s
+        for s in included.get("sites", [])
+        if isinstance(s, dict) and s.get("id")
+    }
+    reservation_site_ids = included.get("reservationSiteIds") or {}
+    if not isinstance(reservation_site_ids, dict):
+        reservation_site_ids = {}
+
+    reservations_by_id = {r.get("id"): r for r in reservations if r.get("id")}
+    reservations_by_facility: dict[str, list[dict]] = {}
+    for reservation in reservations:
+        facility_id = reservation.get("facilityRentalId")
+        if facility_id:
+            reservations_by_facility.setdefault(facility_id, []).append(reservation)
+
+    slots = []
+    bookings = page.get("data", []) if isinstance(page, dict) else []
+    for booking in bookings:
+        if not isinstance(booking, dict):
+            continue
+        if booking.get("status") != "confirmed" or booking.get("canceledAt"):
+            continue
+        if booking.get("timeStatus") == "past":
+            continue
+
+        matching_reservations = []
+        linked_reservation_id = booking.get("linkedReservationId")
+        if linked_reservation_id and linked_reservation_id in reservations_by_id:
+            matching_reservations.append(reservations_by_id[linked_reservation_id])
+        facility_id = booking.get("facilityRentalId")
+        if facility_id:
+            matching_reservations.extend(reservations_by_facility.get(facility_id, []))
+
+        seen_reservations: set[str] = set()
+        for reservation in matching_reservations:
+            reservation_id = reservation.get("id")
+            if reservation_id in seen_reservations:
+                continue
+            if reservation_id:
+                seen_reservations.add(reservation_id)
+            site_ids = reservation_site_ids.get(reservation_id, []) if reservation_id else []
+            for site_id in site_ids:
+                site = sites.get(site_id) or {}
+                court = _normalize_court_number(site.get("courtNumber") or site.get("name"))
+                if not court:
+                    continue
+                slot = _slot_from_rec_reservation(reservation, court)
+                if slot:
+                    slots.append(slot)
+    return _normalize_slot_records(slots, expand_legacy=False)
+
+
+def fetch_rec_my_reservations(jwt: str | None = None) -> list[dict]:
+    jwt = jwt or _firebase_login()
+    user_id = _rec_user_id(jwt)
+    all_slots: list[dict] = []
+    page_num = 1
+    page_size = 100
+    while True:
+        query = urlencode({"pg[num]": page_num, "pg[size]": page_size})
+        page = _rec_api_required(
+            f"https://api.rec.us/v1/users/{user_id}/bookings?{query}",
+            jwt=jwt,
+        )
+        all_slots.extend(_extract_my_reservations_from_rec_bookings(page))
+        pg = ((page.get("meta") or {}).get("pg") or {}) if isinstance(page, dict) else {}
+        total = int(pg.get("totalResults") or len(page.get("data", []) or []))
+        size = int(pg.get("size") or page_size)
+        num = int(pg.get("num") or page_num)
+        if num * size >= total:
+            break
+        page_num += 1
+
+    order = {time_text: idx for idx, time_text in enumerate(SLOT_TIMES)}
+    court_order = {court: idx for idx, court in enumerate(COURT_PREFERENCE)}
+    normalized = _normalize_slot_records(all_slots, expand_legacy=False)
+    return sorted(
+        normalized,
+        key=lambda s: (
+            s["date"],
+            order.get(s["time"], len(order)),
+            court_order.get(s["court"], len(court_order)),
+        ),
+    )
+
+
+def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
+    try:
+        slots = fetch_rec_my_reservations()
+    except Exception as exc:
+        print(f"rec.us reservations sync failed: {exc}")
+        if strict:
+            raise
+        return False
+
+    state["my_reservations"] = slots
+    state["my_reservations_synced_at"] = _utc_now_iso()
+    state["my_reservations_source"] = "rec.us"
+    return True
 
 
 async def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bool:
@@ -1746,6 +1892,8 @@ def _apply_booked_slots(state: dict, booked_slots: list[dict]) -> None:
                 {"date": b["date"], "time": b["time"], "court": b["court"]}
             )
             existing_reservations.add(key)
+    state["my_reservations_synced_at"] = _utc_now_iso()
+    state["my_reservations_source"] = "auto-book"
 
 
 def _notify_booked_slots(booked_slots: list[dict]) -> None:
@@ -1911,6 +2059,7 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
 
         open_target_lines = _alert_lines_for_open_targets(state, new_avail)
 
+        sync_rec_my_reservations(state)
         _apply_booked_slots(state, booked_slots)
         state["notified_slots"] = []
         if state.get("scan_started_at") == started_at:
@@ -2009,6 +2158,7 @@ def _run_scheduled_worker() -> None:
 
         open_target_lines = _alert_lines_for_open_targets(state, new_avail)
 
+        sync_rec_my_reservations(state)
         _apply_booked_slots(state, booked_slots)
         state["notified_slots"] = []
         if state.get("scan_started_at") == started_at:
@@ -2548,6 +2698,8 @@ def handle_state(event) -> dict:
             "queued_publish_probe_date": state.get("queued_publish_probe_date"),
             "rec_url":             BASE_URL,
             "auto_book_slots":     state.get("auto_book_slots", []),
+            "my_reservations_synced_at": state.get("my_reservations_synced_at"),
+            "my_reservations_source": state.get("my_reservations_source"),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
             "focus_newest_weekend": bool(state.get("focus_newest_weekend", False)),
             "telegram_call_history": _load_telegram_usage()[:50],
@@ -2577,7 +2729,6 @@ def handle_watch(event) -> dict:
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "watched": len(state['watched_slots'])})}
 
 
-
 def handle_my_reservations(event) -> dict:
     body = get_body(event)
     slots = body.get("slots")
@@ -2592,8 +2743,34 @@ def handle_my_reservations(event) -> dict:
             return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s}"})}
     state = load_state()
     state["my_reservations"] = _normalize_slot_records(slots, expand_legacy=False)
+    state["my_reservations_synced_at"] = _utc_now_iso()
+    state["my_reservations_source"] = "manual"
     save_state(state)
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(state['my_reservations'])})}
+
+
+def handle_my_reservations_refresh(event) -> dict:
+    state = load_state()
+    try:
+        sync_rec_my_reservations(state, strict=True)
+    except Exception as exc:
+        return {
+            "statusCode": 502,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": "Failed to fetch rec.us reservations"}),
+        }
+    save_state(state)
+    slots = state.get("my_reservations", [])
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({
+            "ok": True,
+            "mine": len(slots),
+            "slots": slots,
+            "synced_at": state["my_reservations_synced_at"],
+        }),
+    }
 
 
 def handle_auto_book(event) -> dict:
@@ -2957,6 +3134,7 @@ def _run_targeted_daily_scan() -> None:
                 day_state[time_text] = _normalize_time_availability(court_avail)
             availability[date_str] = day_state
         state["availability"] = availability
+        sync_rec_my_reservations(state)
         _apply_booked_slots(state, booked_slots)
         save_state(state)
         _notify_booked_slots(booked_slots)
@@ -3046,6 +3224,9 @@ def handler(event, context):
     if path == "/watch" and method == "PUT":
         return handle_watch(event)
 
+    if path == "/my-reservations" and method == "GET":
+        return handle_my_reservations_refresh(event)
+
     if path == "/my-reservations" and method == "PUT":
         return handle_my_reservations(event)
 
@@ -3116,6 +3297,9 @@ def handler(event, context):
             )
         payload = build_scan_payload(targets=targets, target_time=target_time, results=results)
         payload["booked_slots"] = booked_slots
+        state = load_state()
+        sync_rec_my_reservations(state)
+        save_state(state)
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps(payload)}
 
     return {"statusCode": 404, "headers": CORS_HEADERS, "body": json.dumps({"error": "Not found"})}
