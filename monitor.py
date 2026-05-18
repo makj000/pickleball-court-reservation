@@ -348,6 +348,7 @@ def send_telegram(message: str) -> None:
     data = json.loads(body.decode("utf-8"))
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API error: {data}")
+    _append_notification_to_history(TELEGRAM_CHAT_ID, message)
 
 
 def notify(message: str, subject: str = "Pickleball alert") -> None:
@@ -1901,9 +1902,9 @@ Conventions:
 - Call get_state first if you're unsure about current watched/auto-book lists.
 
 Booking on demand:
-- If the user says "book it", "book this", "grab it", or similar while replying to a notification,
-  parse the date and time from the [Replying to bot message: ...] prefix and call book_slot immediately.
-  Do NOT ask for confirmation — the user's explicit "book it" is sufficient.
+- If the user says "book it", "book this", "grab it", or similar, look at your recent
+  assistant messages in this conversation to find which slot was just mentioned, then
+  call book_slot immediately. Do NOT ask for confirmation — the explicit intent is sufficient.
 - Report the outcome clearly: which court was booked, or why it failed.
 
 Keep replies short. Use plain text."""
@@ -2196,6 +2197,26 @@ def _save_chat_history(chat_id: str, history: list[dict]) -> None:
     )
 
 
+def _append_notification_to_history(chat_id: str, message: str) -> None:
+    """Save a proactive bot notification to chat history so follow-up replies have context."""
+    if not chat_id:
+        return
+    try:
+        history = _load_chat_history(chat_id)
+        if history and history[-1]["role"] == "assistant":
+            # Merge consecutive assistant messages to preserve alternation requirement.
+            prev = history[-1]["content"]
+            if isinstance(prev, str):
+                history[-1]["content"] = prev + "\n\n" + message
+            else:
+                history[-1]["content"] = list(prev) + [{"type": "text", "text": message}]
+        else:
+            history.append({"role": "assistant", "content": message})
+        _save_chat_history(chat_id, history)
+    except Exception as exc:
+        print(f"Failed to save notification to history: {exc}")
+
+
 def _load_telegram_usage() -> list[dict]:
     if not STATE_BUCKET:
         return []
@@ -2348,12 +2369,6 @@ def handle_telegram(event) -> dict:
         _save_chat_history(chat_id, [])
         _tg_send_to(chat_id, "Conversation reset.")
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
-    # Include replied-to message so the bot can parse slot context from notifications.
-    reply_to = msg.get("reply_to_message")
-    if reply_to:
-        original = (reply_to.get("text") or "").strip()
-        if original:
-            text = f"[Replying to bot message: {original}]\n{text}"
     try:
         answer = _bot_reply(chat_id, text)
     except Exception as exc:
