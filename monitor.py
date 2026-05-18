@@ -1891,6 +1891,7 @@ Capabilities (via tools):
 - Add or remove watched slots (date + time + court 4/5/6).
 - Add or remove auto-book slots (date + time). The monitor will book them when an open court appears on the next scan.
 - Toggle weekend 9 AM auto-watch.
+- Book a slot immediately (book_slot) — probes live availability then books the best open court.
 
 Conventions:
 - Times are "8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "4:00 PM", "5:00 PM", "6:00 PM".
@@ -1898,6 +1899,12 @@ Conventions:
 - Dates: YYYY-MM-DD. Resolve relative dates ("next Saturday", "this Sunday") using today's Pacific date.
 - Before any write (watch/auto-book), confirm with the user. Auto-booking is irreversible once a court opens.
 - Call get_state first if you're unsure about current watched/auto-book lists.
+
+Booking on demand:
+- If the user says "book it", "book this", "grab it", or similar while replying to a notification,
+  parse the date and time from the [Replying to bot message: ...] prefix and call book_slot immediately.
+  Do NOT ask for confirmation — the user's explicit "book it" is sufficient.
+- Report the outcome clearly: which court was booked, or why it failed.
 
 Keep replies short. Use plain text."""
 
@@ -2011,6 +2018,22 @@ BOT_TOOLS: list[dict] = [
             "required": ["enabled"],
         },
     },
+    {
+        "name": "book_slot",
+        "description": (
+            "Immediately probe availability and book a specific slot (date + time). "
+            "Tries courts in preference order 6 > 4 > 5. "
+            "Use when the user says 'book it' or similar in reply to an availability notification."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "time": {"type": "string", "description": "e.g. '9:00 AM'"},
+            },
+            "required": ["date", "time"],
+        },
+    },
 ]
 
 
@@ -2097,6 +2120,31 @@ def _bot_run_tool(name: str, args: dict):
             _auto_watch_upcoming_weekends(state)
         save_state(state)
         return {"ok": True, "auto_watch_weekends_enabled": bool(args.get("enabled"))}
+    if name == "book_slot":
+        date_str = str(args.get("date", ""))
+        time_text = str(args.get("time", ""))
+        try:
+            target_date = date.fromisoformat(date_str)
+        except ValueError:
+            return {"ok": False, "error": f"Invalid date: {date_str}"}
+        if time_text not in SLOT_TIMES:
+            return {"ok": False, "error": f"Invalid time '{time_text}'. Valid: {SLOT_TIMES}"}
+        avail = _api_fetch_availability({date_str: [time_text]})
+        court_avail = avail.get(date_str, {}).get(time_text, {})
+        open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
+        if not open_courts:
+            return {"ok": False, "error": f"No open courts for {date_str} {time_text} right now"}
+        jwt = _firebase_login()
+        for court in open_courts:
+            ok = book_slot_api(jwt, target_date, time_text, court)
+            if ok:
+                state = load_state()
+                booked = [{"date": date_str, "time": time_text, "court": court}]
+                _apply_booked_slots(state, booked)
+                save_state(state)
+                _notify_booked_slots(booked)
+                return {"ok": True, "booked": f"Court {court} on {date_str} {time_text}"}
+        return {"ok": False, "error": f"All courts failed for {date_str} {time_text}"}
     return {"error": f"unknown tool: {name}"}
 
 
@@ -2300,6 +2348,12 @@ def handle_telegram(event) -> dict:
         _save_chat_history(chat_id, [])
         _tg_send_to(chat_id, "Conversation reset.")
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
+    # Include replied-to message so the bot can parse slot context from notifications.
+    reply_to = msg.get("reply_to_message")
+    if reply_to:
+        original = (reply_to.get("text") or "").strip()
+        if original:
+            text = f"[Replying to bot message: {original}]\n{text}"
     try:
         answer = _bot_reply(chat_id, text)
     except Exception as exc:
