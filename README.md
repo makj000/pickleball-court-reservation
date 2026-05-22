@@ -75,6 +75,7 @@ Copy `.env.example` (or set these in Lambda environment variables):
 ```
 REC_US_LOGIN=your@email.com
 REC_US_PASSWORD=your_password
+PARTICIPANT_USER_ID=your_rec_us_participant_user_id
 FIREBASE_API_KEY=your_firebase_key        # from rec.us web app config
 API_USERNAME=your_api_username
 API_PASSWORD=your_api_password
@@ -84,6 +85,12 @@ TELEGRAM_WEBHOOK_SECRET=random_secret
 ANTHROPIC_API_KEY=your-claude-api-key
 SYNC_SIGNING_SECRET=random_secret         # for sync token signing (can reuse API_PASSWORD)
 STATE_BUCKET=your-s3-bucket-name
+REGION=us-west-2
+ECR_URI=123456789012.dkr.ecr.us-west-2.amazonaws.com/your-ecr-repo:latest
+FUNCTION=your-lambda-function-name
+UI_BUCKET=your-ui-s3-bucket
+API_BASE=https://your-api-id.execute-api.us-west-2.amazonaws.com/prod
+QUEUE_NAME=your-sqs-queue-name
 ```
 
 ### Deploy

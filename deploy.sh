@@ -1,19 +1,44 @@
 #!/bin/bash
 set -e
 
-ECR_URI="123456789012.dkr.ecr.us-west-2.amazonaws.com/your-ecr-repo:latest"
-REGION="us-west-2"
-FUNCTION="your-lambda-function-name"
-UI_BUCKET="your-ui-s3-bucket"
-FUNCTION_URL_INVOKE_SID="public-function-url-invoke"
-QUEUE_NAME="your-sqs-queue-name"
-QUEUE_POLICY_NAME="your-sqs-queue-policy"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+set -a; source "$SCRIPT_DIR/.env" 2>/dev/null || true; set +a
+
+REGION="${REGION:-us-west-2}"
+FUNCTION_URL_INVOKE_SID="${FUNCTION_URL_INVOKE_SID:-public-function-url-invoke}"
+
+: "${ECR_URI:?set ECR_URI, e.g. 123456789012.dkr.ecr.us-west-2.amazonaws.com/your-ecr-repo:latest}"
+: "${FUNCTION:?set FUNCTION}"
+: "${UI_BUCKET:?set UI_BUCKET}"
+: "${QUEUE_NAME:?set QUEUE_NAME}"
+
+QUEUE_POLICY_NAME="${QUEUE_POLICY_NAME:-${QUEUE_NAME}-queue}"
+
+ECR_REGISTRY="${ECR_URI%%/*}"
 
 echo "==> Uploading UI to S3..."
-aws s3 cp ui/index.html s3://$UI_BUCKET/index.html \
+UI_SOURCE="$SCRIPT_DIR/ui/index.html"
+UI_UPLOAD="$UI_SOURCE"
+if [ -n "${API_BASE:-}" ]; then
+  UI_UPLOAD=$(mktemp)
+  python3 - "$UI_SOURCE" "$UI_UPLOAD" "$API_BASE" <<'PY'
+import sys
+
+source, target, api_base = sys.argv[1:]
+with open(source, "r", encoding="utf-8") as f:
+    html = f.read()
+html = html.replace("__PICKLEBALL_API_BASE__", api_base.rstrip("/"))
+with open(target, "w", encoding="utf-8") as f:
+    f.write(html)
+PY
+fi
+aws s3 cp "$UI_UPLOAD" "s3://$UI_BUCKET/index.html" \
   --content-type "text/html" \
   --cache-control "no-store, max-age=0" \
   --region $REGION
+if [ "$UI_UPLOAD" != "$UI_SOURCE" ]; then
+  rm -f "$UI_UPLOAD"
+fi
 
 echo "==> Ensuring Function URL invoke permission..."
 if ! aws lambda get-policy \
@@ -139,7 +164,7 @@ fi
 echo "==> Authenticating Docker to ECR..."
 aws ecr get-login-password --region $REGION | \
   docker login --username AWS --password-stdin \
-  123456789012.dkr.ecr.us-west-2.amazonaws.com
+  "$ECR_REGISTRY"
 
 echo "==> Building and pushing image..."
 docker buildx build \
@@ -163,8 +188,6 @@ aws lambda wait function-updated \
   --region $REGION
 
 echo "==> Registering Telegram webhook..."
-# Load .env for TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET
-set -a; source "$(dirname "$0")/.env" 2>/dev/null || true; set +a
 LAMBDA_URL=$(aws lambda get-function-url-config \
   --function-name $FUNCTION \
   --region $REGION \

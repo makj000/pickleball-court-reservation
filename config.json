@@ -1,8 +1,6 @@
 {
   "base_url": "https://www.rec.us/foster-city",
   "scan_api_url": "https://example.execute-api.us-west-2.amazonaws.com/prod/scan",
-  "sync_scan_url": "https://example.lambda-url.us-west-2.on.aws/",
-  "check_dates": [
-    "2026-03-20"
-  ]
+  "sync_scan_url": "",
+  "check_dates": []
 }
