@@ -2,6 +2,10 @@
 
 Automated availability monitor and booking agent for pickleball courts on rec.us (Foster City). Runs on AWS Lambda and notifies via Telegram.
 
+## Screenshot
+
+![Pickleball Monitor dashboard](docs/screenshot.png)
+
 ## What it does
 
 - **Scans** rec.us for open court slots on configured dates
