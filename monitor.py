@@ -13,6 +13,7 @@ import json
 from config import CORS_HEADERS, DEFAULT_TIME_FILTER, load_check_dates
 from http_utils import (
     _build_sync_redirect, _check_auth, _is_lambda_url_request,
+    _mark_booked_slots_in_scan_results, build_scan_payload,
     get_method, get_path, parse_requested_dates, parse_time_filter,
     parse_query_params,
 )
