@@ -6,10 +6,12 @@ from datetime import date
 
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
 
-from config import BASE_URL, COURT_RE, COURT_PREFERENCE, HEADLESS, SLOT_TIMES, TARGET_COURTS, TIME_RE
+from config import (
+    BASE_URL, COURT_RE, COURT_PREFERENCE, HEADLESS, SLOT_TIMES,
+    TARGET_COURTS, TIME_RE, load_check_dates,
+)
 from state import (
     _empty_court_availability, _normalize_time_availability, _preferred_open_court,
-    load_check_dates,
 )
 from notify import ordinal
 
