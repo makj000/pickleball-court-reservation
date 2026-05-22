@@ -4,7 +4,11 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 APP_DIR = Path(__file__).parent
 CONFIG_FILE = APP_DIR / "config.json"
@@ -21,8 +25,8 @@ PASSWORD = os.environ.get("REC_US_PASSWORD") or os.environ.get("PASSWORD", "")
 
 HEADLESS      = True
 DEFAULT_TIME_FILTER = "8:00 AM"
-NOTIFY_NUMBER = "+14154380400"
-NOTIFY_EMAIL  = "kejia.ma@gmail.com"
+NOTIFY_NUMBER = os.environ.get("NOTIFY_NUMBER", "")
+NOTIFY_EMAIL  = os.environ.get("NOTIFY_EMAIL", "")
 
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
 WORK_QUEUE_URL = os.environ.get("PICKLEBALL_QUEUE_URL") or os.environ.get("WORK_QUEUE_URL", "")
@@ -70,7 +74,7 @@ COURT_SPORT_IDS: dict[str, str] = {
     "4": "d3bfa8f9-03f4-4c80-ac27-fbb4dbfb9a15",
     "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
 }
-PARTICIPANT_USER_ID  = "06ba5791-1e5b-45f3-8910-1b9c75d020cc"
+PARTICIPANT_USER_ID  = os.environ.get("PARTICIPANT_USER_ID", "")
 FIREBASE_API_KEY     = os.environ.get("FIREBASE_API_KEY", "")
 FIREBASE_SIGN_IN_URL = (
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"

@@ -9,14 +9,14 @@
 └────────────────────────────────────────────┼────────────────────────┘
                                              │
               ┌──────────────────────────────┼──────────────────────────┐
-              │  AWS us-west-2               │                          │
+              │  AWS region                  │                          │
               │                             ▼                           │
-              │  S3: your-ui-s3-bucket/index.html                  │
+              │  S3: <ui-bucket>/index.html                             │
               │        (serves static UI)    │                          │
               │                             │ API calls (Basic Auth)    │
               │                             ▼                           │
               │  ┌──────────────────────────────────────────────┐      │
-              │  │   Lambda: <function-name>                  │      │
+              │  │   Lambda: <function-name>                     │      │
               │  │   (Docker / ECR, Python 3.12 + Playwright)   │      │
               │  │                                               │      │
               │  │  Entrypoints:                                 │      │
@@ -42,7 +42,7 @@
               │    │      telegram_usage.json, scan history)  │          │
               │    │        │                                 │          │
               │    │        ▼                                 │          │
-              │    │  SQS: your-sqs-queue-name            │          │
+              │    │  SQS: <work-queue-name>                   │          │
               │    │  (schedules delayed probes, up to 15min) │          │
               │    │        │                                 │          │
               │    │        ▼                                 │          │

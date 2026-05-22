@@ -823,7 +823,10 @@
 
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
-const API_BASE   = 'https://example.execute-api.us-west-2.amazonaws.com/prod';
+const API_BASE = (() => {
+  const configured = window.PICKLEBALL_API_BASE || '__PICKLEBALL_API_BASE__';
+  return configured.startsWith('__') ? '' : configured.replace(/\/$/, '');
+})();
 const AUTH_STORAGE_KEY = 'pickleball-basic-auth';
 const LOG_DOCK_STORAGE_KEY = 'pickleball-log-dock';
 const LOG_HEIGHT_STORAGE_KEY = 'pickleball-log-height';
