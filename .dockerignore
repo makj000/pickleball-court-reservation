@@ -1,0 +1,8 @@
+.env
+.git
+.claude
+__pycache__/
+*.pyc
+*.zip
+to_remove/
+legacy/
