@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium && chmod -R 777 /ms-playwright
 
-COPY --chmod=644 monitor.py .
+COPY --chmod=644 *.py .
 COPY --chmod=644 config.json .
 
 CMD ["monitor.handler"]
