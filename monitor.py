@@ -94,7 +94,7 @@ COURT_SPORT_IDS: dict[str, str] = {
     "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
 }
 PARTICIPANT_USER_ID  = "06ba5791-1e5b-45f3-8910-1b9c75d020cc"
-FIREBASE_API_KEY     = "YOUR_FIREBASE_API_KEY"
+FIREBASE_API_KEY     = os.environ.get("FIREBASE_API_KEY", "")
 FIREBASE_SIGN_IN_URL = (
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
     f"?key={FIREBASE_API_KEY}"
