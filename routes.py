@@ -71,7 +71,6 @@ def handle_state(event) -> dict:
             "my_reservations_source": state.get("my_reservations_source"),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
             "auto_watch_weekends_8am_enabled": bool(state.get("auto_watch_weekends_8am_enabled", False)),
-            "focus_newest_weekend": bool(state.get("focus_newest_weekend", False)),
             "telegram_call_history": _load_telegram_usage()[:50],
         }),
     }
@@ -173,25 +172,6 @@ def handle_auto_book(event) -> dict:
     state["auto_book_slots"] = normalized
     save_state(state)
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "auto_book": len(normalized)})}
-
-
-def handle_focus_newest_weekend(event) -> dict:
-    body = get_body(event)
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return {
-            "statusCode": 400,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"ok": False, "error": "enabled must be true or false"}),
-        }
-    state = load_state()
-    state["focus_newest_weekend"] = enabled
-    save_state(state)
-    return {
-        "statusCode": 200,
-        "headers": CORS_HEADERS,
-        "body": json.dumps({"ok": True, "focus_newest_weekend": enabled}),
-    }
 
 
 def handle_auto_watch_weekends(event) -> dict:
