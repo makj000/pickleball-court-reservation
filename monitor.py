@@ -31,7 +31,8 @@ from scheduler import (
 )
 from telegram import handle_telegram
 from routes import (
-    handle_auto_book, handle_auto_watch_weekends, handle_focus_newest_weekend,
+    handle_auto_book, handle_auto_watch_weekends, handle_auto_watch_weekends_8am,
+    handle_focus_newest_weekend,
     handle_my_reservations, handle_my_reservations_refresh, handle_scan_interval,
     handle_state, handle_watch,
 )
@@ -108,6 +109,9 @@ def handler(event, context):
 
     if path == "/auto-watch-weekends" and method == "PUT":
         return handle_auto_watch_weekends(event)
+
+    if path == "/auto-watch-weekends-8am" and method == "PUT":
+        return handle_auto_watch_weekends_8am(event)
 
     if path == "/focus-newest-weekend" and method == "PUT":
         return handle_focus_newest_weekend(event)
