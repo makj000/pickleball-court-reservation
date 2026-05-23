@@ -39,6 +39,11 @@ aws s3 cp "$UI_UPLOAD" "s3://$UI_BUCKET/index.html" \
 if [ "$UI_UPLOAD" != "$UI_SOURCE" ]; then
   rm -f "$UI_UPLOAD"
 fi
+if [ -d "$SCRIPT_DIR/img" ]; then
+  aws s3 sync "$SCRIPT_DIR/img" "s3://$UI_BUCKET/img" \
+    --cache-control "max-age=31536000" \
+    --region $REGION
+fi
 
 echo "==> Ensuring Function URL invoke permission..."
 if ! aws lambda get-policy \
