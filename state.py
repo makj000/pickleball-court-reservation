@@ -34,6 +34,7 @@ def _empty_state() -> dict:
         "queued_publish_probe_date": None,
         "auto_watched_weekends": [],
         "auto_watch_weekends_enabled": True,
+        "auto_watch_weekends_8am_enabled": False,
         "focus_newest_weekend": False,
         "auto_book_slots":     [],
         "seen_open_days":      [],
@@ -222,6 +223,7 @@ def _normalize_state(state: dict) -> dict:
     )
     raw_enabled = state.get("auto_watch_weekends_enabled")
     normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
+    normalized["auto_watch_weekends_8am_enabled"] = bool(state.get("auto_watch_weekends_8am_enabled", False))
     normalized["focus_newest_weekend"] = bool(state.get("focus_newest_weekend", False))
     auto_book_slots = []
     seen_ab: set[tuple[str, str]] = set()
@@ -361,7 +363,9 @@ def _upcoming_weekends(n: int = 3) -> list[tuple[date, date]]:
 
 
 def _auto_watch_upcoming_weekends(state: dict) -> bool:
-    if not state.get("auto_watch_weekends_enabled", True):
+    watch_9am = state.get("auto_watch_weekends_enabled", True)
+    watch_8am = state.get("auto_watch_weekends_8am_enabled", False)
+    if not watch_9am and not watch_8am:
         return False
     weekends = _upcoming_weekends(3)
     auto_watched = set(state.get("auto_watched_weekends") or [])
@@ -375,11 +379,17 @@ def _auto_watch_upcoming_weekends(state: dict) -> bool:
         return False
 
     existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
+    times_to_watch = []
+    if watch_9am:
+        times_to_watch.append("9:00 AM")
+    if watch_8am:
+        times_to_watch.append("8:00 AM")
     new_slots = [
-        {"date": d_str, "time": "9:00 AM", "court": court}
+        {"date": d_str, "time": t, "court": court}
         for d_str in new_dates
+        for t in times_to_watch
         for court in COURT_PREFERENCE
-        if (d_str, "9:00 AM", court) not in existing
+        if (d_str, t, court) not in existing
     ]
 
     today_str = date.today().isoformat()
@@ -392,7 +402,8 @@ def _auto_watch_upcoming_weekends(state: dict) -> bool:
             expand_legacy=False,
         )
         state["watched_slots_updated_at"] = _utc_now_iso()
-        print(f"Auto-watched {len(new_slots)} 9 AM slot(s) for weekends {new_dates}.")
+        times_str = " & ".join(times_to_watch)
+        print(f"Auto-watched {len(new_slots)} {times_str} slot(s) for weekends {new_dates}.")
     return True
 
 
@@ -416,15 +427,23 @@ def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
 
     existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
     auto_watched = set(state.get("auto_watched_weekends") or [])
+    watch_9am = state.get("auto_watch_weekends_enabled", True)
+    watch_8am = state.get("auto_watch_weekends_8am_enabled", False)
+    times_to_watch = []
+    if watch_9am:
+        times_to_watch.append("9:00 AM")
+    if watch_8am:
+        times_to_watch.append("8:00 AM")
     new_slots = []
     new_day = date.fromisoformat(new_day_str)
     for d in (new_day, new_day + timedelta(days=1)):
         if d.weekday() < 5:
             continue
         d_str = d.isoformat()
-        for court in COURT_PREFERENCE:
-            if (d_str, "9:00 AM", court) not in existing:
-                new_slots.append({"date": d_str, "time": "9:00 AM", "court": court})
+        for t in times_to_watch:
+            for court in COURT_PREFERENCE:
+                if (d_str, t, court) not in existing:
+                    new_slots.append({"date": d_str, "time": t, "court": court})
         auto_watched.add(d_str)
 
     if new_slots:
@@ -435,7 +454,8 @@ def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
         state["watched_slots_updated_at"] = _utc_now_iso()
         state["auto_watched_weekends"] = sorted(auto_watched)
         days_str = sorted({s["date"] for s in new_slots})
-        print(f"New day {new_day_str} is open — auto-watched 9 AM for {days_str}.")
+        times_str = " & ".join(times_to_watch) if times_to_watch else "none"
+        print(f"New day {new_day_str} is open — auto-watched {times_str} for {days_str}.")
     return True
 
 
