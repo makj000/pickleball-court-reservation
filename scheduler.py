@@ -85,10 +85,14 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
     if not targets:
         return {}, False
     new_day_str = _new_day_iso()
-    special_new_day_scan = new_day_str not in (state.get("seen_open_days") or [])
+    raw_seen = state.get("seen_open_days") or {}
+    seen_open_keys = set(raw_seen.keys() if isinstance(raw_seen, dict) else raw_seen)
+    special_new_day_scan = new_day_str not in seen_open_keys
     if special_new_day_scan:
+        new_day = date.fromisoformat(new_day_str)
+        new_day_times = ["8:00 AM", "9:00 AM"] if new_day.weekday() >= 5 else SLOT_TIMES[:]
         targets.setdefault(new_day_str, [])
-        for t in SLOT_TIMES:
+        for t in new_day_times:
             if t not in targets[new_day_str]:
                 targets[new_day_str].append(t)
     return targets, special_new_day_scan
@@ -365,7 +369,8 @@ def _run_targeted_daily_scan() -> None:
 
     today = date.today()
     new_day = today + timedelta(days=14)
-    times_by_date: dict[str, list[str]] = {new_day.isoformat(): SLOT_TIMES[:]}
+    new_day_times = ["8:00 AM", "9:00 AM"] if new_day.weekday() >= 5 else SLOT_TIMES[:]
+    times_by_date: dict[str, list[str]] = {new_day.isoformat(): new_day_times}
 
     for day_offset in range(16):
         target = today + timedelta(days=day_offset)

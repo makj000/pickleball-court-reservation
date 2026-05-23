@@ -215,7 +215,7 @@
     .grid {
       display: grid;
       --cell-size: 21.25px;
-      grid-template-columns: 94px repeat(var(--cell-cols, 21), var(--cell-size));
+      grid-template-columns: 118px repeat(var(--cell-cols, 21), var(--cell-size));
       gap: 2px;
       min-width: 480px;
       position: relative;
@@ -245,6 +245,10 @@
       cursor: pointer;
       transition: transform 0.1s, box-shadow 0.1s, background 0.12s;
     }
+    .row-label-content { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .row-label-line1 { display: flex; align-items: baseline; gap: 3px; }
+    .day-offset-badge { font-size: 0.56rem; color: #9ca3af; font-weight: 400; }
+    .day-opened-at { font-size: 0.56rem; color: #059669; font-weight: 500; white-space: nowrap; }
     .row-label:hover { transform: translateX(1px); box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18); }
     .row-label:active { transform: translateX(0); }
     .row-label.weekend-day {
@@ -1052,23 +1056,39 @@ function slotStartAt(dateStr, timeStr) {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
+function fmtOpenedAt(isoStr) {
+  if (!isoStr) return null;
+  const d = new Date(isoStr);
+  if (isNaN(d)) return null;
+  const now = new Date();
+  const todayStr = now.toDateString();
+  const yesterdayStr = new Date(now - 86400000).toDateString();
+  const timeStr = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+    .toLowerCase().replace(' ', '');
+  if (d.toDateString() === todayStr) return '↑today ' + timeStr;
+  if (d.toDateString() === yesterdayStr) return '↑yest ' + timeStr;
+  return '↑' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + timeStr;
+}
+
 function isPastSlot(dateStr, timeStr) {
   const start = slotStartAt(dateStr, timeStr);
   return start ? start.getTime() < Date.now() : false;
 }
 
 function isFocusedScanSlot(dateStr, timeStr) {
-  const newDay = appState.grid.length >= 15 ? appState.grid[14].date : null;
-  if (dateStr === newDay) return true;
   const dow = new Date(dateStr + 'T12:00:00').getDay();
-  if (dow !== 0 && dow !== 6) return false;
+  const isWeekend = dow === 0 || dow === 6;
+  const newDay = appState.grid.length >= 15 ? appState.grid[14].date : null;
+  // weekday new_day: all times are scanned
+  if (dateStr === newDay && !isWeekend) return true;
+  if (!isWeekend) return false;
   if (timeStr === '9:00 AM') return true;
   if (timeStr === '8:00 AM' && appState.auto_watch_weekends_8am_enabled) return true;
   return false;
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {} };
 let clickMode = 'watch';
 let toastTimer = null;
 let _logIdSeq = 0;
@@ -1079,7 +1099,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.2.4';
+const UI_VERSION = '1.2.5';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1781,6 +1801,11 @@ function _applyStateData(data) {
   if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
   if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
   if (!Array.isArray(appState.auto_book_slots)) appState.auto_book_slots = [];
+  if (Array.isArray(appState.seen_open_days)) {
+    const m = {}; appState.seen_open_days.forEach(d => m[d] = null); appState.seen_open_days = m;
+  } else if (!appState.seen_open_days || typeof appState.seen_open_days !== 'object') {
+    appState.seen_open_days = {};
+  }
   const recLink = document.getElementById('rec-link');
   if (recLink) recLink.href = appState.rec_url;
   const autoWatchToggle = document.getElementById('auto-watch-toggle');
@@ -1882,7 +1907,18 @@ function renderGrid() {
     labelCell.style.gridRow = String(row);
     labelCell.style.gridColumn = '1';
     labelCell.title = day.label;
-    labelCell.appendChild(el('span', day.label));
+
+    const labelContent = document.createElement('div');
+    labelContent.className = 'row-label-content';
+    const line1 = document.createElement('div');
+    line1.className = 'row-label-line1';
+    line1.appendChild(el('span', day.label));
+    line1.appendChild(el('span', '+' + dayIndex, 'day-offset-badge'));
+    labelContent.appendChild(line1);
+    const openedTs = (appState.seen_open_days || {})[day.date];
+    const openedLabel = fmtOpenedAt(openedTs);
+    if (openedLabel) labelContent.appendChild(el('div', openedLabel, 'day-opened-at'));
+    labelCell.appendChild(labelContent);
     grid.appendChild(labelCell);
 
     const slotMap = new Map(day.slots.map(slot => [slot.time + '|' + slot.court, slot]));
