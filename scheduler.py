@@ -29,12 +29,6 @@ def _new_day_from_pt_now(now_pt: datetime | None = None) -> date:
     return ((now_pt or datetime.now(tz=PT)).date() + timedelta(days=14))
 
 
-def _matches_focused_scan_policy(date_str: str, time_text: str) -> bool:
-    """When focus_newest_weekend is on, only scan the latest weekend day (skip older ones)."""
-    d = date.fromisoformat(date_str)
-    return d.weekday() >= 5 and time_text == "9:00 AM"
-
-
 def _future_watched_time_map(state: dict) -> dict[str, list[str]]:
     today_str = date.today().isoformat()
     times_by_date: dict[str, list[str]] = {}
@@ -90,7 +84,6 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
     targets = _watched_and_auto_book_targets(state)
     if not targets:
         return {}, False
-    today_str = date.today().isoformat()
     new_day_str = _new_day_iso()
     special_new_day_scan = new_day_str not in (state.get("seen_open_days") or [])
     if special_new_day_scan:
@@ -98,13 +91,6 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
         for t in SLOT_TIMES:
             if t not in targets[new_day_str]:
                 targets[new_day_str].append(t)
-    if state.get("focus_newest_weekend"):
-        weekend_dates = sorted(
-            d for d in targets if date.fromisoformat(d).weekday() >= 5 and d >= today_str
-        )
-        if len(weekend_dates) > 1:
-            for d in weekend_dates[:-1]:
-                del targets[d]
     return targets, special_new_day_scan
 
 

@@ -163,8 +163,8 @@
     .scans-table tr:last-child td { border-bottom: none; }
     .scans-table td { white-space: nowrap; }
     .scans-table td.scan-targets { white-space: nowrap; line-height: 1.4; }
-    .scan-target-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 1px 0; }
-    .scan-target-line .scan-target-day { min-width: 110px; }
+    .scan-target-line { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; padding: 1px 0; }
+    .scan-target-line .scan-target-day { min-width: 0; }
     .scan-target-inline { display: inline-flex; align-items: center; gap: 4px; }
     .scan-target-inline .scan-target-day { min-width: 0; margin-right: 2px; }
     .scan-target-row-label { font-weight: 600; color: #374151; margin-right: 4px; }
@@ -663,7 +663,7 @@
       <button class="mode-btn" id="btn-sync-mine" onclick="syncMine()" title="Sync my rec.us reservations">↻</button>
     </div>
     <div class="mode-toggle">
-      <button class="mode-btn" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens">$</button>
+      <button class="mode-btn" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens · will not book within 32 h of slot time (not enough time to cancel)">$</button>
     </div>
     <span id="scan-current"></span>
     <div class="spacer"></div>
@@ -681,11 +681,6 @@
     <label id="auto-watch-label">
       <input type="checkbox" id="auto-watch-toggle" checked>
       9 AM
-    </label>
-    <span class="header-ctrl-sep">·</span>
-    <label id="focus-newest-label">
-      <input type="checkbox" id="focus-newest-toggle">
-      Focus newest weekend only
     </label>
   </div>
 </header>
@@ -1073,7 +1068,7 @@ function isFocusedScanSlot(dateStr, timeStr) {
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], telegram_call_history: [], focus_newest_weekend: false, auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false };
 let clickMode = 'watch';
 let toastTimer = null;
 let _logIdSeq = 0;
@@ -1504,10 +1499,10 @@ function computeUpcomingScans(hoursAhead = 24) {
                       : interval === 1     ? 'hourly probe'
                       : `${interval}-hour probe`;
 
-  const maxEntries = scanLogExpanded.upcoming ? Math.ceil(hoursAhead / interval) + 1 : 10;
+  const maxEntries = Math.ceil(hoursAhead / Math.max(interval, 0.0001)) + 1;
   let nextMs = nextHourlyProbeMs(now);
   let guard = 0;
-  while (nextMs <= cutoffMs && events.length < maxEntries && guard++ < 5000) {
+  while (nextMs <= cutoffMs && events.length < maxEntries && guard++ < 10000) {
     events.push({ ms: nextMs, label: intervalLabel, type: 'probe' });
     nextMs = nextHourlyProbeMs(nextMs + 1000);
   }
@@ -1584,9 +1579,10 @@ function scanBadgeClass(kind, status = 'completed') {
   return kind === 'probe' ? 'probe' : kind === 'ad_hoc' ? 'ad_hoc' : 'scheduled';
 }
 
-let scanLogExpanded = { upcoming: false };
 // 'recent' = last 10, '24h' = last 24h, 'none' = hidden
 let prevScansView = 'recent';
+// 'recent' = next 3, 'ten' = next 10, '24h' = next 24h
+let upcomingScansView = 'recent';
 
 function renderUpcomingScans() {
   const container = document.getElementById('upcoming-scans-table');
@@ -1596,7 +1592,7 @@ function renderUpcomingScans() {
   const allPast = (appState.recent_scan_history || []);
   const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
   const past24h = allPast.filter(scan => { const ts = scan.completed_at || scan.started_at; return ts && new Date(ts).getTime() >= cutoffMs; });
-  const pastVisible = (prevScansView === '24h' ? past24h : allPast.slice(0, 10)).slice().reverse();
+  const pastVisible = (prevScansView === '24h' ? past24h : allPast.slice(0, 3)).slice().reverse();
 
   const recentRows = pastVisible.map(scan => {
     const completedAt = scan.completed_at ? new Date(scan.completed_at) : null;
@@ -1654,11 +1650,12 @@ function renderUpcomingScans() {
     : `most recent ${pastVisible.length}`;
 
   // ── Upcoming scans ────────────────────────────────────────────────────────
-  const upcomingExpanded = scanLogExpanded.upcoming;
   const allUpcoming = computeUpcomingScans(24);
-  const upcomingVisible = upcomingExpanded ? allUpcoming : allUpcoming.slice(0, 10);
-  const upcomingHasMore = !upcomingExpanded && allUpcoming.length > 10;
-  const upcomingCanCollapse = upcomingExpanded && allUpcoming.length > 10;
+  const upcomingVisible = (
+    upcomingScansView === '24h'
+      ? allUpcoming
+      : allUpcoming.slice(0, upcomingScansView === 'ten' ? 10 : 3)
+  );
 
   const upcomingRows = upcomingVisible.map(s => {
     const d = new Date(s.ms);
@@ -1672,11 +1669,20 @@ function renderUpcomingScans() {
     </tr>`;
   }).join('');
 
-  const upcomingToggle = upcomingHasMore
-    ? `<a href="#" class="scan-log-toggle" data-section="upcoming">show next 24 hours</a>`
-    : upcomingCanCollapse
-      ? `<a href="#" class="scan-log-toggle" data-section="upcoming">show less</a>`
-      : '';
+  let upcomingToggles = '';
+  if (upcomingScansView === 'recent') {
+    upcomingToggles =
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="ten">show next 10</a>` +
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="24h">show next 24 h (${allUpcoming.length})</a>`;
+  } else if (upcomingScansView === 'ten') {
+    upcomingToggles =
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="recent">show less</a>` +
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="24h">show next 24 h (${allUpcoming.length})</a>`;
+  } else {
+    upcomingToggles =
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="recent">show less</a>` +
+      `<a href="#" class="scan-log-toggle" data-upcoming-view="ten">show next 10</a>`;
+  }
 
   container.innerHTML =
     `<div id="prev-scans-freq" style="margin-top:14px;">` +
@@ -1693,7 +1699,7 @@ function renderUpcomingScans() {
         `<tbody>${recentRows || '<tr><td colspan="6">No recent scans</td></tr>'}</tbody>` +
         `</table>`
       : '') +
-    `<div class="section-label" style="margin-top:14px;">Upcoming Scans${upcomingToggle}</div>` +
+    `<div class="section-label" style="margin-top:14px;">Upcoming Scans${upcomingToggles}</div>` +
     `<table class="scans-table">` +
     `<thead><tr><th>Day</th><th>Time</th><th>Type</th></tr></thead>` +
     `<tbody>${upcomingRows}</tbody>` +
@@ -1713,11 +1719,10 @@ function renderUpcomingScans() {
     });
   });
 
-  container.querySelectorAll('.scan-log-toggle[data-section]').forEach(a => {
+  container.querySelectorAll('[data-upcoming-view]').forEach(a => {
     a.addEventListener('click', e => {
       e.preventDefault();
-      const section = e.target.dataset.section;
-      scanLogExpanded[section] = !scanLogExpanded[section];
+      upcomingScansView = e.target.dataset.upcomingView;
       renderUpcomingScans();
     });
   });
@@ -1792,14 +1797,6 @@ function _applyStateData(data) {
     if (!autoWatch8amToggle.dataset.wired) {
       autoWatch8amToggle.addEventListener('change', e => setAutoWatchWeekends8am(e.target.checked));
       autoWatch8amToggle.dataset.wired = '1';
-    }
-  }
-  const focusNewestToggle = document.getElementById('focus-newest-toggle');
-  if (focusNewestToggle) {
-    focusNewestToggle.checked = !!appState.focus_newest_weekend;
-    if (!focusNewestToggle.dataset.wired) {
-      focusNewestToggle.addEventListener('change', e => setFocusNewestWeekend(e.target.checked));
-      focusNewestToggle.dataset.wired = '1';
     }
   }
 }
@@ -2254,34 +2251,6 @@ async function setAutoWatchWeekends8am(enabled) {
       ? 'Auto-watch weekend 8 AM enabled'
       : 'Auto-watch weekend 8 AM disabled');
     refreshState();
-  } catch (e) {
-    if (toggle) toggle.checked = prev;
-    toast('Error: ' + e.message);
-  } finally {
-    if (toggle) toggle.disabled = false;
-  }
-}
-
-async function setFocusNewestWeekend(enabled) {
-  const toggle = document.getElementById('focus-newest-toggle');
-  const prev = !!appState.focus_newest_weekend;
-  if (toggle) toggle.disabled = true;
-  try {
-    const r = await apiFetch('/focus-newest-weekend', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !!enabled }),
-    });
-    if (!r.ok) {
-      if (toggle) toggle.checked = prev;
-      toast('Failed to save (' + r.status + ')');
-      return;
-    }
-    const data = await r.json();
-    appState.focus_newest_weekend = !!data.focus_newest_weekend;
-    toast(appState.focus_newest_weekend
-      ? 'Focusing on newest weekend only'
-      : 'Scanning all watched weekends');
   } catch (e) {
     if (toggle) toggle.checked = prev;
     toast('Error: ' + e.message);

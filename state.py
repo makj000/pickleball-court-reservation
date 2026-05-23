@@ -35,7 +35,6 @@ def _empty_state() -> dict:
         "auto_watched_weekends": [],
         "auto_watch_weekends_enabled": True,
         "auto_watch_weekends_8am_enabled": False,
-        "focus_newest_weekend": False,
         "auto_book_slots":     [],
         "seen_open_days":      [],
         "cached_jwt":              None,
@@ -224,7 +223,6 @@ def _normalize_state(state: dict) -> dict:
     raw_enabled = state.get("auto_watch_weekends_enabled")
     normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
     normalized["auto_watch_weekends_8am_enabled"] = bool(state.get("auto_watch_weekends_8am_enabled", False))
-    normalized["focus_newest_weekend"] = bool(state.get("focus_newest_weekend", False))
     auto_book_slots = []
     seen_ab: set[tuple[str, str]] = set()
     for slot in (state.get("auto_book_slots") or []):
