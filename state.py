@@ -36,7 +36,7 @@ def _empty_state() -> dict:
         "auto_watch_weekends_enabled": True,
         "auto_watch_weekends_8am_enabled": False,
         "auto_book_slots":     [],
-        "seen_open_days":      [],
+        "seen_open_days":      {},
         "cached_jwt":              None,
         "cached_jwt_expires_at":   None,
         "release_probe_session_date": None,
@@ -216,10 +216,13 @@ def _normalize_state(state: dict) -> dict:
         d for d in (state.get("auto_watched_weekends") or [])
         if isinstance(d, str) and d >= today_str
     )
-    normalized["seen_open_days"] = sorted(
-        d for d in (state.get("seen_open_days") or [])
+    raw_seen = state.get("seen_open_days") or {}
+    if isinstance(raw_seen, list):
+        raw_seen = {d: None for d in raw_seen}
+    normalized["seen_open_days"] = {
+        d: ts for d, ts in raw_seen.items()
         if isinstance(d, str) and d >= today_str
-    )
+    }
     raw_enabled = state.get("auto_watch_weekends_enabled")
     normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
     normalized["auto_watch_weekends_8am_enabled"] = bool(state.get("auto_watch_weekends_8am_enabled", False))
@@ -416,12 +419,14 @@ def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
     if not any_open:
         return False
 
-    seen_open = set(state.get("seen_open_days") or [])
-    if new_day_str in seen_open:
+    raw_seen = state.get("seen_open_days") or {}
+    if isinstance(raw_seen, list):
+        raw_seen = {d: None for d in raw_seen}
+    if new_day_str in raw_seen:
         return False
 
-    seen_open.add(new_day_str)
-    state["seen_open_days"] = sorted(seen_open)
+    raw_seen[new_day_str] = _utc_now_iso()
+    state["seen_open_days"] = raw_seen
 
     existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
     auto_watched = set(state.get("auto_watched_weekends") or [])
