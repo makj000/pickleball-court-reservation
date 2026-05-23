@@ -1110,7 +1110,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.2.6';
+const UI_VERSION = '1.2.7';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1576,12 +1576,6 @@ function formatScanTargetLines(targets) {
 
   const out = [];
 
-  const sod = appState.seen_open_days || {};
-  const openedHtml = (dateStr) => {
-    const lbl = fmtOpenedAtShort(sod[dateStr]);
-    return lbl ? `<span class="scan-opened-at">${lbl}</span>` : '';
-  };
-
   if (weekendTargets.length) {
     const timesPresent = WEEKEND_SCAN_TIMES.filter(t =>
       weekendTargets.some(wt => wt.times && wt.times.includes(t))
@@ -1594,7 +1588,7 @@ function formatScanTargetLines(targets) {
           const courtAvail = courtsByTime ? courtsByTime[t] : null;
           return `<span class="scan-target-time"><span class="scan-target-time-label">${WEEKEND_SCAN_TIME_LABELS[t]}</span>${renderSquares(courtAvail)}</span>`;
         }).join('');
-      return `<span class="scan-target-inline">${fmtTargetDate(target.date)}${openedHtml(target.date)}${timeSlots}</span>`;
+      return `<span class="scan-target-inline">${fmtTargetDate(target.date)}${timeSlots}</span>`;
     }).join(' ');
     out.push(`<span class="scan-target-line">${chunks}</span>`);
   }
@@ -1606,7 +1600,7 @@ function formatScanTargetLines(targets) {
       const courtAvail = courtsByTime ? (courtsByTime[time] || null) : null;
       return `<span class="scan-target-time"><span class="scan-target-time-label">${fmtTargetTime(time)}</span>${renderSquares(courtAvail)}</span>`;
     }).join('');
-    out.push(`<span class="scan-target-line"><span class="scan-target-day">${fmtTargetDate(target.date)}${openedHtml(target.date)}</span>${timeChunks}</span>`);
+    out.push(`<span class="scan-target-line"><span class="scan-target-day">${fmtTargetDate(target.date)}</span>${timeChunks}</span>`);
   }
   return out.join('');
 }
