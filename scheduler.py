@@ -647,10 +647,6 @@ def _run_release_probe_session() -> None:
             lines.append(f"⚠️ {errors} probe error(s)")
         summary = "\n".join(lines)
         print(summary)
-        try:
-            send_telegram(summary)
-        except Exception:
-            pass
 
 
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
