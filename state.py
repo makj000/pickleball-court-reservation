@@ -483,6 +483,38 @@ def _enqueue_work(kind: str, payload: dict | None = None, *, delay_seconds: int 
 
 # ── Chat history (S3) ─────────────────────────────────────────────────────────
 
+def _message_content_blocks(message: dict) -> list[dict]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
+def _chat_message_has_tool_use(message: dict) -> bool:
+    return any(block.get("type") == "tool_use" for block in _message_content_blocks(message))
+
+
+def _chat_message_has_tool_result(message: dict) -> bool:
+    return any(block.get("type") == "tool_result" for block in _message_content_blocks(message))
+
+
+def _sanitize_chat_history(history: list[dict]) -> list[dict]:
+    sanitized: list[dict] = []
+    for message in history:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        if role == "user" and _chat_message_has_tool_result(message):
+            if not sanitized or sanitized[-1].get("role") != "assistant" or not _chat_message_has_tool_use(sanitized[-1]):
+                continue
+        sanitized.append(message)
+    while sanitized and sanitized[0].get("role") == "user" and _chat_message_has_tool_result(sanitized[0]):
+        sanitized.pop(0)
+    return sanitized
+
+
 def _load_chat_history(chat_id: str) -> list[dict]:
     if not STATE_BUCKET:
         return []
@@ -490,7 +522,7 @@ def _load_chat_history(chat_id: str) -> list[dict]:
     try:
         obj = s3.get_object(Bucket=STATE_BUCKET, Key=BOT_HISTORY_PREFIX + chat_id + ".json")
         data = json.loads(obj["Body"].read())
-        return data if isinstance(data, list) else []
+        return _sanitize_chat_history(data) if isinstance(data, list) else []
     except ClientError as e:
         if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket"):
             return []
@@ -500,7 +532,7 @@ def _load_chat_history(chat_id: str) -> list[dict]:
 def _save_chat_history(chat_id: str, history: list[dict]) -> None:
     if not STATE_BUCKET:
         return
-    trimmed = history[-(BOT_MAX_HISTORY_TURNS * 2):]
+    trimmed = _sanitize_chat_history(history[-(BOT_MAX_HISTORY_TURNS * 2):])
     s3 = boto3.client("s3", region_name="us-west-2")
     s3.put_object(
         Bucket=STATE_BUCKET,

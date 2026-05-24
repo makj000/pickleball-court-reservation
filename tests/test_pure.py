@@ -12,7 +12,7 @@ import pytest
 from config import _time_text_to_hhmm, _HHMM_TO_TIME_TEXT, build_next_dates, SLOT_TIMES
 from state import (
     _normalize_court_number, _normalize_time_availability, _empty_court_availability,
-    _normalize_notified_slots,
+    _normalize_notified_slots, _sanitize_chat_history,
 )
 from http_utils import get_path, get_method, summarize_results
 from notify import ordinal, _ordered_open_courts
@@ -89,6 +89,22 @@ def test_normalize_notified_slots_three_parts():
 def test_normalize_notified_slots_deduplication():
     result = _normalize_notified_slots(["2026-06-01|9:00 AM|6", "2026-06-01|9:00 AM|6"])
     assert len(result) == 1
+
+
+def test_sanitize_chat_history_drops_orphan_tool_result():
+    history = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{}"}]},
+        {"role": "user", "content": "hello"},
+    ]
+    assert _sanitize_chat_history(history) == [{"role": "user", "content": "hello"}]
+
+
+def test_sanitize_chat_history_keeps_matched_tool_result():
+    history = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "scan_now", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{}"}]},
+    ]
+    assert _sanitize_chat_history(history) == history
 
 
 # ── http_utils ────────────────────────────────────────────────────────────────
