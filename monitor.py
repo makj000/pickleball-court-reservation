@@ -50,6 +50,11 @@ def handler(event, context):
         _run_full_refresh_worker(force=True)
         return
 
+    if event.get("_booking_agent"):
+        from booking_agent import run_agent
+        run_agent(event.get("phase", "prep"))
+        return
+
     if event.get("source") == "aws.events":
         state = load_state()
         interval = float(state.get("scan_interval_hours") or 1.0)

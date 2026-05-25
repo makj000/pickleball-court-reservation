@@ -1,8 +1,10 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 set -a; source "$SCRIPT_DIR/.env" 2>/dev/null || true; set +a
+
+trap 'echo ""; echo "==> FAILED at line $LINENO" >&2' ERR
 
 REGION="${REGION:-us-west-2}"
 FUNCTION_URL_INVOKE_SID="${FUNCTION_URL_INVOKE_SID:-public-function-url-invoke}"
@@ -16,29 +18,41 @@ QUEUE_POLICY_NAME="${QUEUE_POLICY_NAME:-${QUEUE_NAME}-queue}"
 
 ECR_REGISTRY="${ECR_URI%%/*}"
 
-echo "==> Uploading UI to S3..."
 UI_SOURCE="$SCRIPT_DIR/ui/index.html"
-UI_UPLOAD="$UI_SOURCE"
-if [ -n "${API_BASE:-}" ]; then
-  UI_UPLOAD=$(mktemp)
-  python3 - "$UI_SOURCE" "$UI_UPLOAD" "$API_BASE" <<'PY'
-import sys
+UI_VERSION=$(grep -o "UI_VERSION = '[^']*'" "$UI_SOURCE" | grep -o "'[^']*'" | tr -d "'")
 
-source, target, api_base = sys.argv[1:]
-with open(source, "r", encoding="utf-8") as f:
-    html = f.read()
-html = html.replace("__PICKLEBALL_API_BASE__", api_base.rstrip("/"))
-with open(target, "w", encoding="utf-8") as f:
-    f.write(html)
-PY
-fi
-aws s3 cp "$UI_UPLOAD" "s3://$UI_BUCKET/index.html" \
+echo "==> Ensuring S3 bucket policy..."
+aws s3api put-bucket-policy --bucket "$UI_BUCKET" --region $REGION --policy "{
+  \"Version\": \"2012-10-17\",
+  \"Statement\": [{
+    \"Effect\": \"Allow\",
+    \"Principal\": \"*\",
+    \"Action\": \"s3:GetObject\",
+    \"Resource\": [
+      \"arn:aws:s3:::${UI_BUCKET}/index.html\",
+      \"arn:aws:s3:::${UI_BUCKET}/config.js\",
+      \"arn:aws:s3:::${UI_BUCKET}/img/*\"
+    ]
+  }]
+}"
+
+echo "==> Uploading config.js to S3..."
+CONFIG_JS=$(mktemp)
+echo "window.PICKLEBALL_API_BASE = '${API_BASE:-}';" > "$CONFIG_JS"
+aws s3 cp "$CONFIG_JS" "s3://$UI_BUCKET/config.js" \
+  --content-type "application/javascript" \
+  --cache-control "no-store, max-age=0" \
+  --region $REGION
+rm -f "$CONFIG_JS"
+echo "    config.js uploaded (API_BASE=${API_BASE:-<empty>})."
+
+echo "==> Uploading UI v${UI_VERSION:-?} to S3..."
+aws s3 cp "$UI_SOURCE" "s3://$UI_BUCKET/index.html" \
   --content-type "text/html" \
   --cache-control "no-store, max-age=0" \
   --region $REGION
-if [ "$UI_UPLOAD" != "$UI_SOURCE" ]; then
-  rm -f "$UI_UPLOAD"
-fi
+echo "    UI v${UI_VERSION:-?} uploaded."
+
 if [ -d "$SCRIPT_DIR/img" ]; then
   aws s3 sync "$SCRIPT_DIR/img" "s3://$UI_BUCKET/img" \
     --cache-control "max-age=31536000" \
@@ -191,6 +205,42 @@ echo "==> Waiting for Lambda to be ready..."
 aws lambda wait function-updated \
   --function-name $FUNCTION \
   --region $REGION
+
+echo "==> Ensuring booking agent EventBridge rules..."
+LAMBDA_ARN=$(aws lambda get-function \
+  --function-name $FUNCTION \
+  --region $REGION \
+  --query 'Configuration.FunctionArn' \
+  --output text)
+
+for RULE_NAME in booking-agent-prep booking-agent-report; do
+  if [ "$RULE_NAME" = "booking-agent-prep" ]; then
+    # 7:30 AM PDT (UTC-7) = 14:30 UTC
+    CRON="cron(30 14 * * ? *)"
+    PAYLOAD='{"_booking_agent":true,"phase":"prep"}'
+  else
+    # 8:10 AM PDT (UTC-7) = 15:10 UTC
+    CRON="cron(10 15 * * ? *)"
+    PAYLOAD='{"_booking_agent":true,"phase":"report"}'
+  fi
+  aws events put-rule \
+    --name "$RULE_NAME" \
+    --schedule-expression "$CRON" \
+    --state ENABLED \
+    --region $REGION >/dev/null
+  aws events put-targets \
+    --rule "$RULE_NAME" \
+    --targets "Id=lambda,Arn=$LAMBDA_ARN,Input='$PAYLOAD'" \
+    --region $REGION >/dev/null
+  aws lambda add-permission \
+    --function-name $FUNCTION \
+    --statement-id "${RULE_NAME}-invoke" \
+    --action lambda:InvokeFunction \
+    --principal events.amazonaws.com \
+    --source-arn "arn:aws:events:$REGION:$(aws sts get-caller-identity --query Account --output text):rule/$RULE_NAME" \
+    --region $REGION >/dev/null 2>&1 || true
+  echo "    $RULE_NAME: $CRON"
+done
 
 echo "==> Registering Telegram webhook..."
 LAMBDA_URL=$(aws lambda get-function-url-config \
