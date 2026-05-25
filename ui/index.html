@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pickleball Court Monitor</title>
+  <script src="/config.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -215,7 +216,7 @@
     .grid {
       display: grid;
       --cell-size: 21.25px;
-      grid-template-columns: 118px repeat(var(--cell-cols, 21), var(--cell-size));
+      grid-template-columns: 118px repeat(var(--cell-cols, 21), var(--cell-size)) auto;
       gap: 2px;
       min-width: 480px;
       position: relative;
@@ -242,16 +243,14 @@
       padding-top: 6px; white-space: nowrap;
       position: relative;
       z-index: 1;
-      cursor: pointer;
-      transition: transform 0.1s, box-shadow 0.1s, background 0.12s;
+      cursor: default;
     }
     .row-label-content { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
     .row-label-line1 { display: flex; align-items: baseline; gap: 3px; }
     .day-offset-badge { font-size: 0.56rem; color: #9ca3af; font-weight: 400; }
     .day-opened-at { font-size: 0.56rem; color: #059669; font-weight: 500; white-space: nowrap; }
     .scan-opened-at { font-size: 0.56rem; color: #059669; font-weight: 500; margin-left: 2px; }
-    .row-label:hover { transform: translateX(1px); box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18); }
-    .row-label:active { transform: translateX(0); }
+    .row-label-avail-at { font-size: 0.62rem; color: #000; font-weight: 700; white-space: nowrap; padding-left: 6px; padding-top: 6px; align-self: flex-start; background: white; }
     .row-label.weekend-day {
       color: #92400e;
       font-weight: 600;
@@ -742,10 +741,7 @@
 
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
-const API_BASE = (() => {
-  const configured = window.PICKLEBALL_API_BASE || '__PICKLEBALL_API_BASE__';
-  return configured.startsWith('__') ? '' : configured.replace(/\/$/, '');
-})();
+const API_BASE = (window.PICKLEBALL_API_BASE || '').replace(/\/$/, '');
 const AUTH_STORAGE_KEY = 'pickleball-basic-auth';
 const LOG_DOCK_STORAGE_KEY = 'pickleball-log-dock';
 const LOG_HEIGHT_STORAGE_KEY = 'pickleball-log-height';
@@ -1110,7 +1106,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.2.7';
+const UI_VERSION = '1.2.9';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1855,18 +1851,47 @@ async function refreshState() {
 
 // ── Force scan ────────────────────────────────────────────────────────────────
 // ── Render grid ───────────────────────────────────────────────────────────────
+function computeFirstOpenFromHistory() {
+  // For each date, find the earliest scan where any timeslot had an open court.
+  // Also track which timeslot first opened.
+  const result = {}; // date -> { ts, time }
+  for (const entry of (appState.recent_scan_history || [])) {
+    const ts = entry.started_at;
+    if (!ts) continue;
+    for (const target of (entry.targets || [])) {
+      const d = target.date;
+      if (!d) continue;
+      const courts = target.courts || {};
+      for (const [time, courtMap] of Object.entries(courts)) {
+        if (typeof courtMap !== 'object') continue;
+        if (!Object.values(courtMap).some(Boolean)) continue;
+        if (!result[d] || ts < result[d].ts) result[d] = { ts, time };
+      }
+    }
+  }
+  return result;
+}
+
 function renderGrid() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
   const courtCount = appState.court_nums.length || 3;
   grid.style.setProperty('--cell-cols', appState.slot_times.length * courtCount);
   const headerRows = 2;
+  const firstOpenFromHistory = computeFirstOpenFromHistory();
+
+  const lastCol = 2 + appState.slot_times.length * courtCount; // right-side info column
 
   // Corner cell + time headers
-  const topCorner = el('div', 'use Scan Now', 'date-column-hint');
+  const topCorner = el('div', '', 'date-column-hint');
   topCorner.style.gridColumn = '1';
   topCorner.style.gridRow = '1 / span 2';
   grid.appendChild(topCorner);
+  const rightHeader = el('div', 'detected', 'col-header');
+  rightHeader.style.gridRow = '1 / span 2';
+  rightHeader.style.gridColumn = String(lastCol);
+  rightHeader.style.paddingLeft = '6px';
+  grid.appendChild(rightHeader);
   for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
     const t = appState.slot_times[timeIndex];
     const header = el('div', fmtTime(t), 'col-header time-header ' + (timeIndex % 2 === 0 ? 'time-even' : 'time-odd'));
@@ -1926,11 +1951,22 @@ function renderGrid() {
     line1.appendChild(el('span', day.label));
     line1.appendChild(el('span', '+' + dayIndex, 'day-offset-badge'));
     labelContent.appendChild(line1);
-    const openedTs = (appState.seen_open_days || {})[day.date];
-    const openedLabel = fmtOpenedAt(openedTs);
-    if (openedLabel) labelContent.appendChild(el('div', openedLabel, 'day-opened-at'));
     labelCell.appendChild(labelContent);
     grid.appendChild(labelCell);
+
+    // Right-side "first seen open" column
+    const seenOpenTs = (appState.seen_open_days || {})[day.date];
+    const histEntry = firstOpenFromHistory[day.date];
+    const openedTs = seenOpenTs || (histEntry ? histEntry.ts : null);
+    const openedLabel = fmtOpenedAt(openedTs);
+    const rightCell = document.createElement('div');
+    rightCell.style.gridRow = String(row);
+    rightCell.style.gridColumn = String(lastCol);
+    if (openedLabel) {
+      rightCell.className = 'row-label-avail-at';
+      rightCell.textContent = openedLabel;
+    }
+    grid.appendChild(rightCell);
 
     const slotMap = new Map(day.slots.map(slot => [slot.time + '|' + slot.court, slot]));
     for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
