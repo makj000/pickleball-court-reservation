@@ -193,8 +193,8 @@ def _api_scan(
                 print(f"  All courts failed (attempt {attempt}/5), retrying…")
         if booked_court:
             booked.append({"date": date_str, "time": time_text, "court": booked_court})
-            for c in new_avail.get(date_str, {}).get(time_text, {}):
-                new_avail[date_str][time_text][c] = False
+            if date_str in new_avail and time_text in new_avail[date_str]:
+                new_avail[date_str][time_text][booked_court] = False
             log = list(state_obj.get("app_booking_log") or [])
             log.insert(0, {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court})
             state_obj["app_booking_log"] = log
