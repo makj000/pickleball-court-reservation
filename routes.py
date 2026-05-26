@@ -72,6 +72,7 @@ def handle_state(event) -> dict:
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
             "auto_watch_weekends_8am_enabled": bool(state.get("auto_watch_weekends_8am_enabled", False)),
             "seen_open_days": state.get("seen_open_days") or {},
+            "auto_book_failures": state.get("auto_book_failures") or [],
             "telegram_call_history": _load_telegram_usage()[:50],
         }),
     }

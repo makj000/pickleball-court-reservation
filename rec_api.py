@@ -249,16 +249,22 @@ def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bo
     order_id: str = od["id"]
     total: int = od.get("total", 0)
     max_credit: int = od.get("maxCreditAdjustmentAllowed", 0)
-    print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit: ${max_credit/100:.2f}")
+    credit_to_apply = min(max_credit, total)
+    remaining = total - credit_to_apply
+    print(f"  Order {order_id[:8]} | ${total/100:.2f} | credit: ${max_credit/100:.2f} | card: ${remaining/100:.2f}")
 
-    if max_credit < total:
-        print(f"  Aborting: insufficient credit (${max_credit/100:.2f}) to cover full cost (${total/100:.2f}). Will not charge credit card.")
-        return False
+    payments = []
+    if credit_to_apply > 0:
+        payments.append({"paymentMethodType": "organization-credit", "amountCents": credit_to_apply})
+    if remaining > 0:
+        payments.append({"paymentMethodType": "card-online", "amountCents": remaining})
+    if not payments:
+        payments.append({"paymentMethodType": "free", "amountCents": 0})
 
     s2, result = _rec_api(
         f"https://api.rec.us/v1/orders/{order_id}/pay",
         method="POST",
-        body={"data": {"creditAdjustment": min(max_credit, total)}},
+        body={"data": {"payments": payments}},
         jwt=jwt,
     )
     if s2 == 200:
