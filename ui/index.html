@@ -644,6 +644,23 @@
       padding: 3px 6px; background: white; color: #374151; cursor: pointer;
     }
 
+    /* ── Booking failure banner ── */
+    #booking-failures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    #booking-failures:empty { display: none; }
+    .booking-failure-banner {
+      background: #fef2f2; border: 1px solid #fca5a5; border-left: 4px solid #dc2626;
+      border-radius: 8px; padding: 8px 12px;
+      font-size: 0.77rem; color: #991b1b;
+      display: flex; align-items: flex-start; gap: 8px;
+    }
+    .booking-failure-icon { flex-shrink: 0; font-size: 0.9rem; margin-top: 1px; }
+    .booking-failure-body { flex: 1; min-width: 0; }
+    .booking-failure-slot { font-weight: 600; color: #7f1d1d; }
+    .booking-failure-meta { color: #6b7280; font-size: 0.68rem; margin-top: 2px; }
+    .booking-failure-action { margin-top: 4px; }
+    .booking-failure-action a { color: #dc2626; text-decoration: underline; }
+    .booking-failure-action a:hover { color: #b91c1c; }
+
     @media (max-width: 720px) {
       header { padding-left: 14px; padding-right: 14px; }
       .grid-wrapper { padding-left: 14px; padding-right: 14px; }
@@ -692,6 +709,7 @@
 <div id="content-shell" class="dock-right">
   <!-- Grid -->
   <div class="grid-wrapper">
+    <div id="booking-failures"></div>
     <div class="grid-row">
       <div class="grid" id="grid"></div>
       <div id="telegram-calls-table"></div>
@@ -1095,7 +1113,7 @@ function isFocusedScanSlot(dateStr, timeStr) {
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {} };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {} };
 let clickMode = 'watch';
 let toastTimer = null;
 let _logIdSeq = 0;
@@ -1106,7 +1124,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.2.9';
+const UI_VERSION = '1.3.0';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1793,6 +1811,30 @@ function updateNextScanDisplay() {
   renderTelegramCalls();
 }
 
+// ── Booking failure banner ────────────────────────────────────────────────────
+function renderBookingFailures() {
+  const container = document.getElementById('booking-failures');
+  if (!container) return;
+  const failures = appState.auto_book_failures || [];
+  if (!failures.length) { container.innerHTML = ''; return; }
+  container.innerHTML = failures.map(f => {
+    const slotLabel = f.date && f.time ? `${f.date} ${f.time}` : 'auto-book session';
+    const when = f.failed_at ? ' at ' + fmtScanTime(f.failed_at) : '';
+    const recUrl = appState.rec_url || 'https://www.rec.us';
+    const actionHtml = f.date
+      ? `<div class="booking-failure-action"><a href="${escHtml(recUrl)}" target="_blank" rel="noopener">Open rec.us to book ${escHtml(f.date)} manually →</a></div>`
+      : '';
+    return `<div class="booking-failure-banner">
+      <span class="booking-failure-icon">&#10060;</span>
+      <div class="booking-failure-body">
+        <span class="booking-failure-slot">${escHtml(slotLabel)}</span> — ${escHtml(f.error || 'Booking failed')}
+        <div class="booking-failure-meta">Failed${escHtml(when)}</div>
+        ${actionHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
 // ── Fetch state ───────────────────────────────────────────────────────────────
 function _applyStateData(data) {
   appState = data;
@@ -1808,6 +1850,7 @@ function _applyStateData(data) {
   if (!Array.isArray(appState.court_preference) || !appState.court_preference.length) appState.court_preference = appState.court_nums.slice();
   if (!appState.rec_url) appState.rec_url = 'https://www.rec.us';
   if (!Array.isArray(appState.auto_book_slots)) appState.auto_book_slots = [];
+  if (!Array.isArray(appState.auto_book_failures)) appState.auto_book_failures = [];
   if (Array.isArray(appState.seen_open_days)) {
     const m = {}; appState.seen_open_days.forEach(d => m[d] = null); appState.seen_open_days = m;
   } else if (!appState.seen_open_days || typeof appState.seen_open_days !== 'object') {
@@ -1839,6 +1882,7 @@ async function refreshState() {
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
     _applyStateData(await r.json());
     renderVersionInfo();
+    renderBookingFailures();
     renderGrid();
     renderScanStatus();
     renderScanButton();
@@ -2268,6 +2312,7 @@ async function forceScan() {
     addProgressLog('Ad-hoc scan completed', 'Scan finished. last_scanned: ' + data.last_scanned + '.');
     _applyStateData(data);
     renderVersionInfo();
+    renderBookingFailures();
     renderGrid();
     renderScanStatus();
     renderScanButton();

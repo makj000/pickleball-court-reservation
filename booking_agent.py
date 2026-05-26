@@ -141,15 +141,15 @@ Context:
 - rec.us releases new slots at exactly 8:00 AM PT, 14 days in advance.
 - The existing release probe system (7:58–8:02 AM) will automatically book whatever \
 is in auto_book_slots the moment a court opens. You don't need to do the booking yourself.
-- Courts in preference order: 6 > 4 > 5. Target: 9:00 AM.
+- Courts in preference order: 6 > 4 > 5. Target both 9:00 AM and 8:00 AM (in that priority).
 
 Your task:
 1. Call get_context.
 2. Decide whether to queue a booking for the new day (14 days out):
    - Skip if it's a weekday (no weekend courts open).
-   - Skip if there's already a reservation on that weekend (Sat or Sun).
-   - Target 9:00 AM.
-3. If needed, call set_auto_book with the target slot (keep any other future slots).
+   - Skip if there's already a reservation on that weekend (Sat or Sun) for both 8am and 9am.
+   - Target both 9:00 AM and 8:00 AM.
+3. If needed, call set_auto_book with both time slots for the target date (keep any other future slots).
 4. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
 or why you're skipping).
 5. Call done.

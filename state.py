@@ -36,6 +36,8 @@ def _empty_state() -> dict:
         "auto_watch_weekends_enabled": True,
         "auto_watch_weekends_8am_enabled": False,
         "auto_book_slots":     [],
+        "app_booking_log":     [],
+        "auto_book_failures":  [],
         "seen_open_days":      {},
         "cached_jwt":              None,
         "cached_jwt_expires_at":   None,
@@ -243,6 +245,16 @@ def _normalize_state(state: dict) -> dict:
         seen_ab.add(key)
         auto_book_slots.append({"date": slot_date, "time": slot_time})
     normalized["auto_book_slots"] = auto_book_slots
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+    normalized["app_booking_log"] = [
+        e for e in (state.get("app_booking_log") or [])
+        if isinstance(e, dict) and e.get("booked_at", "") >= cutoff
+    ]
+    cutoff_48h = (datetime.now(tz=timezone.utc) - timedelta(hours=48)).isoformat()
+    normalized["auto_book_failures"] = [
+        e for e in (state.get("auto_book_failures") or [])
+        if isinstance(e, dict) and e.get("failed_at", "") >= cutoff_48h
+    ][:20]
     return normalized
 
 
