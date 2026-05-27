@@ -10,8 +10,8 @@ from config import (
 from state import (
     _active_scan_started_at, _attach_history_results, _auto_watch_on_new_day_openings,
     _auto_watch_upcoming_weekends, _enqueue_work, _history_targets_from_map, _new_day_iso,
-    _normalize_time_availability, _parse_utc_iso, _record_scan_history, _utc_now_iso,
-    load_state, save_state,
+    _normalize_time_availability, _parse_utc_iso, _record_newly_open_dates, _record_scan_history,
+    _utc_now_iso, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
 from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, sync_rec_my_reservations
@@ -213,6 +213,7 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         availability = state.get("availability", {})
         availability.update(new_avail)
         state["availability"] = availability
+        _record_newly_open_dates(state, new_avail, started_at)
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "ad_hoc"
@@ -310,6 +311,7 @@ def _run_scheduled_worker() -> None:
             availability[date_str] = day_availability
         state["availability"] = availability
         _auto_watch_on_new_day_openings(state, new_avail)
+        _record_newly_open_dates(state, new_avail, started_at)
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
         state["last_scan_kind"] = "scheduled"
@@ -431,6 +433,7 @@ def _run_targeted_daily_scan() -> None:
                 day_state[time_text] = _normalize_time_availability(court_avail)
             availability[date_str] = day_state
         state["availability"] = availability
+        _record_newly_open_dates(state, new_avail, started_at)
         sync_rec_my_reservations(state)
         _apply_booked_slots(state, booked_slots)
         save_state(state)
