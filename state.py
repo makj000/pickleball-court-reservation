@@ -474,6 +474,26 @@ def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
     return True
 
 
+def _record_newly_open_dates(state: dict, new_avail: dict, ts: str | None = None) -> None:
+    """Stamp seen_open_days with ts for any date that first appears as open in new_avail."""
+    raw_seen = state.get("seen_open_days") or {}
+    if isinstance(raw_seen, list):
+        raw_seen = {d: None for d in raw_seen}
+    stamp = ts or _utc_now_iso()
+    today_str = date.today().isoformat()
+    for date_str, time_map in new_avail.items():
+        if date_str < today_str or date_str in raw_seen:
+            continue
+        any_open = any(
+            v is True
+            for court_map in time_map.values()
+            for v in (court_map.values() if isinstance(court_map, dict) else [])
+        )
+        if any_open:
+            raw_seen[date_str] = stamp
+    state["seen_open_days"] = raw_seen
+
+
 def _new_day_iso(today: date | None = None) -> str:
     return ((today or date.today()) + timedelta(days=14)).isoformat()
 
