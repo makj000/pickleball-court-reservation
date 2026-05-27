@@ -15,7 +15,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 load_dotenv(APP_DIR / ".env")
 
 PT = ZoneInfo("America/Los_Angeles")
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 SCAN_HISTORY_MAX = 300
 
 # ── Credentials ───────────────────────────────────────────────────────────────
