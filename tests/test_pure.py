@@ -17,6 +17,7 @@ from state import (
 from http_utils import get_path, get_method, summarize_results
 from notify import ordinal, _ordered_open_courts
 from scheduler import _should_run_scheduled_tick
+from calendar_sync import _calendar_event_body, _calendar_event_id
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -157,6 +158,36 @@ def test_ordered_open_courts_preference_order():
 def test_ordered_open_courts_none_available():
     avail = {"6": False, "4": False, "5": False}
     assert _ordered_open_courts(avail) == []
+
+# ── calendar_sync ─────────────────────────────────────────────────────────────
+
+def test_calendar_event_id_is_stable():
+    slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
+    assert _calendar_event_id(slot) == _calendar_event_id(dict(slot))
+
+
+def test_calendar_event_body_uses_one_hour_pt_slot():
+    slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
+    body = _calendar_event_body(slot)
+    assert body["summary"] == "Pickleball Court 6"
+    assert body["start_iso"] == "2026-06-01T09:00:00-07:00"
+    assert body["end_iso"] == "2026-06-01T10:00:00-07:00"
+    assert body["time_zone"] == "America/Los_Angeles"
+
+
+def test_calendar_event_body_invites_configured_attendees(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CALENDAR_ATTENDEES", "kejia.ma@gmail.com")
+    slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
+    body = _calendar_event_body(slot)
+    assert body["attendees"] == ["kejia.ma@gmail.com"]
+
+
+def test_calendar_event_body_includes_apps_script_secret(monkeypatch):
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_SECRET", "test-secret")
+    slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
+    body = _calendar_event_body(slot)
+    assert body["secret"] == "test-secret"
+
 
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
