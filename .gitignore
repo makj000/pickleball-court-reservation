@@ -4,4 +4,6 @@ __pycache__/
 to_remove/
 legacy/
 .env
+.secrets/
+client_secret*.json
 *.zip

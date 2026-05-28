@@ -1,5 +1,6 @@
 from state import _utc_now_iso
 from notify import notify
+from calendar_sync import enqueue_calendar_event
 
 
 def _apply_booked_slots(state: dict, booked_slots: list[dict]) -> None:
@@ -32,3 +33,5 @@ def _notify_booked_slots(booked_slots: list[dict]) -> None:
     lines = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked_slots]
     msg = "Auto-booked pickleball slot(s):\n" + "\n".join(lines)
     notify(msg, subject="Pickleball auto-booking confirmed")
+    for booked_slot in booked_slots:
+        enqueue_calendar_event(booked_slot)
