@@ -10,6 +10,7 @@ from state import (
     load_state, save_state,
 )
 from http_utils import get_body, get_header
+from message_format import with_weekday_dates
 from rec_api import _firebase_login
 from scanner import _api_fetch_availability, _api_scan
 from booking import _apply_booked_slots, _notify_booked_slots
@@ -34,6 +35,7 @@ Conventions:
 - Times are "8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "4:00 PM", "5:00 PM", "6:00 PM".
 - Courts: "4", "5", "6" (preference order: 6 > 4 > 5).
 - Dates: YYYY-MM-DD. Resolve relative dates ("next Saturday", "this Sunday") using today's Pacific date.
+- When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday).
 - Before any write (watch/auto-book), confirm with the user. Auto-booking is irreversible once a court opens.
 - Call get_state first if you're unsure about current watched/auto-book lists.
 
@@ -310,6 +312,7 @@ def _bot_content_to_dicts(content) -> list[dict]:
 def _tg_send_to(chat_id: str, text: str) -> None:
     if not TELEGRAM_BOT_TOKEN:
         return
+    text = with_weekday_dates(text)
     payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
     req = Request(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",

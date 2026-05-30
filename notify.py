@@ -9,6 +9,7 @@ from config import (
     COURT_PREFERENCE, NOTIFY_EMAIL, NOTIFY_NUMBER,
     SLOT_TIMES, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
 )
+from message_format import with_weekday_dates
 from state import _append_notification_to_history
 
 
@@ -33,6 +34,7 @@ def send_telegram(message: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be configured")
 
+    message = with_weekday_dates(message)
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,

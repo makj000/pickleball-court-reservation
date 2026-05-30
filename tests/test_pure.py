@@ -12,9 +12,10 @@ import pytest
 from config import _time_text_to_hhmm, _HHMM_TO_TIME_TEXT, build_next_dates, SLOT_TIMES
 from state import (
     _normalize_court_number, _normalize_time_availability, _empty_court_availability,
-    _normalize_notified_slots, _sanitize_chat_history,
+    _normalize_notified_slots, _sanitize_chat_history, _auto_book_slot_is_too_close,
 )
 from http_utils import get_path, get_method, summarize_results
+from message_format import with_weekday_dates
 from notify import ordinal, _ordered_open_courts
 from scheduler import _should_run_scheduled_tick
 from calendar_sync import _calendar_event_body, _calendar_event_id
@@ -92,6 +93,12 @@ def test_normalize_notified_slots_deduplication():
     assert len(result) == 1
 
 
+def test_auto_book_slot_is_too_close_uses_32_hour_cutoff():
+    now = datetime(2026, 6, 1, 8, 0, tzinfo=timezone.utc)
+    assert not _auto_book_slot_is_too_close("2026-06-02", "9:00 AM", now=now)
+    assert _auto_book_slot_is_too_close("2026-06-02", "8:00 AM", now=now)
+
+
 def test_sanitize_chat_history_drops_orphan_tool_result():
     history = [
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{}"}]},
@@ -106,6 +113,19 @@ def test_sanitize_chat_history_keeps_matched_tool_result():
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{}"}]},
     ]
     assert _sanitize_chat_history(history) == history
+
+
+def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
+    import state as state_mod
+
+    monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
+    normalized = state_mod._normalize_state({
+        "auto_book_slots": [
+            {"date": "2026-06-01", "time": "9:00 AM"},
+            {"date": "2026-06-01", "time": "10:00 AM"},
+        ]
+    })
+    assert normalized["auto_book_slots"] == [{"date": "2026-06-01", "time": "10:00 AM"}]
 
 
 # ── http_utils ────────────────────────────────────────────────────────────────
@@ -159,6 +179,24 @@ def test_ordered_open_courts_none_available():
     avail = {"6": False, "4": False, "5": False}
     assert _ordered_open_courts(avail) == []
 
+
+def test_with_weekday_dates_adds_weekday_to_iso_dates():
+    message = "2026-06-01 9:00 AM and 2026-06-06 8:00 AM"
+    assert with_weekday_dates(message) == (
+        "2026-06-01 (Monday) 9:00 AM and 2026-06-06 (Saturday) 8:00 AM"
+    )
+
+
+def test_with_weekday_dates_leaves_invalid_dates_and_timestamps():
+    message = "Bad 2026-02-31; stamp 2026-06-01T15:00:00Z"
+    assert with_weekday_dates(message) == message
+
+
+def test_with_weekday_dates_does_not_duplicate_existing_weekday():
+    message = "2026-06-01 (Monday), 2026-06-01 Monday, Monday 2026-06-01"
+    assert with_weekday_dates(message) == message
+
+
 # ── calendar_sync ─────────────────────────────────────────────────────────────
 
 def test_calendar_event_id_is_stable():
@@ -187,7 +225,6 @@ def test_calendar_event_body_includes_apps_script_secret(monkeypatch):
     slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
     body = _calendar_event_body(slot)
     assert body["secret"] == "test-secret"
-
 
 
 # ── scheduler ─────────────────────────────────────────────────────────────────

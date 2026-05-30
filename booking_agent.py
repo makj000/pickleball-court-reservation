@@ -154,7 +154,8 @@ Your task:
 or why you're skipping).
 5. Call done.
 
-Keep the message tight. No markdown, plain text only."""
+Keep the message tight. No markdown, plain text only.
+When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 _REPORT_SYSTEM = """\
 You are a pickleball court booking agent running at 8:10 AM PT.
@@ -172,7 +173,9 @@ Report format (adjust based on what actually happened):
 [Date] booking report:
 • Booked: [court] [date] [time] / Nothing booked: [reason]
 • Probes: [N] probes, slot opened at [time] / slot never opened
-• [Any useful next note]"""
+• [Any useful next note]
+
+When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 
 # ── Agent loop ─────────────────────────────────────────────────────────────────
