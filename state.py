@@ -210,6 +210,8 @@ def _normalize_state(state: dict) -> dict:
     normalized["queued_scheduled_probe_at"] = state.get("queued_scheduled_probe_at")
     normalized["queued_scheduled_probe_token"] = state.get("queued_scheduled_probe_token")
     normalized["queued_publish_probe_date"] = state.get("queued_publish_probe_date")
+    normalized["release_probe_session_date"] = state.get("release_probe_session_date")
+    normalized["last_release_probe_session"] = state.get("last_release_probe_session")
     if state.get("scan_started_at"):
         normalized["scan_started_at"] = state["scan_started_at"]
         normalized["scan_started_kind"] = state.get("scan_started_kind") or None
@@ -273,6 +275,10 @@ def _normalize_state(state: dict) -> dict:
         e for e in (state.get("app_booking_log") or [])
         if isinstance(e, dict) and e.get("booked_at", "") >= cutoff
     ]
+    normalized["release_probe_log"] = [
+        e for e in (state.get("release_probe_log") or [])
+        if isinstance(e, dict)
+    ][-500:]
     cutoff_48h = (datetime.now(tz=timezone.utc) - timedelta(hours=48)).isoformat()
     normalized["auto_book_failures"] = [
         e for e in (state.get("auto_book_failures") or [])

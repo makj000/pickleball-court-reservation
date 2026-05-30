@@ -129,6 +129,14 @@ def _api_scan(
         for time_text, court_avail in time_map.items()
         if (date_str, time_text) in auto_book_set and _preferred_open_court(court_avail) is not None
     ]
+    preferred_date = date.today() + timedelta(days=14)
+    to_book.sort(
+        key=lambda item: _auto_book_priority_key(
+            item[0],
+            item[1],
+            preferred_date=preferred_date,
+        )
+    )
 
     if not to_book:
         return new_avail, []
@@ -209,3 +217,32 @@ def _api_scan(
             except Exception:
                 pass
     return new_avail, booked
+
+
+def _auto_book_priority_key(
+    date_str: str,
+    time_text: str,
+    *,
+    preferred_date: date | None = None,
+) -> tuple[int, int, int]:
+    preferred_date = preferred_date or (date.today() + timedelta(days=14))
+    try:
+        slot_date = date.fromisoformat(date_str)
+    except ValueError:
+        slot_date = date.min
+
+    if slot_date == preferred_date:
+        date_rank = 0
+    elif slot_date.weekday() >= 5:
+        date_rank = 1
+    else:
+        date_rank = 2
+
+    if time_text == "9:00 AM":
+        time_rank = 0
+    elif time_text == "8:00 AM":
+        time_rank = 1
+    else:
+        time_rank = 2 + (SLOT_TIMES.index(time_text) if time_text in SLOT_TIMES else len(SLOT_TIMES))
+
+    return (date_rank, time_rank, slot_date.toordinal())
