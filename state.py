@@ -7,10 +7,10 @@ import boto3
 from botocore.exceptions import ClientError
 
 from config import (
-    BOT_HISTORY_PREFIX, BOT_MAX_HISTORY_TURNS, COURT_PREFERENCE, SCAN_HISTORY_MAX,
+    BOT_HISTORY_PREFIX, BOT_MAX_HISTORY_TURNS, COURT_PREFERENCE, PT, SCAN_HISTORY_MAX,
     SCAN_LOCK_TTL_SECONDS, SLOT_TIMES, SQS_DELAY_MAX_SECONDS, SQS_STALE_GRACE_SECONDS,
     STATE_BUCKET, STATE_KEY, TARGET_COURTS, TELEGRAM_USAGE_KEY, TELEGRAM_USAGE_MAX,
-    WORK_QUEUE_URL,
+    WORK_QUEUE_URL, _time_text_to_hhmm,
 )
 
 
@@ -88,6 +88,27 @@ def _normalize_time_availability(value) -> dict[str, bool | None]:
     if value is True:
         return _empty_court_availability(None)
     return _empty_court_availability(None)
+
+
+def _auto_book_slot_is_too_close(slot_date: str, slot_time: str, *, now: datetime | None = None) -> bool:
+    hhmm = _time_text_to_hhmm(slot_time)
+    if not hhmm:
+        return False
+    try:
+        slot_day = date.fromisoformat(slot_date)
+    except ValueError:
+        return False
+    hour, minute = (int(part) for part in hhmm.split(":"))
+    slot_start = datetime(
+        slot_day.year,
+        slot_day.month,
+        slot_day.day,
+        hour,
+        minute,
+        tzinfo=PT,
+    )
+    now_pt = now or datetime.now(tz=PT)
+    return now_pt > slot_start - timedelta(hours=32)
 
 
 def _normalize_slot_records(slots, *, expand_legacy: bool, default_court: str | None = None) -> list[dict]:
@@ -238,6 +259,8 @@ def _normalize_state(state: dict) -> dict:
         if not slot_date or not slot_time:
             continue
         if slot_date < today_str or slot_time not in SLOT_TIMES:
+            continue
+        if _auto_book_slot_is_too_close(slot_date, slot_time):
             continue
         key = (slot_date, slot_time)
         if key in seen_ab:

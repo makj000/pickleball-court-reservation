@@ -23,11 +23,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 import requests
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from message_format import with_weekday_dates
 
-ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 MODEL = "claude-haiku-4-5"
@@ -59,6 +62,7 @@ Conventions:
 - Times are "8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "4:00 PM", "5:00 PM", "6:00 PM".
 - Courts: "4", "5", "6" (preference order: 6 > 4 > 5).
 - Dates: YYYY-MM-DD. Resolve relative dates ("next Saturday", "this Sunday") using the user's local time (Pacific).
+- When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday).
 - Before any write (watch/auto-book), confirm with the user in chat. Booking is irreversible once a court opens.
 - Always call get_state first if you're unsure about current watched/auto-book lists.
 
@@ -287,6 +291,7 @@ _TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
 def tg_send(chat_id: str, text: str) -> None:
+    text = with_weekday_dates(text)
     requests.post(f"{_TG_BASE}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=30)
 
 

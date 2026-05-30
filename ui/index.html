@@ -250,7 +250,8 @@
     .day-offset-badge { font-size: 0.56rem; color: #9ca3af; font-weight: 400; }
     .day-opened-at { font-size: 0.56rem; color: #059669; font-weight: 500; white-space: nowrap; }
     .scan-opened-at { font-size: 0.56rem; color: #059669; font-weight: 500; margin-left: 2px; }
-    .row-label-avail-at { font-size: 0.62rem; color: #000; font-weight: 700; white-space: nowrap; padding-left: 6px; padding-top: 6px; align-self: flex-start; background: white; }
+    .row-label-avail-at { font-size: 0.62rem; color: #000; font-weight: 400; white-space: nowrap; padding-left: 6px; padding-top: 6px; align-self: flex-start; background: white; }
+    .row-label-avail-at.weekend-detected { font-weight: 700; }
     .row-label.weekend-day {
       color: #92400e;
       font-weight: 600;
@@ -1098,6 +1099,11 @@ function fmtOpenedAtShort(isoStr) {
 function isPastSlot(dateStr, timeStr) {
   const start = slotStartAt(dateStr, timeStr);
   return start ? start.getTime() < Date.now() : false;
+}
+
+function isAutoBookTooClose(dateStr, timeStr) {
+  const start = slotStartAt(dateStr, timeStr);
+  return start ? (start.getTime() - Date.now()) < 32 * 60 * 60 * 1000 : false;
 }
 
 function isFocusedScanSlot(dateStr, timeStr) {
@@ -2007,7 +2013,7 @@ function renderGrid() {
     rightCell.style.gridRow = String(row);
     rightCell.style.gridColumn = String(lastCol);
     if (openedLabel) {
-      rightCell.className = 'row-label-avail-at';
+      rightCell.className = 'row-label-avail-at' + (isWeekend ? ' weekend-detected' : '');
       rightCell.textContent = openedLabel;
     }
     grid.appendChild(rightCell);
@@ -2041,7 +2047,7 @@ function renderGrid() {
         } else if (slot.available === null && !isPastSlot(day.date, slot.time) && isFocusedScanSlot(day.date, slot.time)) {
           cell.appendChild(createPendingDots());
         }
-        if (slot.auto_booking) {
+        if (slot.auto_booking && !isAutoBookTooClose(day.date, slot.time)) {
           const lbl = document.createElement('span');
           lbl.className = 'cell-book-label';
           lbl.textContent = '$';
@@ -2063,7 +2069,7 @@ function cellClass(slot, dateStr) {
            : 's-unknown';
   if (slot.mine) base += ' mine';
   if (slot.watching) base += ' watching';
-  if (slot.auto_booking) base += ' auto-booking';
+  if (slot.auto_booking && !isAutoBookTooClose(dateStr, slot.time)) base += ' auto-booking';
   if (isPastSlot(dateStr, slot.time)) base += ' s-past';
   return base;
 }
@@ -2073,7 +2079,7 @@ function cellLabel(slot, dateStr) {
   let label = 'Court #' + slot.court + ' · ' + avail;
   if (slot.mine) label += ' · My reservation';
   if (slot.watching) label += ' · Watching';
-  if (slot.auto_booking) label += ' · Auto-booking';
+  if (slot.auto_booking && !isAutoBookTooClose(dateStr, slot.time)) label += ' · Auto-booking';
   if (isPastSlot(dateStr, slot.time)) label += ' · Past';
   return label;
 }

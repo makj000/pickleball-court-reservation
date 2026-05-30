@@ -3,9 +3,9 @@ from datetime import date, timedelta
 
 from config import APP_VERSION, CORS_HEADERS, COURT_PREFERENCE, SLOT_TIMES
 from state import (
-    _has_future_watched_slots, _load_telegram_usage, _normalize_court_number,
-    _normalize_slot_records, _normalize_time_availability, _utc_now_iso,
-    load_state, save_state,
+    _auto_book_slot_is_too_close, _has_future_watched_slots, _load_telegram_usage,
+    _normalize_court_number, _normalize_slot_records, _normalize_time_availability,
+    _utc_now_iso, load_state, save_state,
 )
 from http_utils import get_body
 from rec_api import sync_rec_my_reservations
@@ -164,6 +164,8 @@ def handle_auto_book(event) -> dict:
                 continue
         except (KeyError, ValueError) as exc:
             return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s} — {exc}"})}
+        if _auto_book_slot_is_too_close(slot_date, slot_time):
+            continue
         key = (slot_date, slot_time)
         if key in seen:
             continue
