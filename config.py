@@ -27,6 +27,7 @@ HEADLESS      = True
 DEFAULT_TIME_FILTER = "8:00 AM"
 NOTIFY_NUMBER = os.environ.get("NOTIFY_NUMBER", "")
 NOTIFY_EMAIL  = os.environ.get("NOTIFY_EMAIL", "")
+REPORT_EMAIL  = os.environ.get("REPORT_EMAIL") or NOTIFY_EMAIL or os.environ.get("EMAIL", "")
 
 STATE_BUCKET  = os.environ.get("STATE_BUCKET", "")
 WORK_QUEUE_URL = os.environ.get("PICKLEBALL_QUEUE_URL") or os.environ.get("WORK_QUEUE_URL", "")

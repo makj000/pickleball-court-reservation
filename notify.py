@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 import boto3
 
 from config import (
-    COURT_PREFERENCE, NOTIFY_EMAIL, NOTIFY_NUMBER,
+    COURT_PREFERENCE, NOTIFY_EMAIL, NOTIFY_NUMBER, REPORT_EMAIL,
     SLOT_TIMES, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
 )
 from message_format import with_weekday_dates
@@ -69,6 +69,13 @@ def notify(message: str, subject: str = "Pickleball alert") -> None:
         print(f"Email sent to {NOTIFY_EMAIL}.")
     except Exception as exc:
         print(f"Email failed: {exc}")
+
+
+def send_report_email(subject: str, body: str) -> None:
+    if not REPORT_EMAIL:
+        raise RuntimeError("REPORT_EMAIL is not configured")
+    send_email(REPORT_EMAIL, subject, body)
+    print(f"Report email sent to {REPORT_EMAIL}.")
 
 
 def _ordered_open_courts(court_availability: dict[str, bool | None]) -> list[str]:

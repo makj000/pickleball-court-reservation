@@ -62,6 +62,7 @@ def handle_state(event) -> dict:
             "last_scan_started_at": state.get("last_scan_started_at"),
             "last_scan_kind":      state.get("last_scan_kind"),
             "recent_scan_history": state.get("recent_scan_history", []),
+            "release_probe_log": state.get("release_probe_log", []),
             "scan_interval_hours": state.get("scan_interval_hours", 1.0),
             "queued_scheduled_probe_at": state.get("queued_scheduled_probe_at"),
             "queued_publish_probe_date": state.get("queued_publish_probe_date"),
