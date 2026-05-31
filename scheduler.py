@@ -680,6 +680,10 @@ def _run_queue_work(message: dict) -> None:
         _run_queued_scheduled_probe(str(message.get("token") or ""))
     elif kind == "release_probe_session":
         _run_release_probe_session()
+    elif kind == "booking_agent_prep_retry":
+        from booking_agent import run_agent
+        attempt = int(message.get("attempt") or 1)
+        run_agent("prep", retry_attempt=attempt)
     elif kind == "calendar_event":
         from calendar_sync import handle_calendar_event_work
         handle_calendar_event_work(message.get("slot") or {})

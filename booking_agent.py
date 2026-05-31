@@ -14,9 +14,10 @@ import anthropic
 
 from config import COURT_PREFERENCE, PT, REPORT_EMAIL, SLOT_TIMES
 from notify import send_report_email, send_telegram
-from state import load_state, save_state
+from state import _enqueue_work, load_state, save_state
 
 MODEL = "claude-sonnet-4-6"
+PREP_RETRY_DELAY_SECONDS = 15 * 60
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -138,6 +139,62 @@ def _set_auto_book(slots: list[dict]) -> dict:
     return {"ok": True, "auto_book_slots": state["auto_book_slots"]}
 
 
+def _prep_target_date() -> date:
+    return date.today() + timedelta(days=14)
+
+
+def _prep_is_complete(state: dict) -> tuple[bool, str]:
+    target_date = _prep_target_date()
+    target_str = target_date.isoformat()
+    if target_date.weekday() < 5:
+        return True, "weekday skip"
+
+    reservations = {
+        (r.get("date"), r.get("time"))
+        for r in (state.get("my_reservations") or [])
+        if isinstance(r, dict)
+    }
+    if {
+        (target_str, "8:00 AM"),
+        (target_str, "9:00 AM"),
+    }.issubset(reservations):
+        return True, "already reserved"
+
+    auto_book_slots = {
+        (s.get("date"), s.get("time"))
+        for s in (state.get("auto_book_slots") or [])
+        if isinstance(s, dict)
+    }
+    if (target_str, "9:00 AM") in auto_book_slots:
+        return True, "prep complete"
+
+    return False, f"{target_str} 9:00 AM is not queued for auto-book"
+
+
+def _schedule_prep_retry(*, attempt: int, reason: str) -> str | None:
+    state = load_state()
+    scheduled_for = datetime.now(tz=PT) + timedelta(seconds=PREP_RETRY_DELAY_SECONDS)
+    state["booking_agent_prep_retry_attempt"] = attempt
+    state["booking_agent_prep_retry_scheduled_at"] = scheduled_for.isoformat(timespec="seconds")
+    state["booking_agent_prep_last_error"] = reason
+    save_state(state)
+    queued = _enqueue_work(
+        "booking_agent_prep_retry",
+        {"attempt": attempt},
+        delay_seconds=PREP_RETRY_DELAY_SECONDS,
+    )
+    return scheduled_for.strftime("%Y-%m-%d %I:%M %p PT") if queued else None
+
+
+def _send_prep_failure(reason: str, retry_at: str | None) -> None:
+    lines = [f"❌ Prep agent failed: {reason}"]
+    if retry_at:
+        lines.append(f"Retry scheduled: {retry_at}")
+    else:
+        lines.append("Retry not scheduled.")
+    send_telegram("\n".join(lines))
+
+
 def _run_tool(name: str, args: dict) -> dict:
     if name == "get_context":
         return _get_context()
@@ -200,11 +257,17 @@ When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 
-def run_agent(phase: str) -> None:
+def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
     """Run prep or report phase. Called from monitor.handler."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
-        return
+        if phase == "prep":
+            retry_at = _schedule_prep_retry(
+                attempt=retry_attempt + 1,
+                reason="ANTHROPIC_API_KEY not set",
+            )
+            _send_prep_failure("ANTHROPIC_API_KEY not set", retry_at)
+        return False
 
     client = anthropic.Anthropic()
     system = _PREP_SYSTEM if phase == "prep" else _REPORT_SYSTEM
@@ -218,14 +281,22 @@ def run_agent(phase: str) -> None:
 
     print(f"Booking agent ({phase}) started at {now_str}.")
 
+    had_exception = False
+    error_reason = ""
     for iteration in range(12):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=system,
-            tools=TOOLS,
-            messages=messages,
-        )
+        try:
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=1024,
+                system=system,
+                tools=TOOLS,
+                messages=messages,
+            )
+        except Exception as exc:
+            had_exception = True
+            error_reason = f"{type(exc).__name__}: {exc}"
+            print(f"Booking agent ({phase}) error: {error_reason}")
+            break
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
@@ -278,4 +349,24 @@ def run_agent(phase: str) -> None:
             except Exception as exc:
                 print(f"Booking agent ({phase}) report email failed: {exc}")
 
+    if phase == "prep":
+        state = load_state()
+        ready, reason = _prep_is_complete(state)
+        if ready and not had_exception:
+            state["booking_agent_prep_retry_attempt"] = None
+            state["booking_agent_prep_retry_scheduled_at"] = None
+            state["booking_agent_prep_last_error"] = None
+            save_state(state)
+            print(f"Booking agent ({phase}) prep validated: {reason}.")
+            print(f"Booking agent ({phase}) done.")
+            return True
+
+        failure_reason = error_reason or reason
+        retry_at = _schedule_prep_retry(
+            attempt=retry_attempt + 1,
+            reason=failure_reason,
+        )
+        _send_prep_failure(failure_reason, retry_at)
+
     print(f"Booking agent ({phase}) done.")
+    return phase != "prep" or (not had_exception and _prep_is_complete(load_state())[0])

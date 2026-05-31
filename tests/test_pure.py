@@ -480,6 +480,47 @@ def test_release_probe_session_targets_burst_day_and_persists_log(monkeypatch):
     )
 
 
+def test_prep_retry_helpers_schedule_and_notify(monkeypatch):
+    import booking_agent as booking_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 5, 23, 7, 30, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {}
+    saved_states = []
+    enqueued = []
+    messages = []
+
+    def fake_save_state(value):
+        snapshot = value.copy()
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
+
+    monkeypatch.setattr(booking_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(booking_agent_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        booking_agent_mod,
+        "_enqueue_work",
+        lambda kind, payload=None, delay_seconds=0: enqueued.append((kind, payload, delay_seconds)) or True,
+    )
+    monkeypatch.setattr(booking_agent_mod, "send_telegram", lambda text: messages.append(text))
+
+    retry_at = booking_agent_mod._schedule_prep_retry(attempt=2, reason="boom")
+    booking_agent_mod._send_prep_failure("boom", retry_at)
+
+    assert enqueued == [("booking_agent_prep_retry", {"attempt": 2}, 900)]
+    assert state["booking_agent_prep_retry_attempt"] == 2
+    assert state["booking_agent_prep_retry_scheduled_at"] == "2026-05-23T07:45:00-07:00"
+    assert retry_at == "2026-05-23 07:45 AM PT"
+    assert messages == ["❌ Prep agent failed: boom\nRetry scheduled: 2026-05-23 07:45 AM PT"]
+
+
 def test_should_run_scheduled_tick_1h():
     state = {"scan_interval_hours": 1.0}
     # Should run at the top of any hour
