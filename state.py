@@ -44,6 +44,9 @@ def _empty_state() -> dict:
         "release_probe_session_date": None,
         "last_release_probe_session": None,
         "release_probe_log":       [],
+        "booking_agent_prep_retry_attempt": None,
+        "booking_agent_prep_retry_scheduled_at": None,
+        "booking_agent_prep_last_error": None,
     }
 
 
@@ -212,6 +215,9 @@ def _normalize_state(state: dict) -> dict:
     normalized["queued_publish_probe_date"] = state.get("queued_publish_probe_date")
     normalized["release_probe_session_date"] = state.get("release_probe_session_date")
     normalized["last_release_probe_session"] = state.get("last_release_probe_session")
+    normalized["booking_agent_prep_retry_attempt"] = state.get("booking_agent_prep_retry_attempt")
+    normalized["booking_agent_prep_retry_scheduled_at"] = state.get("booking_agent_prep_retry_scheduled_at")
+    normalized["booking_agent_prep_last_error"] = state.get("booking_agent_prep_last_error")
     if state.get("scan_started_at"):
         normalized["scan_started_at"] = state["scan_started_at"]
         normalized["scan_started_kind"] = state.get("scan_started_kind") or None
