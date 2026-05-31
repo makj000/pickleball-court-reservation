@@ -306,6 +306,32 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
     ]
 
 
+def test_set_auto_book_ensures_release_day_9am_is_present_and_sorted(monkeypatch):
+    import booking_agent as booking_agent_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 30)
+
+    state = {"auto_book_slots": []}
+    saved_states = []
+
+    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(booking_agent_mod, "save_state", lambda value: saved_states.append(value.copy()))
+
+    result = booking_agent_mod._set_auto_book([
+        {"date": "2026-06-13", "time": "8:00 AM"},
+    ])
+
+    assert result["ok"] is True
+    assert result["auto_book_slots"] == [
+        {"date": "2026-06-13", "time": "9:00 AM"},
+        {"date": "2026-06-13", "time": "8:00 AM"},
+    ]
+
+
 def test_with_weekday_dates_adds_weekday_to_iso_dates():
     message = "2026-06-01 9:00 AM and 2026-06-06 8:00 AM"
     assert with_weekday_dates(message) == (
@@ -404,16 +430,28 @@ def test_release_probe_session_targets_burst_day_and_persists_log(monkeypatch):
     monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
     monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
 
-    def fake_api_scan(target_times_by_date=None, auto_book_slots=None, jwt=None):
+    def fake_api_scan(target_times_by_date=None, auto_book_slots=None, jwt=None, detailed_log=None):
         targets = {date_str: list(times) for date_str, times in (target_times_by_date or {}).items()}
         api_scan_calls.append(
             {
                 "targets": targets,
                 "auto_book_slots": list(auto_book_slots or []),
                 "jwt": jwt,
+                "detailed_log": detailed_log,
             }
         )
         if targets == {"2026-06-13": ["9:00 AM"]}:
+            if detailed_log is not None:
+                detailed_log.append(
+                    {
+                        "date": "2026-06-13",
+                        "time": "9:00 AM",
+                        "open_courts": ["6"],
+                        "attempts": [{"attempt": 1, "court": "6", "result": "booked"}],
+                        "result": "booked",
+                        "court": "6",
+                    }
+                )
             return (
                 {
                     "2026-06-13": {
@@ -428,14 +466,16 @@ def test_release_probe_session_targets_burst_day_and_persists_log(monkeypatch):
 
     scheduler_mod._run_release_probe_session()
 
-    assert api_scan_calls[0]["targets"] == {
-        "2026-06-13": ["8:00 AM", "9:00 AM"],
-        "2026-06-14": ["8:00 AM", "9:00 AM"],
-    }
-    assert api_scan_calls[1]["targets"] == {"2026-06-13": ["9:00 AM"]}
+    assert [call["targets"] for call in api_scan_calls[:3]] == [
+        {"2026-06-13": ["9:00 AM", "8:00 AM"]},
+        {"2026-06-13": ["9:00 AM"]},
+        {"2026-06-13": ["9:00 AM", "8:00 AM"]},
+    ]
     assert saved_states[-1]["last_release_probe_session"] is not None
     assert any(
-        entry.get("phase") == "burst" and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
+        entry.get("phase") == "burst"
+        and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
+        and entry.get("booking_attempts")
         for entry in saved_states[-1]["release_probe_log"]
     )
 

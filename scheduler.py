@@ -492,9 +492,9 @@ def _run_release_probe_session() -> None:
     """Own the 7:58–8:02 AM slot-release window.
 
     Phases:
-      pre  (7:58–8:00):   probe all watched/auto-book targets every 15s
+      pre  (7:58–8:00):   probe only the new weekend 9:00 AM / 8:00 AM target every 15s
       burst (8:00–8:00:30): back-to-back probes for the new weekend 9:00 AM slot
-      post (8:00:30–8:02): probe all watched/auto-book targets every 15s
+      post (8:00:30–8:02): probe only the new weekend 9:00 AM / 8:00 AM target every 15s
     """
     import time as _time
 
@@ -502,6 +502,9 @@ def _run_release_probe_session() -> None:
     eight_am = now_pt.replace(hour=8, minute=0, second=0, microsecond=0)
 
     new_day = now_pt.date() + timedelta(days=14)
+    new_day_targets: dict[str, list[str]] = {}
+    if new_day.weekday() >= 5:
+        new_day_targets[new_day.isoformat()] = ["9:00 AM", "8:00 AM"]
     burst_target: tuple[str, str] | None = (
         (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
     )
@@ -538,9 +541,10 @@ def _run_release_probe_session() -> None:
         ts = _utc_now_iso()
         st = load_state()
         auto_book_slots = st.get("auto_book_slots") or []
-        targets = targets_override if targets_override is not None else _watched_and_auto_book_targets(st)
+        targets = targets_override if targets_override is not None else new_day_targets
+        booking_attempts: list[dict] = []
         if not targets:
-            probe_log.append({"ts": ts, "phase": phase, "result": "no_targets"})
+            probe_log.append({"ts": ts, "phase": phase, "result": "no_targets", "booking_attempts": booking_attempts})
             print(f"  [{phase}] no targets")
             return []
         try:
@@ -548,6 +552,7 @@ def _run_release_probe_session() -> None:
                 target_times_by_date=targets,
                 auto_book_slots=auto_book_slots,
                 jwt=jwt,
+                detailed_log=booking_attempts,
             )
             st = load_state()
             avail = st.get("availability", {})
@@ -567,6 +572,7 @@ def _run_release_probe_session() -> None:
                 "ts": ts,
                 "phase": phase,
                 "result": "booked" if booked else ("open" if open_slots else "empty"),
+                "booking_attempts": booking_attempts,
             }
             if booked:
                 entry["booked"] = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked]
@@ -582,7 +588,13 @@ def _run_release_probe_session() -> None:
             _notify_booked_slots(booked)
             return booked
         except Exception as exc:
-            probe_log.append({"ts": ts, "phase": phase, "result": "error", "error": str(exc)})
+            probe_log.append({
+                "ts": ts,
+                "phase": phase,
+                "result": "error",
+                "error": str(exc),
+                "booking_attempts": booking_attempts,
+            })
             print(f"  [{phase}] error: {exc}")
             return []
 

@@ -219,8 +219,8 @@ for RULE_NAME in booking-agent-prep booking-agent-report; do
     CRON="cron(30 14 * * ? *)"
     PAYLOAD='{"_booking_agent":true,"phase":"prep"}'
   else
-    # 8:10 AM PDT (UTC-7) = 15:10 UTC
-    CRON="cron(10 15 * * ? *)"
+    # 8:30 AM PDT (UTC-7) = 15:30 UTC
+    CRON="cron(30 15 * * ? *)"
     PAYLOAD='{"_booking_agent":true,"phase":"report"}'
   fi
   aws events put-rule \

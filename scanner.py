@@ -105,6 +105,7 @@ def _api_scan(
     target_times_by_date: dict[str, list[str]] | None = None,
     auto_book_slots: list[dict] | None = None,
     jwt: str | None = None,
+    detailed_log: list[dict] | None = None,
 ) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
     """Scan via HTTP API and book any newly open auto-book slots.
 
@@ -162,8 +163,20 @@ def _api_scan(
             sum(1 for r in (state_obj.get("my_reservations") or []) if r["date"] == date_str)
             + sum(1 for b in booked if b["date"] == date_str)
         )
+        slot_log = None
+        if detailed_log is not None:
+            open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
+            slot_log = {
+                "date": date_str,
+                "time": time_text,
+                "open_courts": open_courts,
+                "attempts": [],
+            }
+            detailed_log.append(slot_log)
         if sessions_on_day >= _DAY_CAP:
             print(f"  Skipping {date_str} {time_text}: day cap reached ({sessions_on_day}/{_DAY_CAP}).")
+            if slot_log is not None:
+                slot_log["result"] = "skipped_day_cap"
             continue
 
         # Rate limit: cap total app-initiated bookings within the current time window
@@ -175,6 +188,8 @@ def _api_scan(
                 send_telegram(msg)
             except Exception:
                 pass
+            if slot_log is not None:
+                slot_log["result"] = "rate_limited"
             break
 
         open_courts = [c for c in COURT_PREFERENCE if court_avail.get(c) is True]
@@ -187,35 +202,58 @@ def _api_scan(
             for court in COURT_PREFERENCE:
                 if court_avail.get(court) is not True:
                     continue
+                if slot_log is not None:
+                    slot_attempt = {"attempt": attempt, "court": court, "result": "trying"}
+                    slot_log["attempts"].append(slot_attempt)
                 try:
                     ok = book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
                 except Exception as exc:
                     print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
+                    if slot_log is not None:
+                        slot_attempt["result"] = "error"
+                        slot_attempt["error"] = str(exc)
                     ok = False
                 if ok:
                     booked_court = court
+                    if slot_log is not None:
+                        slot_attempt["result"] = "booked"
                     break
+                if slot_log is not None and slot_attempt["result"] == "trying":
+                    slot_attempt["result"] = "failed"
             if booked_court:
                 break
             if attempt < 5:
                 print(f"  All courts failed (attempt {attempt}/5), retrying…")
+                if slot_log is not None:
+                    slot_log["attempts"].append({"attempt": attempt, "result": "retrying"})
         if booked_court:
             booked.append({"date": date_str, "time": time_text, "court": booked_court})
             if date_str in new_avail and time_text in new_avail[date_str]:
                 new_avail[date_str][time_text][booked_court] = False
             log = list(state_obj.get("app_booking_log") or [])
-            log.insert(0, {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court})
+            entry = {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court}
+            if slot_log is not None:
+                entry["attempts"] = slot_log["attempts"]
+            log.insert(0, entry)
             state_obj["app_booking_log"] = log
             save_state(state_obj)
+            if slot_log is not None:
+                slot_log["result"] = "booked"
+                slot_log["court"] = booked_court
         else:
             failures = list(state_obj.get("auto_book_failures") or [])
-            failures.insert(0, {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts"})
+            failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts"}
+            if slot_log is not None:
+                failure["attempts"] = slot_log["attempts"]
+            failures.insert(0, failure)
             state_obj["auto_book_failures"] = failures
             save_state(state_obj)
             try:
                 send_telegram(f"❌ Failed to book {date_str} {time_text} after 5 attempts")
             except Exception:
                 pass
+            if slot_log is not None:
+                slot_log["result"] = "failed"
     return new_avail, booked
 
 
