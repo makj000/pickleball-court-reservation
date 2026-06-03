@@ -20,6 +20,7 @@ def handle_state(event) -> dict:
 
     watched_set   = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
     mine_set      = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
+    friend_set    = {(s["date"], s["time"], s["court"]) for s in state.get("friend_reservations", [])}
     auto_book_set = {(ab["date"], ab["time"]) for ab in state.get("auto_book_slots", [])}
 
     grid = []
@@ -37,6 +38,7 @@ def handle_state(event) -> dict:
                     "available":   time_avail.get(court),
                     "watching":    (d_str, t, court) in watched_set,
                     "mine":        (d_str, t, court) in mine_set,
+                    "friend":      (d_str, t, court) in friend_set,
                     "auto_booking": (d_str, t) in auto_book_set,
                 })
         grid.append({
@@ -70,11 +72,12 @@ def handle_state(event) -> dict:
             "auto_book_slots":     state.get("auto_book_slots", []),
             "my_reservations_synced_at": state.get("my_reservations_synced_at"),
             "my_reservations_source": state.get("my_reservations_source"),
+            "friend_reservations_updated_at": state.get("friend_reservations_updated_at"),
             "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
             "auto_watch_weekends_8am_enabled": bool(state.get("auto_watch_weekends_8am_enabled", False)),
             "seen_open_days": state.get("seen_open_days") or {},
             "auto_book_failures": state.get("auto_book_failures") or [],
-            "telegram_call_history": _load_telegram_usage()[:50],
+            "telegram_call_history": _load_telegram_usage(),
         }),
     }
 
@@ -115,10 +118,39 @@ def handle_my_reservations(event) -> dict:
             return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s}"})}
     state = load_state()
     state["my_reservations"] = _normalize_slot_records(slots, expand_legacy=False)
+    my_keys = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
+    state["friend_reservations"] = [
+        s for s in state.get("friend_reservations", [])
+        if (s["date"], s["time"], s["court"]) not in my_keys
+    ]
     state["my_reservations_synced_at"] = _utc_now_iso()
     state["my_reservations_source"] = "manual"
     save_state(state)
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "mine": len(state['my_reservations'])})}
+
+
+def handle_friend_reservations(event) -> dict:
+    body = get_body(event)
+    slots = body.get("slots")
+    if slots is None:
+        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Missing slots"})}
+    for s in slots:
+        try:
+            date.fromisoformat(s["date"])
+            if _normalize_court_number(s.get("court")) is None:
+                raise ValueError("Missing court")
+        except (KeyError, ValueError):
+            return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Invalid slot: {s}"})}
+    state = load_state()
+    state["friend_reservations"] = _normalize_slot_records(slots, expand_legacy=False)
+    friend_keys = {(s["date"], s["time"], s["court"]) for s in state.get("friend_reservations", [])}
+    state["my_reservations"] = [
+        s for s in state.get("my_reservations", [])
+        if (s["date"], s["time"], s["court"]) not in friend_keys
+    ]
+    state["friend_reservations_updated_at"] = _utc_now_iso()
+    save_state(state)
+    return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "friend": len(state['friend_reservations'])})}
 
 
 def handle_my_reservations_refresh(event) -> dict:

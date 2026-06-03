@@ -122,11 +122,11 @@ def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
     monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
     normalized = state_mod._normalize_state({
         "auto_book_slots": [
-            {"date": "2026-06-01", "time": "9:00 AM"},
-            {"date": "2026-06-01", "time": "10:00 AM"},
+            {"date": "2026-06-03", "time": "9:00 AM"},
+            {"date": "2026-06-03", "time": "10:00 AM"},
         ]
     })
-    assert normalized["auto_book_slots"] == [{"date": "2026-06-01", "time": "10:00 AM"}]
+    assert normalized["auto_book_slots"] == [{"date": "2026-06-03", "time": "10:00 AM"}]
 
 
 def test_normalize_state_preserves_release_probe_fields():
@@ -143,6 +143,26 @@ def test_normalize_state_preserves_release_probe_fields():
     assert normalized["last_release_probe_session"] == "2026-05-30T15:58:14.000Z"
     assert normalized["release_probe_log"] == [
         {"ts": "2026-05-30T15:58:14.000Z", "phase": "burst", "result": "open"}
+    ]
+
+
+def test_normalize_state_keeps_friend_reservations_and_removes_overlap_with_mine():
+    import state as state_mod
+
+    normalized = state_mod._normalize_state({
+        "my_reservations": [
+            {"date": "2026-06-01", "time": "9:00 AM", "court": "6"},
+        ],
+        "friend_reservations": [
+            {"date": "2026-06-01", "time": "9:00 AM", "court": "6"},
+            {"date": "2026-06-01", "time": "10:00 AM", "court": "4"},
+        ],
+    })
+    assert normalized["my_reservations"] == [
+        {"date": "2026-06-01", "time": "9:00 AM", "court": "6"},
+    ]
+    assert normalized["friend_reservations"] == [
+        {"date": "2026-06-01", "time": "10:00 AM", "court": "4"},
     ]
 
 

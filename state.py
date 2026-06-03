@@ -21,6 +21,8 @@ def _empty_state() -> dict:
         "my_reservations":     [],
         "my_reservations_synced_at": None,
         "my_reservations_source": None,
+        "friend_reservations": [],
+        "friend_reservations_updated_at": None,
         "availability":        {},
         "notified_slots":      [],
         "last_scanned":        None,
@@ -241,6 +243,17 @@ def _normalize_state(state: dict) -> dict:
     )
     normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
     normalized["my_reservations_source"] = state.get("my_reservations_source")
+    normalized["friend_reservations"] = _normalize_slot_records(
+        state.get("friend_reservations"),
+        expand_legacy=False,
+        default_court=COURT_PREFERENCE[0],
+    )
+    normalized["friend_reservations_updated_at"] = state.get("friend_reservations_updated_at")
+    mine_keys = {(s["date"], s["time"], s["court"]) for s in normalized["my_reservations"]}
+    normalized["friend_reservations"] = [
+        s for s in normalized["friend_reservations"]
+        if (s["date"], s["time"], s["court"]) not in mine_keys
+    ]
     normalized["notified_slots"] = _normalize_notified_slots(state.get("notified_slots"))
     today_str = date.today().isoformat()
     normalized["auto_watched_weekends"] = sorted(
