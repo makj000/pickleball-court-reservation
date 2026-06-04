@@ -133,9 +133,9 @@
     }
     .grid-row > .grid { flex: 0 0 auto; }
     #telegram-calls-table {
-      flex: 0 0 320px;
-      width: 320px;
-      overflow-x: hidden;
+      flex: 0 0 420px;
+      width: 420px;
+      overflow-x: auto;
       overflow-y: auto;
       padding-left: 18px;
       border-left: 1px solid #e5e7eb;
@@ -149,6 +149,16 @@
     .tg-table .tok-in  { color: #1d4ed8; }
     .tg-table .tok-cache { color: #0891b2; font-size: 0.7rem; }
     .tg-table .tok-out { color: #15803d; }
+    .tg-cost {
+      display: inline-block;
+      min-width: 72px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-align: right;
+      letter-spacing: 0.01em;
+    }
     .tg-tool { display: inline-block; background: #ede9fe; color: #5b21b6; font-size: 0.67rem; border-radius: 3px; padding: 1px 4px; margin: 1px 2px 1px 0; white-space: nowrap; }
     .tg-preview { color: #6b7280; font-style: italic; font-size: 0.7rem; white-space: nowrap; }
     #upcoming-scans-table .section-label {
@@ -1808,28 +1818,40 @@ function renderTelegramCalls() {
   const costUsd = (totalIn * 0.80 + totalOut * 4.00 + totalCacheRead * 0.08 + totalCacheWrite * 1.00) / 1_000_000;
 
   const rowCost = c => ((c.input_tokens||0)*0.80 + (c.output_tokens||0)*4.00 + (c.cache_read_tokens||0)*0.08 + (c.cache_write_tokens||0)*1.00) / 1_000_000;
+  const rowCosts = calls.map(rowCost);
+  const minCost = Math.min(...rowCosts);
+  const maxCost = Math.max(...rowCosts);
+  const costStyle = cost => {
+    if (!Number.isFinite(cost) || maxCost <= minCost) {
+      return 'background:#f3f4f6;color:#4b5563;border:1px solid #e5e7eb;';
+    }
+    const t = Math.min(1, Math.max(0, (cost - minCost) / (maxCost - minCost)));
+    const hue = 140 - (140 * t);
+    const background = `hsl(${hue} 70% 92%)`;
+    const color = `hsl(${hue} 75% 26%)`;
+    const border = `hsl(${hue} 50% 80%)`;
+    return `background:${background};color:${color};border:1px solid ${border};`;
+  };
 
   const today = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const rows = calls.map(c => {
+  const rows = calls.map((c, i) => {
     const d = new Date(c.at);
     const dayStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
     const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const dateLabel = dayStr === today ? timeStr : `${dayStr} ${timeStr}`;
     const cached = c.cache_read_tokens || 0;
+    const rowCostValue = rowCosts[i];
     const toolStr = (c.tools && c.tools.length)
       ? c.tools.map(t => `<span class="tg-tool">${t.replace(/_/g, ' ')}</span>`).join(' ')
       : '—';
-    const preview = c.reply_preview
-      ? `<span class="tg-preview" title="${c.reply_preview.replace(/"/g,'&quot;')}">${c.reply_preview.length > 40 ? c.reply_preview.slice(0,40) + '…' : c.reply_preview}</span>`
-      : '';
-    return `<tr>
+    const replyTitle = c.reply_preview ? ` title="${c.reply_preview.replace(/"/g,'&quot;')}"` : '';
+    return `<tr${replyTitle}>
       <td>${dateLabel}</td>
       <td class="tok-in">${(c.input_tokens||0).toLocaleString()}</td>
       <td class="tok-cache">${cached ? cached.toLocaleString() : '—'}</td>
       <td class="tok-out">${(c.output_tokens||0).toLocaleString()}</td>
-      <td style="color:#6b7280;font-size:0.7rem;">$${rowCost(c).toFixed(4)}</td>
+      <td><span class="tg-cost" style="${costStyle(rowCostValue)}">$${rowCostValue.toFixed(4)}</span></td>
       <td class="tg-tools">${toolStr}</td>
-      <td class="tg-reply">${preview}</td>
     </tr>`;
   }).join('');
 
@@ -1838,14 +1860,14 @@ function renderTelegramCalls() {
     <td class="tok-in">${totalIn.toLocaleString()}</td>
     <td class="tok-cache">${totalCacheRead ? totalCacheRead.toLocaleString() : '—'}</td>
     <td class="tok-out">${totalOut.toLocaleString()}</td>
-    <td style="color:#6b7280;">~$${costUsd.toFixed(4)}</td>
-    <td colspan="2"></td>
+    <td><span class="tg-cost" style="background:#f3f4f6;color:#4b5563;border:1px solid #e5e7eb;">~$${costUsd.toFixed(4)}</span></td>
+    <td></td>
   </tr>`;
 
   container.innerHTML =
     `<div class="section-label" style="margin-top:0;margin-bottom:6px;">Telegram Bot Usage</div>` +
     `<table class="scans-table tg-table">` +
-    `<thead><tr><th>Time</th><th>In</th><th>Cache</th><th>Out</th><th>$</th><th>Tools</th><th>Reply</th></tr></thead>` +
+    `<thead><tr><th>Time</th><th>In</th><th>Cache</th><th>Out</th><th>$</th><th>Tools</th></tr></thead>` +
     `<tbody>${rows}${totalsRow}</tbody></table>`;
 }
 
