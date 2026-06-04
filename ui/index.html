@@ -128,15 +128,17 @@
     /* ── Grid + Telegram side-by-side ── */
     .grid-row {
       display: flex;
-      align-items: stretch;
+      align-items: flex-start;
       gap: 0;
     }
     .grid-row > .grid { flex: 0 0 auto; }
     #telegram-calls-table {
       flex: 0 0 420px;
       width: 420px;
+      align-self: flex-start;
       overflow-x: auto;
       overflow-y: auto;
+      max-height: min(320px, calc(100vh - 240px));
       padding-left: 18px;
       border-left: 1px solid #e5e7eb;
       margin-left: 18px;
