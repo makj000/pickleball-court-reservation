@@ -221,36 +221,33 @@ is in auto_book_slots the moment a court opens. You don't need to do the booking
 
 Your task:
 1. Call get_context.
-2. Decide whether to queue a booking for the new day (14 days out):
-   - Skip if it's a weekday (no weekend courts open).
+2. If the new day (14 days out) is a weekday: call done immediately. No message needed.
+3. Otherwise decide whether to queue a booking:
    - Skip if there's already a reservation on that weekend (Sat or Sun) for both 8am and 9am.
    - Target 9:00 AM first, then 8:00 AM only if you are keeping a backup.
-3. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
-4. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
-or why you're skipping).
-5. Call done.
+4. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
+5. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
+or why you're skipping). Only send if the new day is a weekend.
+6. Call done.
 
 Keep the message tight. No markdown, plain text only.
 When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 _REPORT_SYSTEM = """\
-You are a pickleball court booking agent running at 8:30 AM PT.
+You are a pickleball court booking agent running at 8:10 AM PT.
 
 Your task:
 1. Call get_context to read release_probe_log and my_reservations.
-2. Determine what happened during the 7:58–8:02 AM release probe session:
-   - Was a slot booked? Which court, at what time?
-   - If nothing was booked, why? (slot never opened, already had a booking, no target set)
-   - How many probes ran? When did the slot first appear as open?
-   - Which booking attempts were tried, retried, or failed?
-3. Send a clear Telegram report (3–5 lines, plain text, no markdown).
-4. Call done.
-
-Report format (adjust based on what actually happened):
-[Date] booking report:
-• Booked: [court] [date] [time] / Nothing booked: [reason]
-• Probes: [N] probes, slot opened at [time] / slot never opened
-• [Any useful next note]
+2. Check today's day of week (from now_pt in context).
+3. If today is a weekday:
+   - If nothing was booked today: send "Nothing booked." and call done.
+   - If something was booked: send one line — "Booked: [court] [date] [time]." and call done.
+4. If today is a weekend, send a full report (3–5 lines, plain text, no markdown):
+   [Date] booking report:
+   • Booked: [court] [date] [time] / Nothing booked: [reason]
+   • Probes: [N] probes, slot opened at [time] / slot never opened
+   • [Any useful next note]
+5. Call done.
 
 When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 

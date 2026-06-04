@@ -488,6 +488,42 @@ def _run_queued_scheduled_probe(token: str) -> None:
         save_state(state)
 
 
+def _format_probe_session_summary(probe_log: list[dict], tz) -> str:
+    """Format a detailed Telegram summary of the 8am probe session."""
+    lines = [f"8am probe session: {len(probe_log)} probes"]
+    for entry in probe_log:
+        ts = entry.get("ts", "")
+        try:
+            from datetime import timezone as _tz
+            dt = datetime.fromisoformat(ts).astimezone(tz)
+            time_str = dt.strftime("%H:%M:%S")
+        except Exception:
+            time_str = ts[11:19] if len(ts) >= 19 else ts
+        phase = entry.get("phase", "?")
+        result = entry.get("result", "?")
+        prefix = f"  {time_str} [{phase}] {result}"
+        if entry.get("booked"):
+            lines.append(f"{prefix} — {', '.join(entry['booked'])}")
+        elif entry.get("open"):
+            lines.append(f"{prefix} — open: {', '.join(entry['open'])}")
+        elif result == "error":
+            lines.append(f"{prefix}: {str(entry.get('error', ''))[:80]}")
+        elif result == "already_reserved":
+            lines.append(f"{prefix}: {entry.get('slot', '')}")
+        else:
+            lines.append(prefix)
+        for attempt in entry.get("booking_attempts") or []:
+            court = attempt.get("court", "?")
+            a_result = attempt.get("result", "?")
+            a_num = attempt.get("attempt", "")
+            err = attempt.get("error", "")
+            detail = f"    → Court {court} attempt {a_num}: {a_result}"
+            if err:
+                detail += f" ({err[:60]})"
+            lines.append(detail)
+    return "\n".join(lines)
+
+
 def _run_release_probe_session() -> None:
     """Own the 7:58–8:02 AM slot-release window.
 
@@ -648,18 +684,35 @@ def _run_release_probe_session() -> None:
         state["last_release_probe_session"] = started_at
         save_state(state)
         print(f"8am session done: {len(probe_log)} probes")
+        try:
+            send_telegram(_format_probe_session_summary(probe_log, PT))
+        except Exception as exc:
+            print(f"Failed to send probe session summary: {exc}")
 
 
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
-    """Queue the release probe session from the 7:45 AM EventBridge tick (780s delay → ~7:58 AM)."""
+    """At 7:45 AM on weekends: cache JWT now, then queue the probe session to start at ~7:58 AM."""
     from config import WORK_QUEUE_URL
     now_pt = now_pt or datetime.now(tz=PT)
     if now_pt.hour != 7 or now_pt.minute != 45:
         return False
+    if now_pt.weekday() >= 5:
+        # Pre-cache JWT at 7:45 AM so the probe session skips login entirely.
+        try:
+            if not _get_cached_jwt(state):
+                jwt = _firebase_login()
+                _cache_jwt(state, jwt)
+                save_state(state)
+                print("Pre-cached JWT at 7:45 AM for 8 AM probe session.")
+        except Exception as exc:
+            print(f"7:45 AM JWT pre-cache failed: {exc}")
     if not WORK_QUEUE_URL:
         print("Work queue not configured; cannot queue release probe session.")
         return False
     today_str = now_pt.date().isoformat()
+    if now_pt.weekday() < 5:
+        print("Skipping release probe session: weekday.")
+        return False
     if state.get("release_probe_session_date") == today_str:
         print(f"Release probe session already queued for {today_str}.")
         return True
