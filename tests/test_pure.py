@@ -122,11 +122,11 @@ def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
     monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
     normalized = state_mod._normalize_state({
         "auto_book_slots": [
-            {"date": "2026-06-03", "time": "9:00 AM"},
-            {"date": "2026-06-03", "time": "10:00 AM"},
+            {"date": "2026-06-07", "time": "9:00 AM"},
+            {"date": "2026-06-07", "time": "10:00 AM"},
         ]
     })
-    assert normalized["auto_book_slots"] == [{"date": "2026-06-03", "time": "10:00 AM"}]
+    assert normalized["auto_book_slots"] == [{"date": "2026-06-07", "time": "10:00 AM"}]
 
 
 def test_normalize_state_preserves_release_probe_fields():
@@ -136,13 +136,39 @@ def test_normalize_state_preserves_release_probe_fields():
         "release_probe_session_date": "2026-05-30",
         "last_release_probe_session": "2026-05-30T15:58:14.000Z",
         "release_probe_log": [
-            {"ts": "2026-05-30T15:58:14.000Z", "phase": "burst", "result": "open"}
+            {
+                "ts": "2026-05-30T15:58:14.000Z",
+                "phase": "burst",
+                "result": "open",
+                "targets": [
+                    {
+                        "date": "2026-06-13",
+                        "times": ["9:00 AM"],
+                        "courts": {
+                            "9:00 AM": {"6": True, "4": False, "5": False}
+                        },
+                    }
+                ],
+            }
         ],
     })
     assert normalized["release_probe_session_date"] == "2026-05-30"
     assert normalized["last_release_probe_session"] == "2026-05-30T15:58:14.000Z"
     assert normalized["release_probe_log"] == [
-        {"ts": "2026-05-30T15:58:14.000Z", "phase": "burst", "result": "open"}
+        {
+            "ts": "2026-05-30T15:58:14.000Z",
+            "phase": "burst",
+            "result": "open",
+            "targets": [
+                {
+                    "date": "2026-06-13",
+                    "times": ["9:00 AM"],
+                    "courts": {
+                        "9:00 AM": {"6": True, "4": False, "5": False}
+                    },
+                }
+            ],
+        }
     ]
 
 
@@ -401,101 +427,62 @@ def test_calendar_event_body_includes_apps_script_secret(monkeypatch):
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
 
-def test_release_probe_session_targets_burst_day_and_persists_log(monkeypatch):
+def test_release_probe_session_blind_books_weekend_target_and_persists_log(monkeypatch):
     import copy
     import scheduler as scheduler_mod
     from config import PT
 
     class FixedDateTime(datetime):
-        _moments = [
-            datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT),
-            datetime(2026, 5, 30, 7, 58, 15, tzinfo=PT),
-            datetime(2026, 5, 30, 8, 0, 5, tzinfo=PT),
-            datetime(2026, 5, 30, 8, 0, 20, tzinfo=PT),
-            datetime(2026, 5, 30, 8, 1, 0, tzinfo=PT),
-            datetime(2026, 5, 30, 8, 2, 0, tzinfo=PT),
-        ]
-
         @classmethod
         def now(cls, tz=None):
-            if cls._moments:
-                value = cls._moments.pop(0)
-            else:
-                value = datetime(2026, 5, 30, 8, 2, 0, tzinfo=PT)
+            value = datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT)
             return value.astimezone(tz) if tz is not None else value
 
     state = {
         "cached_jwt": "jwt",
         "cached_jwt_expires_at": "2026-05-30T16:30:00.000Z",
         "my_reservations": [],
-        "auto_book_slots": [
-            {"date": "2026-06-13", "time": "8:00 AM"},
-            {"date": "2026-06-13", "time": "9:00 AM"},
-            {"date": "2026-06-14", "time": "8:00 AM"},
-            {"date": "2026-06-14", "time": "9:00 AM"},
-        ],
+        "auto_book_slots": [],
         "release_probe_log": [],
         "app_booking_log": [],
     }
     saved_states = []
-    api_scan_calls = []
+    book_calls = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
 
     monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
     monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
-    monkeypatch.setattr(scheduler_mod, "save_state", lambda value: saved_states.append(copy.deepcopy(value)))
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
     monkeypatch.setattr(scheduler_mod, "_get_cached_jwt", lambda value: "jwt")
     monkeypatch.setattr(scheduler_mod, "_firebase_login", lambda: (_ for _ in ()).throw(AssertionError("login should not run")))
     monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
     monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
     monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
     monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
-
-    def fake_api_scan(target_times_by_date=None, auto_book_slots=None, jwt=None, detailed_log=None):
-        targets = {date_str: list(times) for date_str, times in (target_times_by_date or {}).items()}
-        api_scan_calls.append(
-            {
-                "targets": targets,
-                "auto_book_slots": list(auto_book_slots or []),
-                "jwt": jwt,
-                "detailed_log": detailed_log,
-            }
-        )
-        if targets == {"2026-06-13": ["9:00 AM"]}:
-            if detailed_log is not None:
-                detailed_log.append(
-                    {
-                        "date": "2026-06-13",
-                        "time": "9:00 AM",
-                        "open_courts": ["6"],
-                        "attempts": [{"attempt": 1, "court": "6", "result": "booked"}],
-                        "result": "booked",
-                        "court": "6",
-                    }
-                )
-            return (
-                {
-                    "2026-06-13": {
-                        "9:00 AM": {"6": True, "4": False, "5": False},
-                    }
-                },
-                [{"date": "2026-06-13", "time": "9:00 AM", "court": "6"}],
-            )
-        return ({}, [])
-
-    monkeypatch.setattr(scheduler_mod, "_api_scan", fake_api_scan)
+    monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
+    monkeypatch.setattr(
+        scheduler_mod,
+        "book_slot_api",
+        lambda jwt, slot_date, time_text, court: book_calls.append((slot_date.isoformat(), time_text, court)) or (court == "6"),
+    )
 
     scheduler_mod._run_release_probe_session()
 
-    assert [call["targets"] for call in api_scan_calls[:3]] == [
-        {"2026-06-13": ["9:00 AM", "8:00 AM"]},
-        {"2026-06-13": ["9:00 AM"]},
-        {"2026-06-13": ["9:00 AM", "8:00 AM"]},
+    assert book_calls == [
+        ("2026-06-13", "9:00 AM", "5"),
+        ("2026-06-13", "9:00 AM", "6"),
     ]
     assert saved_states[-1]["last_release_probe_session"] is not None
     assert any(
         entry.get("phase") == "burst"
         and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
         and entry.get("booking_attempts")
+        and entry.get("targets")
         for entry in saved_states[-1]["release_probe_log"]
     )
 

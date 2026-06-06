@@ -14,7 +14,7 @@ from state import (
     _utc_now_iso, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
-from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, sync_rec_my_reservations
+from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, book_slot_api, sync_rec_my_reservations
 from scanner import _api_scan, _api_fetch_availability
 from booking import _apply_booked_slots, _notify_booked_slots
 
@@ -545,6 +545,7 @@ def _run_release_probe_session() -> None:
         (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
     )
     burst_done = False
+    blind_booking_order = ["5", "6", "4"]
 
     state = load_state()
     try:
@@ -573,14 +574,135 @@ def _run_release_probe_session() -> None:
 
     probe_log: list[dict] = []
 
+    def _blind_book_release_target() -> list[dict]:
+        ts = _utc_now_iso()
+        target_date = new_day.isoformat()
+        target_time = "9:00 AM"
+        booking_attempts: list[dict] = []
+        if _burst_slot_already_reserved(target_date, target_time):
+            probe_log.append({
+                "ts": ts,
+                "phase": "burst",
+                "result": "already_reserved",
+                "slot": f"{target_date} {target_time}",
+                "targets": [
+                    {
+                        "date": target_date,
+                        "times": [target_time],
+                        "courts": {
+                            target_time: {court: None for court in blind_booking_order}
+                        },
+                    }
+                ],
+            })
+            print(f"  [burst] {target_date} {target_time} already reserved — skipping blind booking")
+            return []
+
+        try:
+            send_telegram(f"🎯 Trying to book {target_date} {target_time} (courts: {', '.join(blind_booking_order)})")
+        except Exception:
+            pass
+
+        booked: list[dict] = []
+        for attempt, court in enumerate(blind_booking_order, start=1):
+            attempt_log = {"attempt": attempt, "court": court, "result": "trying"}
+            booking_attempts.append(attempt_log)
+            try:
+                ok = book_slot_api(jwt, new_day, target_time, court)
+            except Exception as exc:
+                attempt_log["result"] = "error"
+                attempt_log["error"] = str(exc)
+                print(f"  Blind booking error {target_date} {target_time} Court {court} (attempt {attempt}/3): {exc}")
+                ok = False
+            if ok:
+                attempt_log["result"] = "booked"
+                booked.append({"date": target_date, "time": target_time, "court": court})
+                break
+            attempt_log.setdefault("result", "failed")
+
+        state_after = load_state()
+        if booked:
+            booking_log = list(state_after.get("app_booking_log") or [])
+            booking_entry = {
+                "booked_at": _utc_now_iso(),
+                "date": target_date,
+                "time": target_time,
+                "court": booked[0]["court"],
+            }
+            if booking_attempts:
+                booking_entry["attempts"] = booking_attempts
+            booking_log.insert(0, booking_entry)
+            state_after["app_booking_log"] = booking_log
+            _apply_booked_slots(state_after, booked)
+            save_state(state_after)
+            _notify_booked_slots(booked)
+            probe_log.append({
+                "ts": ts,
+                "phase": "burst",
+                "result": "booked",
+                "booked": [f"{b['date']} {b['time']} Court {b['court']}" for b in booked],
+                "booking_attempts": booking_attempts,
+                "targets": [
+                    {
+                        "date": target_date,
+                        "times": [target_time],
+                        "courts": {
+                            target_time: {court: None for court in blind_booking_order}
+                        },
+                    }
+                ],
+            })
+            return booked
+
+        failure_msg = f"❌ Failed to book {target_date} {target_time} after {len(blind_booking_order)} attempts"
+        try:
+            send_telegram(failure_msg)
+        except Exception:
+            pass
+        failures = list(state_after.get("auto_book_failures") or [])
+        failure = {
+            "failed_at": _utc_now_iso(),
+            "date": target_date,
+            "time": target_time,
+            "error": f"Failed after {len(blind_booking_order)} attempts",
+            "attempts": booking_attempts,
+        }
+        failures.insert(0, failure)
+        state_after["auto_book_failures"] = failures
+        save_state(state_after)
+        probe_log.append({
+            "ts": ts,
+            "phase": "burst",
+            "result": "failed",
+            "booking_attempts": booking_attempts,
+            "targets": [
+                {
+                    "date": target_date,
+                    "times": [target_time],
+                    "courts": {
+                        target_time: {court: None for court in blind_booking_order}
+                    },
+                }
+            ],
+        })
+        print(f"  [burst] blind booking failed for {target_date} {target_time}")
+        return []
+
     def _one_probe(phase: str, targets_override: dict | None = None) -> list[dict]:
         ts = _utc_now_iso()
         st = load_state()
         auto_book_slots = st.get("auto_book_slots") or []
         targets = targets_override if targets_override is not None else new_day_targets
+        history_targets = _history_targets_from_map(targets)
         booking_attempts: list[dict] = []
         if not targets:
-            probe_log.append({"ts": ts, "phase": phase, "result": "no_targets", "booking_attempts": booking_attempts})
+            probe_log.append({
+                "ts": ts,
+                "phase": phase,
+                "result": "no_targets",
+                "booking_attempts": booking_attempts,
+                "targets": [],
+            })
             print(f"  [{phase}] no targets")
             return []
         try:
@@ -609,6 +731,7 @@ def _run_release_probe_session() -> None:
                 "phase": phase,
                 "result": "booked" if booked else ("open" if open_slots else "empty"),
                 "booking_attempts": booking_attempts,
+                "targets": _attach_history_results(history_targets, new_avail),
             }
             if booked:
                 entry["booked"] = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked]
@@ -630,6 +753,7 @@ def _run_release_probe_session() -> None:
                 "result": "error",
                 "error": str(exc),
                 "booking_attempts": booking_attempts,
+                "targets": history_targets,
             })
             print(f"  [{phase}] error: {exc}")
             return []
@@ -642,6 +766,13 @@ def _run_release_probe_session() -> None:
         )
 
     try:
+        if new_day.weekday() >= 5:
+            delay_seconds = max(0.0, (eight_am - now_pt).total_seconds())
+            if delay_seconds > 0:
+                _time.sleep(delay_seconds)
+            _blind_book_release_target()
+            return
+
         while True:
             now = datetime.now(tz=PT)
             secs = (now - eight_am).total_seconds()
@@ -659,6 +790,7 @@ def _run_release_probe_session() -> None:
                         "ts": _utc_now_iso(), "phase": "burst",
                         "result": "already_reserved",
                         "slot": f"{burst_date} {burst_time}",
+                        "targets": _history_targets_from_map({burst_date: [burst_time]}),
                     })
                     print(f"  [burst] {burst_date} {burst_time} already reserved — stopping burst")
                 else:
