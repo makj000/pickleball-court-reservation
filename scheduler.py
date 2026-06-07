@@ -605,10 +605,22 @@ def _run_release_probe_session() -> None:
 
         booked: list[dict] = []
         for attempt, court in enumerate(blind_booking_order, start=1):
-            attempt_log = {"attempt": attempt, "court": court, "result": "trying"}
+            transaction_log: dict = {}
+            attempt_log = {
+                "attempt": attempt,
+                "court": court,
+                "result": "trying",
+                "transaction": transaction_log,
+            }
             booking_attempts.append(attempt_log)
             try:
-                ok = book_slot_api(jwt, new_day, target_time, court)
+                ok = book_slot_api(
+                    jwt,
+                    new_day,
+                    target_time,
+                    court,
+                    transaction_log=transaction_log,
+                )
             except Exception as exc:
                 attempt_log["result"] = "error"
                 attempt_log["error"] = str(exc)

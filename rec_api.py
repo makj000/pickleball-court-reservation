@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
@@ -213,34 +214,55 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     return True
 
 
-def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bool:
+def book_slot_api(
+    jwt: str,
+    target_date: date,
+    time_text: str,
+    court: str,
+    transaction_log: dict | None = None,
+) -> bool:
     """Book a court fully via API (no browser)."""
+    if transaction_log is None:
+        transaction_log = {}
+
     time_str = _TIME_TEXT_TO_HHMMSS.get(time_text)
     if not time_str:
         print(f"  book_slot_api: unknown time_text '{time_text}'")
+        transaction_log["error"] = f"Unknown time_text: {time_text}"
         return False
 
     court_sport_id = COURT_SPORT_IDS.get(court)
     if not court_sport_id:
         print(f"  book_slot_api: unknown court '{court}'")
+        transaction_log["error"] = f"Unknown court: {court}"
         return False
 
     date_str = target_date.isoformat()
     start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
     end_str = (start_dt + timedelta(hours=1)).strftime("%H:%M:%S")
+    reservation_url = "https://api.rec.us/v1/reservations"
+    reservation_body = {
+        "courtSportIds": [court_sport_id],
+        "from": {"date": date_str, "time": time_str},
+        "participantUserId": PARTICIPANT_USER_ID,
+        "to": {"date": date_str, "time": end_str},
+    }
 
     print(f"  Booking Court {court} {date_str} {time_text} via API…")
     s, order = _rec_api(
-        "https://api.rec.us/v1/reservations",
+        reservation_url,
         method="POST",
-        body={
-            "courtSportIds": [court_sport_id],
-            "from": {"date": date_str, "time": time_str},
-            "participantUserId": PARTICIPANT_USER_ID,
-            "to": {"date": date_str, "time": end_str},
-        },
+        body=reservation_body,
         jwt=jwt,
     )
+    transaction_log["reservation"] = {
+        "request": {
+            "method": "POST",
+            "url": reservation_url,
+            "body": reservation_body,
+        },
+        "response": {"status": s, "body": order},
+    }
     if s not in (200, 201):
         print(f"  API booking failed [{s}]: {json.dumps(order)[:200]}")
         return False
@@ -261,15 +283,53 @@ def book_slot_api(jwt: str, target_date: date, time_text: str, court: str) -> bo
     if not payments:
         payments.append({"paymentMethodType": "free", "amountCents": 0})
 
+    payment_url = f"https://api.rec.us/v1/orders/{order_id}/pay"
+    payment_body = {"data": {"payments": payments}}
     s2, result = _rec_api(
-        f"https://api.rec.us/v1/orders/{order_id}/pay",
+        payment_url,
         method="POST",
-        body={"data": {"payments": payments}},
+        body=payment_body,
         jwt=jwt,
     )
+    transaction_log["payment"] = {
+        "request": {
+            "method": "POST",
+            "url": payment_url,
+            "body": payment_body,
+        },
+        "response": {"status": s2, "body": result},
+    }
     if s2 == 200:
-        print(f"  Confirmed! Court {court} {date_str} {time_text}.")
-        return True
+        expected = {"date": date_str, "time": time_text, "court": court}
+        verification = {"expected": expected, "attempts": [], "confirmed": False}
+        transaction_log["verification"] = verification
+        for check in range(1, 4):
+            try:
+                reservations = fetch_rec_my_reservations(jwt)
+            except Exception as exc:
+                verification["attempts"].append({
+                    "attempt": check,
+                    "error": str(exc),
+                })
+                reservations = []
+            else:
+                matched = expected in reservations
+                verification["attempts"].append({
+                    "attempt": check,
+                    "matched": matched,
+                    "reservations": reservations,
+                })
+            if expected in reservations:
+                verification["confirmed"] = True
+                print(f"  Confirmed! Court {court} {date_str} {time_text}.")
+                return True
+            if check < 3:
+                time.sleep(1)
+        print(
+            f"  Payment returned 200 but reservation was not confirmed: "
+            f"{json.dumps(result)[:500]}"
+        )
+        return False
 
     print(f"  Payment failed [{s2}]: {json.dumps(result)[:200]}")
     return False

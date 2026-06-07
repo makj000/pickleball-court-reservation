@@ -352,6 +352,87 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
     ]
 
 
+def test_book_slot_api_confirms_reservation_after_payment(monkeypatch):
+    import rec_api as rec_api_mod
+
+    api_calls = []
+    reservation_checks = iter([
+        [],
+        [{"date": "2026-06-21", "time": "9:00 AM", "court": "5"}],
+    ])
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        api_calls.append((url, method, body))
+        if url.endswith("/reservations"):
+            return 201, {
+                "data": {
+                    "id": "order-id",
+                    "total": 400,
+                    "maxCreditAdjustmentAllowed": 0,
+                }
+            }
+        return 200, {"data": {"status": "paid"}}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+    monkeypatch.setattr(
+        rec_api_mod,
+        "fetch_rec_my_reservations",
+        lambda jwt=None: next(reservation_checks),
+    )
+    monkeypatch.setattr(rec_api_mod.time, "sleep", lambda seconds: None)
+
+    transaction_log = {}
+    assert rec_api_mod.book_slot_api(
+        "jwt",
+        date(2026, 6, 21),
+        "9:00 AM",
+        "5",
+        transaction_log=transaction_log,
+    ) is True
+    assert len(api_calls) == 2
+    assert transaction_log["reservation"]["response"]["status"] == 201
+    assert transaction_log["payment"]["response"]["body"] == {"data": {"status": "paid"}}
+    assert transaction_log["verification"]["confirmed"] is True
+    assert len(transaction_log["verification"]["attempts"]) == 2
+
+
+def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
+    import rec_api as rec_api_mod
+
+    checks = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        if url.endswith("/reservations"):
+            return 201, {
+                "data": {
+                    "id": "order-id",
+                    "total": 400,
+                    "maxCreditAdjustmentAllowed": 0,
+                }
+            }
+        return 200, {"data": {"status": "declined"}}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+    monkeypatch.setattr(
+        rec_api_mod,
+        "fetch_rec_my_reservations",
+        lambda jwt=None: checks.append(jwt) or [],
+    )
+    monkeypatch.setattr(rec_api_mod.time, "sleep", lambda seconds: None)
+
+    transaction_log = {}
+    assert rec_api_mod.book_slot_api(
+        "jwt",
+        date(2026, 6, 21),
+        "9:00 AM",
+        "5",
+        transaction_log=transaction_log,
+    ) is False
+    assert checks == ["jwt", "jwt", "jwt"]
+    assert transaction_log["verification"]["confirmed"] is False
+    assert len(transaction_log["verification"]["attempts"]) == 3
+
+
 def test_set_auto_book_ensures_release_day_9am_is_present_and_sorted(monkeypatch):
     import booking_agent as booking_agent_mod
 
@@ -465,10 +546,17 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
     monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None):
+        book_calls.append((slot_date.isoformat(), time_text, court))
+        transaction_log["payment"] = {"response": {"status": 200}}
+        transaction_log["verification"] = {"confirmed": court == "6"}
+        return court == "6"
+
     monkeypatch.setattr(
         scheduler_mod,
         "book_slot_api",
-        lambda jwt, slot_date, time_text, court: book_calls.append((slot_date.isoformat(), time_text, court)) or (court == "6"),
+        fake_book_slot,
     )
 
     scheduler_mod._run_release_probe_session()
@@ -482,6 +570,7 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
         entry.get("phase") == "burst"
         and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
         and entry.get("booking_attempts")
+        and entry["booking_attempts"][1]["transaction"]["verification"]["confirmed"] is True
         and entry.get("targets")
         for entry in saved_states[-1]["release_probe_log"]
     )

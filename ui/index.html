@@ -124,6 +124,49 @@
 
     /* ── Upcoming scans table ── */
     #upcoming-scans-table { margin-top: 20px; padding-bottom: 12px; }
+    #release-probe-log { margin-top: 20px; padding-bottom: 20px; max-width: 1200px; }
+    .probe-log-session {
+      margin-top: 8px;
+      border: 1px solid #dbe3ec;
+      border-radius: 8px;
+      background: #f8fafc;
+      overflow: hidden;
+    }
+    .probe-log-session > summary {
+      cursor: pointer;
+      padding: 9px 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #334155;
+    }
+    .probe-log-entry { padding: 0 12px 12px; font-size: 0.75rem; color: #475569; }
+    .probe-log-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 7px; }
+    .probe-log-result {
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #e2e8f0;
+      color: #475569;
+      font-size: 0.67rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .probe-log-result.booked { background: #dcfce7; color: #166534; }
+    .probe-log-result.failed, .probe-log-result.error { background: #fee2e2; color: #991b1b; }
+    .probe-attempt { margin-top: 8px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+    .probe-payload { margin-top: 6px; }
+    .probe-payload > summary { cursor: pointer; color: #2563eb; font-size: 0.7rem; }
+    .probe-payload pre {
+      overflow: auto;
+      max-height: 420px;
+      margin: 7px 0 0;
+      padding: 10px;
+      border-radius: 6px;
+      background: #0f172a;
+      color: #dbeafe;
+      font: 0.68rem/1.45 "SF Mono", "Fira Code", monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
 
     /* ── Grid + Telegram side-by-side ── */
     .grid-row {
@@ -136,15 +179,32 @@
       flex: 0 0 420px;
       width: 420px;
       align-self: flex-start;
-      overflow-x: auto;
-      overflow-y: auto;
-      max-height: min(320px, calc(100vh - 240px));
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
       padding-left: 18px;
       border-left: 1px solid #e5e7eb;
       margin-left: 18px;
       box-sizing: border-box;
     }
     #telegram-calls-table:empty { display: none; }
+    .tg-table-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+    }
+    .tg-table-wrap table {
+      min-width: 100%;
+      width: max-content;
+    }
+    .tg-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #fff;
+      box-shadow: 0 1px 0 #e5e7eb;
+    }
     .tg-table td { padding: 4px 8px 4px 0; white-space: nowrap; }
     .tg-table td.tg-tools, .tg-table td.tg-reply { white-space: normal; }
     .tg-table th { padding: 0 8px 4px 0; }
@@ -163,7 +223,7 @@
     }
     .tg-tool { display: inline-block; background: #ede9fe; color: #5b21b6; font-size: 0.67rem; border-radius: 3px; padding: 1px 4px; margin: 1px 2px 1px 0; white-space: nowrap; }
     .tg-preview { color: #6b7280; font-style: italic; font-size: 0.7rem; white-space: nowrap; }
-    #upcoming-scans-table .section-label {
+    #upcoming-scans-table .section-label, #release-probe-log .section-label {
       font-size: 0.70rem; font-weight: 600; color: #6b7280;
       text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
     }
@@ -742,6 +802,7 @@
       <div id="telegram-calls-table"></div>
     </div>
     <div id="upcoming-scans-table"></div>
+    <div id="release-probe-log"></div>
   </div>
 
   <!-- Log panel -->
@@ -981,6 +1042,7 @@ function initLogResizer() {
     if (!Number.isNaN(current)) setLogHeight(current);
     const currentWidth = parseInt(getComputedStyle(document.getElementById('log-panel')).getPropertyValue('--log-panel-width'), 10);
     if (!Number.isNaN(currentWidth)) setLogWidth(currentWidth);
+    syncTelegramCallsPanelHeight();
   });
 }
 
@@ -1145,7 +1207,7 @@ function isFocusedScanSlot(dateStr, timeStr) {
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {}, friend_reservations: [], friend_reservations_updated_at: null };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], release_probe_log: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {}, friend_reservations: [], friend_reservations_updated_at: null };
 let clickMode = 'watch';
 let toastTimer = null;
 let _logIdSeq = 0;
@@ -1156,7 +1218,7 @@ let _localScanRequestedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.3.0';
+const UI_VERSION = '1.3.1';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1651,6 +1713,70 @@ function formatScanTargetLines(targets) {
   return out.join('');
 }
 
+function renderReleaseProbeLog() {
+  const container = document.getElementById('release-probe-log');
+  if (!container) return;
+  const entries = (appState.release_probe_log || []).slice().reverse().slice(0, 100);
+  if (!entries.length) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const sessions = new Map();
+  for (const entry of entries) {
+    const sessionDate = entry.ts
+      ? new Date(entry.ts).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+      : 'Unknown session';
+    if (!sessions.has(sessionDate)) sessions.set(sessionDate, []);
+    sessions.get(sessionDate).push(entry);
+  }
+
+  const sessionHtml = [...sessions.entries()].map(([sessionDate, sessionEntries], sessionIndex) => {
+    const entryHtml = sessionEntries.map(entry => {
+      const result = String(entry.result || 'unknown');
+      const resultClass = ['booked', 'failed', 'error'].includes(result) ? result : '';
+      const attempts = Array.isArray(entry.booking_attempts) ? entry.booking_attempts : [];
+      const attemptsHtml = attempts.map(attempt => {
+        const transaction = attempt.transaction || {};
+        const attemptResult = String(attempt.result || 'unknown');
+        const attemptClass = ['booked', 'failed', 'error'].includes(attemptResult) ? attemptResult : '';
+        const payloadHtml = Object.keys(transaction).length
+          ? `<details class="probe-payload"><summary>Request, response, and verification payload</summary><pre>${escHtml(JSON.stringify(transaction, null, 2))}</pre></details>`
+          : '';
+        return `<div class="probe-attempt">
+          <strong>Attempt ${escHtml(attempt.attempt || '?')}: Court ${escHtml(attempt.court || '?')}</strong>
+          <span class="probe-log-result ${attemptClass}">${escHtml(attemptResult)}</span>
+          ${attempt.error ? `<div>${escHtml(attempt.error)}</div>` : ''}
+          ${payloadHtml}
+        </div>`;
+      }).join('');
+      const booked = Array.isArray(entry.booked) && entry.booked.length
+        ? `<div><strong>Booked:</strong> ${escHtml(entry.booked.join(', '))}</div>`
+        : '';
+      const targets = Array.isArray(entry.targets) && entry.targets.length
+        ? `<div><strong>Observed:</strong> ${formatScanTargetLines(entry.targets)}</div>`
+        : '';
+      return `<div class="probe-log-entry">
+        <div class="probe-log-meta">
+          <strong>${escHtml(entry.ts ? fmtScanTime(entry.ts) : 'Unknown time')}</strong>
+          <span>${escHtml(entry.phase || 'probe')}</span>
+          <span class="probe-log-result ${resultClass}">${escHtml(result)}</span>
+        </div>
+        ${booked}${targets}
+        ${entry.error ? `<div><strong>Error:</strong> ${escHtml(entry.error)}</div>` : ''}
+        ${attemptsHtml}
+      </div>`;
+    }).join('');
+    const bookedCount = sessionEntries.filter(entry => entry.result === 'booked').length;
+    return `<details class="probe-log-session" ${sessionIndex === 0 ? 'open' : ''}>
+      <summary>${escHtml(sessionDate)}: ${sessionEntries.length} probe entries, ${bookedCount} booked</summary>
+      ${entryHtml}
+    </details>`;
+  }).join('');
+
+  container.innerHTML = `<div class="section-label">8 AM Release Probe Details</div>${sessionHtml}`;
+}
+
 function scanBadgeClass(kind, status = 'completed') {
   if (status === 'failed') return 'failed';
   return kind === 'probe' ? 'probe' : kind === 'ad_hoc' ? 'ad_hoc' : 'scheduled';
@@ -1809,7 +1935,11 @@ function renderTelegramCalls() {
   const container = document.getElementById('telegram-calls-table');
   if (!container) return;
   const calls = (appState.telegram_call_history || []);
-  if (!calls.length) { container.innerHTML = ''; return; }
+  if (!calls.length) {
+    container.innerHTML = '';
+    syncTelegramCallsPanelHeight();
+    return;
+  }
 
   // Totals
   const totalIn    = calls.reduce((s, c) => s + (c.input_tokens || 0), 0);
@@ -1868,14 +1998,29 @@ function renderTelegramCalls() {
 
   container.innerHTML =
     `<div class="section-label" style="margin-top:0;margin-bottom:6px;">Telegram Bot Usage</div>` +
+    `<div class="tg-table-wrap">` +
     `<table class="scans-table tg-table">` +
     `<thead><tr><th>Time</th><th>In</th><th>Cache</th><th>Out</th><th>$</th><th>Tools</th></tr></thead>` +
-    `<tbody>${rows}${totalsRow}</tbody></table>`;
+    `<tbody>${rows}${totalsRow}</tbody></table>` +
+    `</div>`;
+  syncTelegramCallsPanelHeight();
 }
 
 function updateNextScanDisplay() {
   renderUpcomingScans();
   renderTelegramCalls();
+  renderReleaseProbeLog();
+}
+
+function syncTelegramCallsPanelHeight() {
+  const panel = document.getElementById('telegram-calls-table');
+  const grid = document.getElementById('grid');
+  if (!panel) return;
+  if (!grid || !grid.childElementCount) {
+    panel.style.height = '';
+    return;
+  }
+  panel.style.height = Math.ceil(grid.getBoundingClientRect().height) + 'px';
 }
 
 // ── Booking failure banner ────────────────────────────────────────────────────
@@ -1911,6 +2056,7 @@ function _applyStateData(data) {
   appState.last_scan_started_at = appState.last_scan_started_at || null;
   if (!appState.last_scan_kind) appState.last_scan_kind = null;
   appState.recent_scan_history = Array.isArray(appState.recent_scan_history) ? appState.recent_scan_history : [];
+  appState.release_probe_log = Array.isArray(appState.release_probe_log) ? appState.release_probe_log : [];
   appState.telegram_call_history = Array.isArray(appState.telegram_call_history) ? appState.telegram_call_history : [];
   appState.queued_scheduled_probe_at = appState.queued_scheduled_probe_at || null;
   appState.court_nums = [...appState.court_nums].sort((a, b) => parseInt(a) - parseInt(b));
@@ -2127,6 +2273,7 @@ function renderGrid() {
       }
     }
   }
+  syncTelegramCallsPanelHeight();
 }
 
 function cellClass(slot, dateStr) {
