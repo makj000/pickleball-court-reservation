@@ -4,7 +4,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 from config import (
-    PT, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
+    COURT_PREFERENCE, PT, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
     _RELEASE_BURST_UNTIL_S, _RELEASE_END_S, _RELEASE_POST_INTERVAL_S, _RELEASE_PRE_INTERVAL_S,
 )
 from state import (
@@ -14,7 +14,7 @@ from state import (
     _utc_now_iso, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
-from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, book_slot_api, sync_rec_my_reservations
+from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, _stripe_confirm_payment_intent, book_slot_api, sync_rec_my_reservations
 from scanner import _api_scan, _api_fetch_availability
 from booking import _apply_booked_slots, _notify_booked_slots
 
@@ -545,7 +545,7 @@ def _run_release_probe_session() -> None:
         (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
     )
     burst_done = False
-    blind_booking_order = ["5", "6", "4"]
+    blind_booking_order = list(COURT_PREFERENCE)
 
     state = load_state()
     try:
@@ -604,33 +604,38 @@ def _run_release_probe_session() -> None:
             pass
 
         booked: list[dict] = []
-        for attempt, court in enumerate(blind_booking_order, start=1):
-            transaction_log: dict = {}
-            attempt_log = {
-                "attempt": attempt,
-                "court": court,
-                "result": "trying",
-                "transaction": transaction_log,
-            }
-            booking_attempts.append(attempt_log)
-            try:
-                ok = book_slot_api(
-                    jwt,
-                    new_day,
-                    target_time,
-                    court,
-                    transaction_log=transaction_log,
-                )
-            except Exception as exc:
-                attempt_log["result"] = "error"
-                attempt_log["error"] = str(exc)
-                print(f"  Blind booking error {target_date} {target_time} Court {court} (attempt {attempt}/3): {exc}")
-                ok = False
-            if ok:
-                attempt_log["result"] = "booked"
-                booked.append({"date": target_date, "time": target_time, "court": court})
+        for round_num in range(2):
+            if booked:
                 break
-            attempt_log.setdefault("result", "failed")
+            if round_num > 0:
+                print(f"  [burst] All courts failed on round 1, retrying immediately…")
+            for court in blind_booking_order:
+                transaction_log: dict = {}
+                attempt_log = {
+                    "round": round_num + 1,
+                    "court": court,
+                    "result": "trying",
+                    "transaction": transaction_log,
+                }
+                booking_attempts.append(attempt_log)
+                try:
+                    ok = book_slot_api(
+                        jwt,
+                        new_day,
+                        target_time,
+                        court,
+                        transaction_log=transaction_log,
+                    )
+                except Exception as exc:
+                    attempt_log["result"] = "error"
+                    attempt_log["error"] = str(exc)
+                    print(f"  Blind booking error {target_date} {target_time} Court {court} (round {round_num + 1}): {exc}")
+                    ok = False
+                if ok:
+                    attempt_log["result"] = "booked"
+                    booked.append({"date": target_date, "time": target_time, "court": court})
+                    break
+                attempt_log.setdefault("result", "failed")
 
         state_after = load_state()
         if booked:
@@ -666,7 +671,7 @@ def _run_release_probe_session() -> None:
             })
             return booked
 
-        failure_msg = f"❌ Failed to book {target_date} {target_time} after {len(blind_booking_order)} attempts"
+        failure_msg = f"❌ Failed to book {target_date} {target_time} after {len(blind_booking_order) * 2} attempts (2 rounds)"
         try:
             send_telegram(failure_msg)
         except Exception:
@@ -676,7 +681,7 @@ def _run_release_probe_session() -> None:
             "failed_at": _utc_now_iso(),
             "date": target_date,
             "time": target_time,
-            "error": f"Failed after {len(blind_booking_order)} attempts",
+            "error": f"Failed after {len(blind_booking_order) * 2} attempts (2 rounds)",
             "attempts": booking_attempts,
         }
         failures.insert(0, failure)
@@ -783,6 +788,24 @@ def _run_release_probe_session() -> None:
             if delay_seconds > 0:
                 _time.sleep(delay_seconds)
             _blind_book_release_target()
+            # Post-burst: probe every 15s until 8:02 AM, targeting only 9:00 AM
+            nine_am_only: dict[str, list[str]] = {new_day.isoformat(): ["9:00 AM"]}
+            while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
+                if _burst_slot_already_reserved(new_day.isoformat(), "9:00 AM"):
+                    break
+                t0 = _time.monotonic()
+                _one_probe("post", targets_override=nine_am_only)
+                elapsed = _time.monotonic() - t0
+                _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
+            # Queue late relay (~8:15 AM) only if slot still not reserved
+            if not _burst_slot_already_reserved(new_day.isoformat(), "9:00 AM"):
+                late_relay_queued = bool(_enqueue_work(
+                    "weekend_late_relay",
+                    {"date": new_day.isoformat(), "time": "9:00 AM"},
+                    delay_seconds=780,  # fires ~13 min later → ~8:15 AM
+                ))
+                if late_relay_queued:
+                    print(f"Queued weekend_late_relay for {new_day.isoformat()} 9:00 AM (~8:15 AM).")
             return
 
         while True:
@@ -832,6 +855,112 @@ def _run_release_probe_session() -> None:
             send_telegram(_format_probe_session_summary(probe_log, PT))
         except Exception as exc:
             print(f"Failed to send probe session summary: {exc}")
+
+
+def _run_weekend_payment_check(target_date: str, target_time: str) -> None:
+    """~8:15 AM: retry Stripe confirm for any pending PIs from today's burst that weren't confirmed."""
+    state = load_state()
+    if any(
+        r.get("date") == target_date and r.get("time") == target_time
+        for r in (state.get("my_reservations") or [])
+    ):
+        print(f"Payment check: {target_date} {target_time} already confirmed. Skipping.")
+        return
+    print(f"Payment check: scanning failure log for unconfirmed Stripe PIs ({target_date} {target_time})…")
+    found = False
+    for failure in (state.get("auto_book_failures") or []):
+        if failure.get("date") != target_date or failure.get("time") != target_time:
+            continue
+        for attempt in (failure.get("attempts") or []):
+            txn = attempt.get("transaction") or {}
+            pay_resp = (txn.get("payment") or {}).get("response") or {}
+            if pay_resp.get("status") != 200:
+                continue
+            sc = txn.get("stripe_confirm") or {}
+            if sc.get("status") == 200 and (sc.get("body") or {}).get("status") == "succeeded":
+                continue  # already confirmed
+            body = pay_resp.get("body") or {}
+            stripe_payments = (body.get("included") or {}).get("payments") or []
+            if not stripe_payments:
+                continue
+            gd = (stripe_payments[0].get("gatewayData") or {})
+            pi_id = gd.get("paymentIntentId")
+            cs    = gd.get("clientSecret")
+            pms   = gd.get("paymentMethods") or []
+            pm_id = pms[0].get("id") if pms else None
+            if not (pi_id and cs and pm_id):
+                continue
+            found = True
+            print(f"  Retrying Stripe confirm for PI {pi_id[:28]}…")
+            s, result = _stripe_confirm_payment_intent(pi_id, cs, pm_id)
+            print(f"  Stripe confirm retry [{s}]: status={result.get('status')}")
+    if not found:
+        print("  No unconfirmed pending payments found.")
+
+
+def _run_weekend_late_relay(target_date: str, target_time: str) -> None:
+    """~8:15 AM: run payment check, then queue the 8:30-8:40 late probe session."""
+    _run_weekend_payment_check(target_date, target_time)
+    state = load_state()
+    if any(
+        r.get("date") == target_date and r.get("time") == target_time
+        for r in (state.get("my_reservations") or [])
+    ):
+        print(f"Late relay: {target_date} {target_time} already reserved. Skipping late probes.")
+        return
+    late_probes_queued = bool(_enqueue_work(
+        "weekend_late_probes",
+        {"date": target_date, "time": target_time},
+        delay_seconds=900,  # 15 min → fires ~8:30 AM
+    ))
+    if late_probes_queued:
+        print(f"Queued weekend_late_probes for {target_date} {target_time} (~8:30 AM).")
+
+
+def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
+    """~8:30 AM: probe every 60s for 10 minutes to catch reservation expirations."""
+    import time as _time
+    state = load_state()
+    if any(
+        r.get("date") == target_date and r.get("time") == target_time
+        for r in (state.get("my_reservations") or [])
+    ):
+        print(f"Late probes: {target_date} {target_time} already reserved. Skipping.")
+        return
+    try:
+        jwt = _get_cached_jwt(state) or _firebase_login()
+    except Exception as exc:
+        print(f"Late probes: login failed: {exc}")
+        return
+    targets = {target_date: [target_time]}
+    for probe_num in range(10):
+        state = load_state()
+        if any(
+            r.get("date") == target_date and r.get("time") == target_time
+            for r in (state.get("my_reservations") or [])
+        ):
+            print(f"Late probe {probe_num + 1}: {target_date} {target_time} now reserved. Done.")
+            return
+        auto_book_slots = state.get("auto_book_slots") or []
+        print(f"  [late probe {probe_num + 1}/10] scanning {target_date} {target_time}…")
+        try:
+            _, booked = _api_scan(
+                target_times_by_date=targets,
+                auto_book_slots=auto_book_slots,
+                jwt=jwt,
+            )
+            if booked:
+                print(f"  [late probe {probe_num + 1}/10] Booked: {booked}")
+                state = load_state()
+                _apply_booked_slots(state, booked)
+                save_state(state)
+                _notify_booked_slots(booked)
+                return
+        except Exception as exc:
+            print(f"  [late probe {probe_num + 1}/10] Error: {exc}")
+        if probe_num < 9:
+            _time.sleep(60)
+    print(f"Late probes complete: {target_date} {target_time} not booked after 10 probes.")
 
 
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
@@ -884,6 +1013,16 @@ def _run_queue_work(message: dict) -> None:
     elif kind == "calendar_event":
         from calendar_sync import handle_calendar_event_work
         handle_calendar_event_work(message.get("slot") or {})
+    elif kind == "weekend_late_relay":
+        _run_weekend_late_relay(
+            str(message.get("date") or ""),
+            str(message.get("time") or ""),
+        )
+    elif kind == "weekend_late_probes":
+        _run_weekend_late_probes(
+            str(message.get("date") or ""),
+            str(message.get("time") or ""),
+        )
     else:
         print(f"Ignoring unknown queue work kind: {kind}")
 
