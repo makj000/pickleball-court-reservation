@@ -75,8 +75,10 @@ COURT_SPORT_IDS: dict[str, str] = {
     "4": "d3bfa8f9-03f4-4c80-ac27-fbb4dbfb9a15",
     "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
 }
-PARTICIPANT_USER_ID  = os.environ.get("PARTICIPANT_USER_ID", "")
-FIREBASE_API_KEY     = os.environ.get("FIREBASE_API_KEY", "")
+PARTICIPANT_USER_ID   = os.environ.get("PARTICIPANT_USER_ID", "")
+FIREBASE_API_KEY      = os.environ.get("FIREBASE_API_KEY", "")
+# rec.us's Stripe publishable key (embedded in their frontend JS — public)
+STRIPE_PUBLISHABLE_KEY = "pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB"
 FIREBASE_SIGN_IN_URL = (
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
     f"?key={FIREBASE_API_KEY}"

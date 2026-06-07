@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 
 from config import (
     COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, FIREBASE_SIGN_IN_URL, PASSWORD,
-    PARTICIPANT_USER_ID, SLOT_TIMES, _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
+    PARTICIPANT_USER_ID, SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
+    _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
 )
 from state import _normalize_court_number, _normalize_slot_records, _utc_now_iso
 
@@ -214,6 +215,36 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     return True
 
 
+def _stripe_confirm_payment_intent(pi_id: str, client_secret: str, pm_id: str) -> tuple[int, dict]:
+    """Confirm a Stripe PaymentIntent using rec.us's publishable key (mirrors Stripe.js flow)."""
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    body = urlencode({
+        "client_secret": client_secret,
+        "payment_method": pm_id,
+        "return_url": "https://www.rec.us/foster-city",
+    }).encode()
+    req = Request(
+        f"https://api.stripe.com/v1/payment_intents/{pi_id}/confirm",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {STRIPE_PUBLISHABLE_KEY}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except HTTPError as e:
+        raw = e.read() or b""
+        try:
+            body_r: dict = json.loads(raw) if raw else {}
+        except Exception:
+            body_r = {"raw": raw.decode(errors="replace")[:500]}
+        return e.code, body_r
+
+
 def book_slot_api(
     jwt: str,
     target_date: date,
@@ -300,6 +331,23 @@ def book_slot_api(
         "response": {"status": s2, "body": result},
     }
     if s2 == 200:
+        # If payment is pending, confirm the Stripe PaymentIntent immediately —
+        # rec.us cancels it within ~5 s if it isn't confirmed client-side.
+        data_obj = result.get("data") or {}
+        included_obj = result.get("included") or {}
+        stripe_payments = (included_obj.get("payments") or [])
+        if data_obj.get("status") == "pending" and stripe_payments:
+            gd = (stripe_payments[0].get("gatewayData") or {})
+            pi_id  = gd.get("paymentIntentId")
+            cs     = gd.get("clientSecret")
+            pms    = gd.get("paymentMethods") or []
+            pm_id_stripe = pms[0].get("id") if pms else None
+            if pi_id and cs and pm_id_stripe and STRIPE_PUBLISHABLE_KEY:
+                print(f"  Confirming Stripe PI {pi_id[:28]}…")
+                s_stripe, stripe_body = _stripe_confirm_payment_intent(pi_id, cs, pm_id_stripe)
+                print(f"  Stripe confirm [{s_stripe}]: status={stripe_body.get('status')}")
+                transaction_log["stripe_confirm"] = {"status": s_stripe, "body": stripe_body}
+
         expected = {"date": date_str, "time": time_text, "court": court}
         verification = {"expected": expected, "attempts": [], "confirmed": False}
         transaction_log["verification"] = verification
@@ -327,7 +375,7 @@ def book_slot_api(
                 time.sleep(1)
         print(
             f"  Payment returned 200 but reservation was not confirmed: "
-            f"{json.dumps(result)[:500]}"
+            f"{json.dumps(result)}"
         )
         return False
 

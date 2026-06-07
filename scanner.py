@@ -198,42 +198,44 @@ def _api_scan(
         except Exception:
             pass
         booked_court: str | None = None
+        all_attempts: list[dict] = []
         for attempt in range(1, 6):
             for court in COURT_PREFERENCE:
                 if court_avail.get(court) is not True:
                     continue
+                transaction_log: dict = {}
+                slot_attempt = {"attempt": attempt, "court": court, "result": "trying"}
+                all_attempts.append(slot_attempt)
                 if slot_log is not None:
-                    slot_attempt = {"attempt": attempt, "court": court, "result": "trying"}
                     slot_log["attempts"].append(slot_attempt)
                 try:
-                    ok = book_slot_api(jwt, date.fromisoformat(date_str), time_text, court)
+                    ok = book_slot_api(jwt, date.fromisoformat(date_str), time_text, court, transaction_log=transaction_log)
                 except Exception as exc:
                     print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
-                    if slot_log is not None:
-                        slot_attempt["result"] = "error"
-                        slot_attempt["error"] = str(exc)
+                    slot_attempt["result"] = "error"
+                    slot_attempt["error"] = str(exc)
                     ok = False
+                slot_attempt["transaction"] = transaction_log
                 if ok:
                     booked_court = court
-                    if slot_log is not None:
-                        slot_attempt["result"] = "booked"
+                    slot_attempt["result"] = "booked"
                     break
-                if slot_log is not None and slot_attempt["result"] == "trying":
+                if slot_attempt["result"] == "trying":
                     slot_attempt["result"] = "failed"
             if booked_court:
                 break
             if attempt < 5:
                 print(f"  All courts failed (attempt {attempt}/5), retrying…")
+                retry_entry = {"attempt": attempt, "result": "retrying"}
+                all_attempts.append(retry_entry)
                 if slot_log is not None:
-                    slot_log["attempts"].append({"attempt": attempt, "result": "retrying"})
+                    slot_log["attempts"].append(retry_entry)
         if booked_court:
             booked.append({"date": date_str, "time": time_text, "court": booked_court})
             if date_str in new_avail and time_text in new_avail[date_str]:
                 new_avail[date_str][time_text][booked_court] = False
             log = list(state_obj.get("app_booking_log") or [])
-            entry = {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court}
-            if slot_log is not None:
-                entry["attempts"] = slot_log["attempts"]
+            entry = {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court, "attempts": all_attempts}
             log.insert(0, entry)
             state_obj["app_booking_log"] = log
             save_state(state_obj)
@@ -242,9 +244,7 @@ def _api_scan(
                 slot_log["court"] = booked_court
         else:
             failures = list(state_obj.get("auto_book_failures") or [])
-            failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts"}
-            if slot_log is not None:
-                failure["attempts"] = slot_log["attempts"]
+            failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts", "attempts": all_attempts}
             failures.insert(0, failure)
             state_obj["auto_book_failures"] = failures
             save_state(state_obj)
