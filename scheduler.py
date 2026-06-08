@@ -535,6 +535,10 @@ def _run_release_probe_session() -> None:
     import time as _time
 
     now_pt = datetime.now(tz=PT)
+    if now_pt.weekday() < 5:
+        print("Skipping release probe session: weekday.")
+        return
+
     eight_am = now_pt.replace(hour=8, minute=0, second=0, microsecond=0)
 
     new_day = now_pt.date() + timedelta(days=14)
