@@ -195,6 +195,25 @@ def _send_prep_failure(reason: str, retry_at: str | None) -> None:
     send_telegram("\n".join(lines))
 
 
+def _weekday_report_text(state: dict, now_pt: datetime) -> str:
+    booked_today = []
+    for entry in state.get("app_booking_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            booked_at = datetime.fromisoformat(str(entry.get("booked_at", "")).replace("Z", "+00:00"))
+            if booked_at.astimezone(PT).date() != now_pt.date():
+                continue
+        except (TypeError, ValueError):
+            continue
+        booked_today.append(
+            f"Court {entry.get('court', '?')} {entry.get('date', '?')} {entry.get('time', '?')}"
+        )
+    if not booked_today:
+        return "Nothing booked."
+    return f"Booked: {'; '.join(booked_today)}."
+
+
 def _run_tool(name: str, args: dict) -> dict:
     if name == "get_context":
         return _get_context()
@@ -256,6 +275,21 @@ When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
     """Run prep or report phase. Called from monitor.handler."""
+    now_pt = datetime.now(tz=PT)
+    if phase == "report" and now_pt.weekday() < 5:
+        report_text = _weekday_report_text(load_state(), now_pt)
+        send_telegram(report_text)
+        if REPORT_EMAIL:
+            try:
+                send_report_email(
+                    f"Pickleball {now_pt.strftime('%Y-%m-%d')} 8:30 AM probe report",
+                    report_text,
+                )
+            except Exception as exc:
+                print(f"Booking agent ({phase}) report email failed: {exc}")
+        print(f"Booking agent ({phase}): weekday summary sent.")
+        return True
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
         if phase == "prep":
@@ -268,7 +302,7 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
 
     client = anthropic.Anthropic()
     system = _PREP_SYSTEM if phase == "prep" else _REPORT_SYSTEM
-    now_str = datetime.now(tz=PT).strftime("%Y-%m-%d %H:%M %Z")
+    now_str = now_pt.strftime("%Y-%m-%d %H:%M %Z")
 
     messages: list[dict] = [
         {"role": "user", "content": f"Run the {phase} phase. Current time: {now_str}."}

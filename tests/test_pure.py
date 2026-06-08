@@ -122,11 +122,11 @@ def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
     monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
     normalized = state_mod._normalize_state({
         "auto_book_slots": [
-            {"date": "2026-06-07", "time": "9:00 AM"},
-            {"date": "2026-06-07", "time": "10:00 AM"},
+            {"date": "2026-06-14", "time": "9:00 AM"},
+            {"date": "2026-06-14", "time": "10:00 AM"},
         ]
     })
-    assert normalized["auto_book_slots"] == [{"date": "2026-06-07", "time": "10:00 AM"}]
+    assert normalized["auto_book_slots"] == [{"date": "2026-06-14", "time": "10:00 AM"}]
 
 
 def test_normalize_state_preserves_release_probe_fields():
@@ -309,9 +309,13 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
     monkeypatch.setattr(scanner_mod, "save_state", fake_save_state)
     monkeypatch.setattr(scanner_mod, "_api_fetch_availability", fake_fetch_availability)
     monkeypatch.setattr(scanner_mod, "_recent_booking_count", lambda state: 0)
-    monkeypatch.setattr(scanner_mod, "book_slot_api", lambda jwt, slot_date, time_text, court: booked_calls.append(
-        (slot_date.isoformat(), time_text, court)
-    ) or True)
+    monkeypatch.setattr(
+        scanner_mod,
+        "book_slot_api",
+        lambda jwt, slot_date, time_text, court, transaction_log=None: booked_calls.append(
+            (slot_date.isoformat(), time_text, court)
+        ) or True,
+    )
     monkeypatch.setattr(scanner_mod, "send_telegram", lambda msg: None)
 
     new_avail, booked = scanner_mod._api_scan(
@@ -551,6 +555,12 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
         book_calls.append((slot_date.isoformat(), time_text, court))
         transaction_log["payment"] = {"response": {"status": 200}}
         transaction_log["verification"] = {"confirmed": court == "6"}
+        if court == "6":
+            state["my_reservations"].append({
+                "date": slot_date.isoformat(),
+                "time": time_text,
+                "court": court,
+            })
         return court == "6"
 
     monkeypatch.setattr(
@@ -561,18 +571,96 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
 
     scheduler_mod._run_release_probe_session()
 
-    assert book_calls == [
-        ("2026-06-13", "9:00 AM", "5"),
-        ("2026-06-13", "9:00 AM", "6"),
-    ]
+    assert book_calls == [("2026-06-13", "9:00 AM", "6")]
     assert saved_states[-1]["last_release_probe_session"] is not None
     assert any(
         entry.get("phase") == "burst"
         and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
         and entry.get("booking_attempts")
-        and entry["booking_attempts"][1]["transaction"]["verification"]["confirmed"] is True
+        and entry["booking_attempts"][0]["transaction"]["verification"]["confirmed"] is True
         and entry.get("targets")
         for entry in saved_states[-1]["release_probe_log"]
+    )
+
+
+def test_release_probe_session_skips_weekday_before_login(monkeypatch):
+    import scheduler as scheduler_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 6, 8, 7, 58, 0, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "load_state",
+        lambda: (_ for _ in ()).throw(AssertionError("state should not be loaded")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_firebase_login",
+        lambda: (_ for _ in ()).throw(AssertionError("login should not run")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod,
+        "send_telegram",
+        lambda text: (_ for _ in ()).throw(AssertionError("message should not be sent")),
+    )
+
+    scheduler_mod._run_release_probe_session()
+
+
+def test_booking_agent_weekday_report_is_short_and_skips_model(monkeypatch):
+    import booking_agent as booking_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 6, 8, 8, 30, 0, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    messages = []
+    monkeypatch.setattr(booking_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: {"app_booking_log": []})
+    monkeypatch.setattr(booking_agent_mod, "send_telegram", messages.append)
+    monkeypatch.setattr(
+        booking_agent_mod.anthropic,
+        "Anthropic",
+        lambda: (_ for _ in ()).throw(AssertionError("model should not run")),
+    )
+
+    assert booking_agent_mod.run_agent("report") is True
+    assert messages == ["Nothing booked."]
+
+
+def test_weekday_report_includes_booking_made_today():
+    import booking_agent as booking_agent_mod
+    from config import PT
+
+    now_pt = datetime(2026, 6, 8, 8, 30, 0, tzinfo=PT)
+    state = {
+        "app_booking_log": [
+            {
+                "booked_at": "2026-06-08T15:01:00+00:00",
+                "date": "2026-06-22",
+                "time": "9:00 AM",
+                "court": "6",
+            },
+            {
+                "booked_at": "2026-06-07T15:01:00+00:00",
+                "date": "2026-06-21",
+                "time": "9:00 AM",
+                "court": "4",
+            },
+        ]
+    }
+
+    assert booking_agent_mod._weekday_report_text(state, now_pt) == (
+        "Booked: Court 6 2026-06-22 9:00 AM."
     )
 
 
