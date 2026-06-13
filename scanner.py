@@ -157,7 +157,10 @@ def _api_scan(
                 pass
             raise
 
-    for date_str, time_text, court_avail in to_book:
+    i = 0
+    while i < len(to_book):
+        date_str, time_text, court_avail = to_book[i]
+        i += 1
         # Per-day cap: count existing reservations + already booked this session
         sessions_on_day = (
             sum(1 for r in (state_obj.get("my_reservations") or []) if r["date"] == date_str)
@@ -242,6 +245,11 @@ def _api_scan(
             if slot_log is not None:
                 slot_log["result"] = "booked"
                 slot_log["court"] = booked_court
+            # After a successful 9 AM booking on a weekend, also try 8 AM if available.
+            if time_text == "9:00 AM" and date.fromisoformat(date_str).weekday() >= 5:
+                eight_avail = new_avail.get(date_str, {}).get("8:00 AM", {})
+                if _preferred_open_court(eight_avail) is not None:
+                    to_book.insert(i, (date_str, "8:00 AM", eight_avail))
         else:
             failures = list(state_obj.get("auto_book_failures") or [])
             failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts", "attempts": all_attempts}
