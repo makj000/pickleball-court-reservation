@@ -110,15 +110,7 @@ def _set_auto_book(slots: list[dict]) -> dict:
     state = load_state()
     today_str = date.today().isoformat()
     new_day = date.today() + timedelta(days=14)
-    # Keep any existing slots for dates not in the new list, then add new ones
     new_dates = {s["date"] for s in slots}
-    if (
-        new_day.weekday() >= 5
-        and any(s.get("date") == new_day.isoformat() and s.get("time") == "8:00 AM" for s in slots)
-        and not any(s.get("date") == new_day.isoformat() and s.get("time") == "9:00 AM" for s in slots)
-    ):
-        slots = list(slots) + [{"date": new_day.isoformat(), "time": "9:00 AM"}]
-        new_dates = {s["date"] for s in slots}
     kept = [
         s for s in (state.get("auto_book_slots") or [])
         if s.get("date", "") >= today_str and s.get("date") not in new_dates
@@ -242,8 +234,8 @@ Your task:
 1. Call get_context.
 2. If the new day (14 days out) is a weekday: call done immediately. No message needed.
 3. Otherwise decide whether to queue a booking:
-   - Skip if there's already a reservation on that weekend (Sat or Sun) for both 8am and 9am.
-   - Target 9:00 AM first, then 8:00 AM only if you are keeping a backup.
+   - Skip if there's already a reservation for 9:00 AM on that date, or reservations for both 8:00 AM and 9:00 AM on that weekend (Sat or Sun).
+   - Queue 9:00 AM only. Do not add 8:00 AM — the system automatically attempts 8:00 AM right after a successful 9:00 AM booking.
 4. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
 5. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
 or why you're skipping). Only send if the new day is a weekend.
