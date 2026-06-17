@@ -270,6 +270,9 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
     now_pt = datetime.now(tz=PT)
     if phase == "report" and now_pt.weekday() < 5:
         report_text = _weekday_report_text(load_state(), now_pt)
+        if report_text == "Nothing booked.":
+            print(f"Booking agent ({phase}): weekday, nothing booked — skipping Telegram.")
+            return True
         send_telegram(report_text)
         if REPORT_EMAIL:
             try:
