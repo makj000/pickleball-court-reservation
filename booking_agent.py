@@ -285,6 +285,10 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
         print(f"Booking agent ({phase}): weekday summary sent.")
         return True
 
+    if phase == "prep" and now_pt.weekday() < 5:
+        print(f"Booking agent (prep): weekday — skipping.")
+        return True
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
         if phase == "prep":
