@@ -215,8 +215,8 @@ LAMBDA_ARN=$(aws lambda get-function \
 
 for RULE_NAME in booking-agent-prep booking-agent-report; do
   if [ "$RULE_NAME" = "booking-agent-prep" ]; then
-    # 7:30 AM PDT (UTC-7) = 14:30 UTC
-    CRON="cron(30 14 * * ? *)"
+    # 7:30 AM PDT (UTC-7) = 14:30 UTC, weekends only
+    CRON="cron(30 14 ? * SAT,SUN *)"
     PAYLOAD='{"_booking_agent":true,"phase":"prep"}'
   else
     # 8:30 AM PDT (UTC-7) = 15:30 UTC
