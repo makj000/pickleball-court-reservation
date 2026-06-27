@@ -122,11 +122,11 @@ def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
     monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
     normalized = state_mod._normalize_state({
         "auto_book_slots": [
-            {"date": "2026-06-14", "time": "9:00 AM"},
-            {"date": "2026-06-14", "time": "10:00 AM"},
+            {"date": "2026-07-14", "time": "9:00 AM"},
+            {"date": "2026-07-14", "time": "10:00 AM"},
         ]
     })
-    assert normalized["auto_book_slots"] == [{"date": "2026-06-14", "time": "10:00 AM"}]
+    assert normalized["auto_book_slots"] == [{"date": "2026-07-14", "time": "10:00 AM"}]
 
 
 def test_normalize_state_preserves_release_probe_fields():
@@ -249,6 +249,7 @@ def test_auto_book_priority_prefers_release_day_and_9am():
     items = [
         ("2026-06-13", "8:00 AM"),
         ("2026-06-13", "9:00 AM"),
+        ("2026-06-13", "10:00 AM"),
         ("2026-06-14", "9:00 AM"),
     ]
     result = sorted(
@@ -258,6 +259,7 @@ def test_auto_book_priority_prefers_release_day_and_9am():
     assert result == [
         ("2026-06-13", "9:00 AM"),
         ("2026-06-13", "8:00 AM"),
+        ("2026-06-13", "10:00 AM"),
         ("2026-06-14", "9:00 AM"),
     ]
 
@@ -292,14 +294,17 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
             "2026-06-13": {
                 "8:00 AM": {"6": True, "4": False, "5": False},
                 "9:00 AM": {"6": True, "4": False, "5": False},
+                "10:00 AM": {"6": True, "4": False, "5": False},
             },
             "2026-06-14": {
                 "8:00 AM": {"6": True, "4": False, "5": False},
                 "9:00 AM": {"6": True, "4": False, "5": False},
+                "10:00 AM": {"6": True, "4": False, "5": False},
             },
             "2026-06-15": {
                 "8:00 AM": {"6": True, "4": False, "5": False},
                 "9:00 AM": {"6": True, "4": False, "5": False},
+                "10:00 AM": {"6": True, "4": False, "5": False},
             },
         }
 
@@ -322,10 +327,13 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
         auto_book_slots=[
             {"date": "2026-06-13", "time": "8:00 AM"},
             {"date": "2026-06-13", "time": "9:00 AM"},
+            {"date": "2026-06-13", "time": "10:00 AM"},
             {"date": "2026-06-14", "time": "8:00 AM"},
             {"date": "2026-06-14", "time": "9:00 AM"},
+            {"date": "2026-06-14", "time": "10:00 AM"},
             {"date": "2026-06-15", "time": "8:00 AM"},
             {"date": "2026-06-15", "time": "9:00 AM"},
+            {"date": "2026-06-15", "time": "10:00 AM"},
         ],
         jwt="test-jwt",
     )
@@ -333,27 +341,217 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
     assert booked == [
         {"date": "2026-06-13", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-13", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-13", "time": "10:00 AM", "court": "6"},
         {"date": "2026-06-14", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-14", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-14", "time": "10:00 AM", "court": "6"},
         {"date": "2026-06-15", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-15", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-15", "time": "10:00 AM", "court": "6"},
     ]
     assert booked_calls == [
         ("2026-06-13", "9:00 AM", "6"),
         ("2026-06-13", "8:00 AM", "6"),
+        ("2026-06-13", "10:00 AM", "6"),
         ("2026-06-14", "9:00 AM", "6"),
         ("2026-06-14", "8:00 AM", "6"),
+        ("2026-06-14", "10:00 AM", "6"),
         ("2026-06-15", "9:00 AM", "6"),
         ("2026-06-15", "8:00 AM", "6"),
+        ("2026-06-15", "10:00 AM", "6"),
     ]
     assert [entry["app_booking_log"][0] for entry in saved_states] == [
         {"date": "2026-06-13", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-13", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-13", "time": "10:00 AM", "court": "6"},
         {"date": "2026-06-14", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-14", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-14", "time": "10:00 AM", "court": "6"},
         {"date": "2026-06-15", "time": "9:00 AM", "court": "6"},
         {"date": "2026-06-15", "time": "8:00 AM", "court": "6"},
+        {"date": "2026-06-15", "time": "10:00 AM", "court": "6"},
     ]
+
+
+def test_weekend_auto_book_uses_two_accounts_for_saturday_targets(monkeypatch):
+    import copy
+    import scanner as scanner_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 30)
+
+    state = {"my_reservations": [], "app_booking_log": [], "auto_book_failures": []}
+    saved_states = []
+    booked_calls = []
+
+    def fake_save_state(value):
+        saved_states.append(copy.deepcopy(value))
+
+    monkeypatch.setattr(scanner_mod, "date", FixedDate)
+    monkeypatch.setattr(scanner_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scanner_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scanner_mod, "_recent_booking_count", lambda state: 0)
+    monkeypatch.setattr(
+        scanner_mod,
+        "_api_fetch_availability",
+        lambda target_times_by_date=None: {
+            "2026-06-13": {
+                "9:00 AM": {"6": True, "4": True, "5": True},
+                "10:00 AM": {"6": True, "4": True, "5": True},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        scanner_mod,
+        "_rec_booking_sessions",
+        lambda state: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+        ],
+    )
+    monkeypatch.setattr(scanner_mod, "send_telegram", lambda msg: None)
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        booked_calls.append((jwt, participant_user_id, slot_date.isoformat(), time_text, court))
+        return True
+
+    monkeypatch.setattr(scanner_mod, "book_slot_api", fake_book_slot)
+
+    _, booked = scanner_mod._api_scan(
+        auto_book_slots=[
+            {"date": "2026-06-13", "time": "9:00 AM"},
+            {"date": "2026-06-13", "time": "10:00 AM"},
+        ],
+    )
+
+    assert booked == [
+        {"date": "2026-06-13", "time": "9:00 AM", "court": "6", "account_index": 1},
+        {"date": "2026-06-13", "time": "9:00 AM", "court": "5", "account_index": 2},
+        {"date": "2026-06-13", "time": "10:00 AM", "court": "6", "account_index": 1},
+        {"date": "2026-06-13", "time": "10:00 AM", "court": "5", "account_index": 2},
+    ]
+    assert booked_calls == [
+        ("jwt-1", "user-1", "2026-06-13", "9:00 AM", "6"),
+        ("jwt-2", "user-2", "2026-06-13", "9:00 AM", "5"),
+        ("jwt-1", "user-1", "2026-06-13", "10:00 AM", "6"),
+        ("jwt-2", "user-2", "2026-06-13", "10:00 AM", "5"),
+    ]
+    assert len(saved_states[-1]["app_booking_log"]) == 4
+
+
+def test_release_probe_post_scan_does_not_require_single_jwt(monkeypatch):
+    import copy
+    import scheduler as scheduler_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            if cls.calls <= 2:
+                value = datetime(2026, 5, 30, 8, 0, 0, tzinfo=PT)
+            else:
+                value = datetime(2026, 5, 30, 8, 2, 1, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {
+        "my_reservations": [],
+        "auto_book_slots": [{"date": "2026-06-13", "time": "9:00 AM"}],
+        "release_probe_log": [],
+        "app_booking_log": [],
+    }
+    api_scan_calls = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+
+    monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+        ],
+    )
+    monkeypatch.setattr(scheduler_mod, "book_slot_api", lambda *args, **kwargs: False)
+    monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
+    monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
+    monkeypatch.setattr(scheduler_mod, "_enqueue_work", lambda *args, **kwargs: False)
+    monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
+    monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
+
+    def fake_api_scan(*args, **kwargs):
+        api_scan_calls.append(kwargs)
+        return ({"2026-06-13": {"9:00 AM": {"6": False, "4": False, "5": False}}}, [])
+
+    monkeypatch.setattr(scheduler_mod, "_api_scan", fake_api_scan)
+
+    scheduler_mod._run_release_probe_session()
+
+    assert api_scan_calls
+    assert all("jwt" not in call for call in api_scan_calls)
+
+
+def test_one_off_probe_blind_books_exact_target(monkeypatch):
+    import copy
+    import scheduler as scheduler_mod
+
+    state = {
+        "availability": {},
+        "recent_scan_history": [],
+        "my_reservations": [],
+        "auto_book_slots": [],
+        "app_booking_log": [],
+    }
+    book_calls = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_api_scan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-off should not scan")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+        ],
+    )
+    monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
+    monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
+    monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
+
+    def fake_book_slot(jwt, target_day, target_time, court, transaction_log=None, participant_user_id=None):
+        book_calls.append((jwt, participant_user_id, target_day.isoformat(), target_time, court))
+        return True
+
+    monkeypatch.setattr(scheduler_mod, "book_slot_api", fake_book_slot)
+
+    scheduler_mod._run_one_off_probe("2026-07-10", "9:00 AM", max_bookings=2, courts=["6", "5"])
+
+    assert book_calls == [
+        ("jwt-1", "user-1", "2026-07-10", "9:00 AM", "6"),
+        ("jwt-2", "user-2", "2026-07-10", "9:00 AM", "5"),
+    ]
+    assert state["last_scan_kind"] == "one_off_probe"
+    assert len(state["app_booking_log"]) == 2
 
 
 def test_book_slot_api_confirms_reservation_after_payment(monkeypatch):
@@ -437,7 +635,7 @@ def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     assert len(transaction_log["verification"]["attempts"]) == 3
 
 
-def test_set_auto_book_ensures_release_day_9am_is_present_and_sorted(monkeypatch):
+def test_set_auto_book_uses_saturday_release_targets(monkeypatch):
     import booking_agent as booking_agent_mod
 
     class FixedDate(date):
@@ -459,7 +657,33 @@ def test_set_auto_book_ensures_release_day_9am_is_present_and_sorted(monkeypatch
     assert result["ok"] is True
     assert result["auto_book_slots"] == [
         {"date": "2026-06-13", "time": "9:00 AM"},
-        {"date": "2026-06-13", "time": "8:00 AM"},
+        {"date": "2026-06-13", "time": "10:00 AM"},
+    ]
+
+
+def test_set_auto_book_uses_sunday_release_targets(monkeypatch):
+    import booking_agent as booking_agent_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 31)
+
+    state = {"auto_book_slots": []}
+    saved_states = []
+
+    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(booking_agent_mod, "save_state", lambda value: saved_states.append(value.copy()))
+
+    result = booking_agent_mod._set_auto_book([
+        {"date": "2026-06-14", "time": "10:00 AM"},
+    ])
+
+    assert result["ok"] is True
+    assert result["auto_book_slots"] == [
+        {"date": "2026-06-14", "time": "8:00 AM"},
+        {"date": "2026-06-14", "time": "9:00 AM"},
     ]
 
 
@@ -518,9 +742,15 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     from config import PT
 
     class FixedDateTime(datetime):
+        calls = 0
+
         @classmethod
         def now(cls, tz=None):
-            value = datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT)
+            cls.calls += 1
+            if cls.calls <= 2:
+                value = datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT)
+            else:
+                value = datetime(2026, 5, 30, 8, 2, 1, tzinfo=PT)
             return value.astimezone(tz) if tz is not None else value
 
     state = {
@@ -543,6 +773,14 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
     monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
     monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+        ],
+    )
     monkeypatch.setattr(scheduler_mod, "_get_cached_jwt", lambda value: "jwt")
     monkeypatch.setattr(scheduler_mod, "_firebase_login", lambda: (_ for _ in ()).throw(AssertionError("login should not run")))
     monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
@@ -551,17 +789,16 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
 
-    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None):
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
         book_calls.append((slot_date.isoformat(), time_text, court))
         transaction_log["payment"] = {"response": {"status": 200}}
-        transaction_log["verification"] = {"confirmed": court == "6"}
-        if court == "6":
-            state["my_reservations"].append({
-                "date": slot_date.isoformat(),
-                "time": time_text,
-                "court": court,
-            })
-        return court == "6"
+        transaction_log["verification"] = {"confirmed": True}
+        state["my_reservations"].append({
+            "date": slot_date.isoformat(),
+            "time": time_text,
+            "court": court,
+        })
+        return True
 
     monkeypatch.setattr(
         scheduler_mod,
@@ -571,11 +808,19 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
 
     scheduler_mod._run_release_probe_session()
 
-    assert book_calls == [("2026-06-13", "9:00 AM", "6")]
+    assert book_calls == [
+        ("2026-06-13", "9:00 AM", "6"),
+        ("2026-06-13", "9:00 AM", "5"),
+        ("2026-06-13", "10:00 AM", "6"),
+        ("2026-06-13", "10:00 AM", "5"),
+    ]
     assert saved_states[-1]["last_release_probe_session"] is not None
     assert any(
         entry.get("phase") == "burst"
-        and entry.get("booked") == ["2026-06-13 9:00 AM Court 6"]
+        and entry.get("booked") == [
+            "2026-06-13 9:00 AM Court 6",
+            "2026-06-13 9:00 AM Court 5",
+        ]
         and entry.get("booking_attempts")
         and entry["booking_attempts"][0]["transaction"]["verification"]["confirmed"] is True
         and entry.get("targets")
@@ -634,7 +879,7 @@ def test_booking_agent_weekday_report_is_short_and_skips_model(monkeypatch):
     )
 
     assert booking_agent_mod.run_agent("report") is True
-    assert messages == ["Nothing booked."]
+    assert messages == []
 
 
 def test_weekday_report_includes_booking_made_today():

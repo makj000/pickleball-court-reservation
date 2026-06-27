@@ -19,6 +19,14 @@ from state import _enqueue_work, load_state, save_state
 MODEL = "claude-sonnet-4-6"
 PREP_RETRY_DELAY_SECONDS = 15 * 60
 
+
+def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
+    if target_date.weekday() == 5:
+        return ("9:00 AM", "10:00 AM")
+    if target_date.weekday() == 6:
+        return ("8:00 AM", "9:00 AM")
+    return ()
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 TOOLS: list[dict] = [
@@ -110,7 +118,25 @@ def _set_auto_book(slots: list[dict]) -> dict:
     state = load_state()
     today_str = date.today().isoformat()
     new_day = date.today() + timedelta(days=14)
+    release_times = _weekend_release_booking_times(new_day)
     new_dates = {s["date"] for s in slots}
+    slots_by_key = {
+        (s.get("date"), s.get("time")): s
+        for s in slots
+        if isinstance(s, dict)
+    }
+    if release_times and new_day.isoformat() in new_dates:
+        slots_by_key = {
+            key: slot
+            for key, slot in slots_by_key.items()
+            if key[0] != new_day.isoformat() or key[1] in release_times
+        }
+        for time_text in release_times:
+            slots_by_key.setdefault(
+                (new_day.isoformat(), time_text),
+                {"date": new_day.isoformat(), "time": time_text},
+            )
+        slots = list(slots_by_key.values())
     kept = [
         s for s in (state.get("auto_book_slots") or [])
         if s.get("date", "") >= today_str and s.get("date") not in new_dates
@@ -118,12 +144,17 @@ def _set_auto_book(slots: list[dict]) -> dict:
 
     def _slot_sort_key(slot: dict) -> tuple[str, int]:
         time_text = slot.get("time", "")
-        if time_text == "9:00 AM":
-            time_rank = 0
-        elif time_text == "8:00 AM":
-            time_rank = 1
+        slot_date = slot.get("date", "")
+        try:
+            slot_release_times = _weekend_release_booking_times(date.fromisoformat(slot_date))
+        except ValueError:
+            slot_release_times = ()
+        if time_text in slot_release_times:
+            time_rank = slot_release_times.index(time_text)
         else:
-            time_rank = 2 + (SLOT_TIMES.index(time_text) if time_text in SLOT_TIMES else len(SLOT_TIMES))
+            time_rank = len(slot_release_times) + (
+                SLOT_TIMES.index(time_text) if time_text in SLOT_TIMES else len(SLOT_TIMES)
+            )
         return (slot.get("date", ""), time_rank)
 
     state["auto_book_slots"] = sorted(kept + slots, key=_slot_sort_key)
@@ -138,7 +169,8 @@ def _prep_target_date() -> date:
 def _prep_is_complete(state: dict) -> tuple[bool, str]:
     target_date = _prep_target_date()
     target_str = target_date.isoformat()
-    if target_date.weekday() < 5:
+    release_times = _weekend_release_booking_times(target_date)
+    if not release_times:
         return True, "weekday skip"
 
     reservations = {
@@ -146,10 +178,7 @@ def _prep_is_complete(state: dict) -> tuple[bool, str]:
         for r in (state.get("my_reservations") or [])
         if isinstance(r, dict)
     }
-    if {
-        (target_str, "8:00 AM"),
-        (target_str, "9:00 AM"),
-    }.issubset(reservations):
+    if all((target_str, time_text) in reservations for time_text in release_times):
         return True, "already reserved"
 
     auto_book_slots = {
@@ -157,10 +186,10 @@ def _prep_is_complete(state: dict) -> tuple[bool, str]:
         for s in (state.get("auto_book_slots") or [])
         if isinstance(s, dict)
     }
-    if (target_str, "9:00 AM") in auto_book_slots:
+    if all((target_str, time_text) in auto_book_slots for time_text in release_times):
         return True, "prep complete"
 
-    return False, f"{target_str} 9:00 AM is not queued for auto-book"
+    return False, f"{target_str} {' / '.join(release_times)} is not queued for auto-book"
 
 
 def _schedule_prep_retry(*, attempt: int, reason: str) -> str | None:
@@ -228,14 +257,16 @@ Context:
 - rec.us releases new slots at exactly 8:00 AM PT, 14 days in advance.
 - The existing release probe system (7:58–8:02 AM) will automatically book whatever \
 is in auto_book_slots the moment a court opens. You don't need to do the booking yourself.
-- Courts in preference order: 6 > 4 > 5. Target 9:00 AM before 8:00 AM.
+- Courts in preference order: 6 > 4 > 5.
+- For Saturday targets, book 9:00 AM and 10:00 AM.
+- For Sunday targets, book 8:00 AM and 9:00 AM.
 
 Your task:
 1. Call get_context.
 2. If the new day (14 days out) is a weekday: call done immediately. No message needed.
 3. Otherwise decide whether to queue a booking:
-   - Skip if there's already a reservation for 9:00 AM on that date, or reservations for both 8:00 AM and 9:00 AM on that weekend (Sat or Sun).
-   - Queue 9:00 AM only. Do not add 8:00 AM — the system automatically attempts 8:00 AM right after a successful 9:00 AM booking.
+   - Skip if reservations already exist for all target times on that date.
+   - Queue Saturday targets as 9:00 AM and 10:00 AM; queue Sunday targets as 8:00 AM and 9:00 AM.
 4. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
 5. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
 or why you're skipping). Only send if the new day is a weekend.

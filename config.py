@@ -21,6 +21,8 @@ SCAN_HISTORY_MAX = 300
 # ── Credentials ───────────────────────────────────────────────────────────────
 EMAIL    = os.environ.get("REC_US_LOGIN") or os.environ.get("EMAIL", "")
 PASSWORD = os.environ.get("REC_US_PASSWORD") or os.environ.get("PASSWORD", "")
+EMAIL2    = os.environ.get("REC_US_LOGIN2") or os.environ.get("EMAIL2", "")
+PASSWORD2 = os.environ.get("REC_US_PASSWORD2") or os.environ.get("PASSWORD2", "")
 # ─────────────────────────────────────────────────────────────────────────────
 
 HEADLESS      = True
@@ -76,6 +78,7 @@ COURT_SPORT_IDS: dict[str, str] = {
     "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
 }
 PARTICIPANT_USER_ID   = os.environ.get("PARTICIPANT_USER_ID", "")
+PARTICIPANT_USER_ID2  = os.environ.get("PARTICIPANT_USER_ID2", "")
 FIREBASE_API_KEY      = os.environ.get("FIREBASE_API_KEY", "")
 # rec.us's Stripe publishable key (embedded in their frontend JS — public)
 STRIPE_PUBLISHABLE_KEY = "pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB"

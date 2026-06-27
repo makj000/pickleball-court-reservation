@@ -14,7 +14,10 @@ from state import (
     _utc_now_iso, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
-from rec_api import _cache_jwt, _firebase_login, _get_cached_jwt, _stripe_confirm_payment_intent, book_slot_api, sync_rec_my_reservations
+from rec_api import (
+    _cache_jwt, _firebase_login, _get_cached_jwt, _rec_booking_sessions,
+    _stripe_confirm_payment_intent, book_slot_api, sync_rec_my_reservations,
+)
 from scanner import _api_scan, _api_fetch_availability
 from booking import _apply_booked_slots, _notify_booked_slots
 
@@ -23,6 +26,30 @@ _INTERVAL_15S  = round(15 / 3600, 6)
 _INTERVAL_1MIN = round(1  / 60,   6)
 _INTERVAL_5MIN = round(5  / 60,   6)
 ALLOWED_SCAN_INTERVALS = (_INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0)
+
+
+def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
+    if target_date.weekday() == 5:
+        return ("9:00 AM", "10:00 AM")
+    if target_date.weekday() == 6:
+        return ("8:00 AM", "9:00 AM")
+    return ()
+
+
+def _paired_court_order(booked_courts: list[str], candidates: list[str] | None = None) -> list[str]:
+    candidates = candidates or COURT_PREFERENCE
+    remaining = [court for court in candidates if court not in booked_courts]
+    if not booked_courts:
+        preferred = ["6", "5", "4"]
+    elif booked_courts[-1] == "6":
+        preferred = ["5", "4"]
+    elif booked_courts[-1] == "4":
+        preferred = ["5", "6"]
+    else:
+        preferred = ["6", "4"]
+    ordered = [court for court in preferred if court in remaining]
+    ordered.extend(court for court in remaining if court not in ordered)
+    return ordered
 
 
 def _new_day_from_pt_now(now_pt: datetime | None = None) -> date:
@@ -90,7 +117,8 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
     special_new_day_scan = new_day_str not in seen_open_keys
     if special_new_day_scan:
         new_day = date.fromisoformat(new_day_str)
-        new_day_times = ["8:00 AM", "9:00 AM"] if new_day.weekday() >= 5 else SLOT_TIMES[:]
+        release_times = _weekend_release_booking_times(new_day)
+        new_day_times = list(release_times) if release_times else SLOT_TIMES[:]
         targets.setdefault(new_day_str, [])
         for t in new_day_times:
             if t not in targets[new_day_str]:
@@ -371,7 +399,8 @@ def _run_targeted_daily_scan() -> None:
 
     today = date.today()
     new_day = today + timedelta(days=14)
-    new_day_times = ["8:00 AM", "9:00 AM"] if new_day.weekday() >= 5 else SLOT_TIMES[:]
+    release_times = _weekend_release_booking_times(new_day)
+    new_day_times = list(release_times) if release_times else SLOT_TIMES[:]
     times_by_date: dict[str, list[str]] = {new_day.isoformat(): new_day_times}
 
     for day_offset in range(16):
@@ -528,9 +557,9 @@ def _run_release_probe_session() -> None:
     """Own the 7:58–8:02 AM slot-release window.
 
     Phases:
-      pre  (7:58–8:00):   probe only the new weekend 9:00 AM / 8:00 AM target every 15s
-      burst (8:00–8:00:30): back-to-back probes for the new weekend 9:00 AM slot
-      post (8:00:30–8:02): probe only the new weekend 9:00 AM / 8:00 AM target every 15s
+      pre  (7:58–8:00):   probe only the new weekend release targets every 15s
+      burst (8:00–8:00:30): direct booking attempts for the new weekend release targets
+      post (8:00:30–8:02): probe only the new weekend release targets every 15s
     """
     import time as _time
 
@@ -542,21 +571,31 @@ def _run_release_probe_session() -> None:
     eight_am = now_pt.replace(hour=8, minute=0, second=0, microsecond=0)
 
     new_day = now_pt.date() + timedelta(days=14)
+    release_times = _weekend_release_booking_times(new_day)
     new_day_targets: dict[str, list[str]] = {}
-    if new_day.weekday() >= 5:
-        new_day_targets[new_day.isoformat()] = ["9:00 AM", "8:00 AM"]
+    if release_times:
+        new_day_targets[new_day.isoformat()] = list(release_times)
     burst_target: tuple[str, str] | None = (
         (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
     )
     burst_done = False
-    blind_booking_order = list(COURT_PREFERENCE)
+    blind_booking_order = _paired_court_order([])
 
     state = load_state()
     try:
-        jwt = _get_cached_jwt(state) or _firebase_login()
-        if not state.get("cached_jwt"):
-            _cache_jwt(state, jwt)
-            save_state(state)
+        try:
+            sessions = _rec_booking_sessions(state)
+        except Exception:
+            jwt = _get_cached_jwt(state) or _firebase_login()
+            sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
+            if not state.get("cached_jwt"):
+                _cache_jwt(state, jwt)
+        if not sessions:
+            jwt = _get_cached_jwt(state) or _firebase_login()
+            sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
+            if not state.get("cached_jwt"):
+                _cache_jwt(state, jwt)
+        save_state(state)
         print(f"Release probe session: logged in, JWT expires {state.get('cached_jwt_expires_at', '?')}")
         if burst_target:
             print(f"  Burst target: {burst_target[0]} {burst_target[1]}")
@@ -578,12 +617,28 @@ def _run_release_probe_session() -> None:
 
     probe_log: list[dict] = []
 
-    def _blind_book_release_target() -> list[dict]:
+    def _target_booking_count(target_date: str, target_time: str) -> int:
+        release_target_date = date.fromisoformat(target_date)
+        if release_target_date.weekday() == 5 and target_time in ("9:00 AM", "10:00 AM"):
+            return min(2, max(1, len(sessions)))
+        if release_target_date.weekday() == 6 and target_time in ("8:00 AM", "9:00 AM"):
+            return min(2, max(1, len(sessions)))
+        return 1
+
+    def _reserved_count(target_date: str, target_time: str) -> int:
+        st = load_state()
+        return sum(
+            1 for r in (st.get("my_reservations") or [])
+            if r.get("date") == target_date and r.get("time") == target_time
+        )
+
+    def _blind_book_release_target(target_time: str = "9:00 AM") -> list[dict]:
         ts = _utc_now_iso()
         target_date = new_day.isoformat()
-        target_time = "9:00 AM"
+        target_count = _target_booking_count(target_date, target_time)
+        initial_reserved = _reserved_count(target_date, target_time)
         booking_attempts: list[dict] = []
-        if _burst_slot_already_reserved(target_date, target_time):
+        if initial_reserved >= target_count:
             probe_log.append({
                 "ts": ts,
                 "phase": "burst",
@@ -608,51 +663,90 @@ def _run_release_probe_session() -> None:
             pass
 
         booked: list[dict] = []
-        for round_num in range(2):
-            if booked:
+        used_accounts: set[int] = set()
+        for booking_num in range(target_count):
+            if initial_reserved + len(booked) >= target_count:
                 break
-            if round_num > 0:
-                print(f"  [burst] All courts failed on round 1, retrying immediately…")
-            for court in blind_booking_order:
-                transaction_log: dict = {}
-                attempt_log = {
-                    "round": round_num + 1,
-                    "court": court,
-                    "result": "trying",
-                    "transaction": transaction_log,
-                }
-                booking_attempts.append(attempt_log)
-                try:
-                    ok = book_slot_api(
-                        jwt,
-                        new_day,
-                        target_time,
-                        court,
-                        transaction_log=transaction_log,
-                    )
-                except Exception as exc:
-                    attempt_log["result"] = "error"
-                    attempt_log["error"] = str(exc)
-                    print(f"  Blind booking error {target_date} {target_time} Court {court} (round {round_num + 1}): {exc}")
-                    ok = False
-                if ok:
-                    attempt_log["result"] = "booked"
-                    booked.append({"date": target_date, "time": target_time, "court": court})
+            booked_one = False
+            for round_num in range(2):
+                if booked_one:
                     break
-                attempt_log.setdefault("result", "failed")
+                if round_num > 0:
+                    print(f"  [burst] All courts failed for booking {booking_num + 1}/{target_count}, retrying immediately…")
+                for session in sessions:
+                    account_index = int(session.get("account_index") or 1)
+                    if account_index in used_accounts:
+                        continue
+                    court_order = (
+                        _paired_court_order([b["court"] for b in booked], blind_booking_order)
+                        if target_count > 1
+                        else blind_booking_order
+                    )
+                    for court in court_order:
+                        if any(b["court"] == court for b in booked):
+                            continue
+                        transaction_log: dict = {}
+                        attempt_log = {
+                            "round": round_num + 1,
+                            "booking_num": booking_num + 1,
+                            "account_index": account_index,
+                            "court": court,
+                            "result": "trying",
+                            "transaction": transaction_log,
+                        }
+                        booking_attempts.append(attempt_log)
+                        try:
+                            participant_user_id = str(session.get("participant_user_id") or "")
+                            if participant_user_id:
+                                ok = book_slot_api(
+                                    str(session["jwt"]),
+                                    new_day,
+                                    target_time,
+                                    court,
+                                    transaction_log=transaction_log,
+                                    participant_user_id=participant_user_id,
+                                )
+                            else:
+                                ok = book_slot_api(
+                                    str(session["jwt"]),
+                                    new_day,
+                                    target_time,
+                                    court,
+                                    transaction_log=transaction_log,
+                                )
+                        except Exception as exc:
+                            attempt_log["result"] = "error"
+                            attempt_log["error"] = str(exc)
+                            print(f"  Blind booking error {target_date} {target_time} Court {court} (round {round_num + 1}): {exc}")
+                            ok = False
+                        if ok:
+                            attempt_log["result"] = "booked"
+                            booked_item = {"date": target_date, "time": target_time, "court": court}
+                            if len(sessions) > 1:
+                                booked_item["account_index"] = account_index
+                            booked.append(booked_item)
+                            used_accounts.add(account_index)
+                            booked_one = True
+                            break
+                        attempt_log.setdefault("result", "failed")
+                    if booked_one:
+                        break
 
         state_after = load_state()
         if booked:
             booking_log = list(state_after.get("app_booking_log") or [])
-            booking_entry = {
-                "booked_at": _utc_now_iso(),
-                "date": target_date,
-                "time": target_time,
-                "court": booked[0]["court"],
-            }
-            if booking_attempts:
-                booking_entry["attempts"] = booking_attempts
-            booking_log.insert(0, booking_entry)
+            for booked_slot in booked:
+                booking_entry = {
+                    "booked_at": _utc_now_iso(),
+                    "date": target_date,
+                    "time": target_time,
+                    "court": booked_slot["court"],
+                }
+                if "account_index" in booked_slot:
+                    booking_entry["account_index"] = booked_slot["account_index"]
+                if booking_attempts:
+                    booking_entry["attempts"] = booking_attempts
+                booking_log.insert(0, booking_entry)
             state_after["app_booking_log"] = booking_log
             _apply_booked_slots(state_after, booked)
             save_state(state_after)
@@ -730,7 +824,6 @@ def _run_release_probe_session() -> None:
             new_avail, booked = _api_scan(
                 target_times_by_date=targets,
                 auto_book_slots=auto_book_slots,
-                jwt=jwt,
                 detailed_log=booking_attempts,
             )
             st = load_state()
@@ -780,36 +873,38 @@ def _run_release_probe_session() -> None:
             return []
 
     def _burst_slot_already_reserved(burst_date: str, burst_time: str) -> bool:
-        st = load_state()
-        return any(
-            r.get("date") == burst_date and r.get("time") == burst_time
-            for r in (st.get("my_reservations") or [])
-        )
+        return _reserved_count(burst_date, burst_time) >= _target_booking_count(burst_date, burst_time)
 
     try:
-        if new_day.weekday() >= 5:
+        if release_times:
             delay_seconds = max(0.0, (eight_am - now_pt).total_seconds())
             if delay_seconds > 0:
                 _time.sleep(delay_seconds)
-            _blind_book_release_target()
-            # Post-burst: probe every 15s until 8:02 AM, targeting only 9:00 AM
-            nine_am_only: dict[str, list[str]] = {new_day.isoformat(): ["9:00 AM"]}
+            for target_time in release_times:
+                _blind_book_release_target(target_time)
+            # Post-burst: probe every 15s until 8:02 AM for any target still not reserved.
+            release_targets: dict[str, list[str]] = {new_day.isoformat(): list(release_times)}
             while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
-                if _burst_slot_already_reserved(new_day.isoformat(), "9:00 AM"):
+                if all(
+                    _burst_slot_already_reserved(new_day.isoformat(), target_time)
+                    for target_time in release_times
+                ):
                     break
                 t0 = _time.monotonic()
-                _one_probe("post", targets_override=nine_am_only)
+                _one_probe("post", targets_override=release_targets)
                 elapsed = _time.monotonic() - t0
                 _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
-            # Queue late relay (~8:15 AM) only if slot still not reserved
-            if not _burst_slot_already_reserved(new_day.isoformat(), "9:00 AM"):
+            # Queue late relays (~8:15 AM) only for slots still not reserved.
+            for target_time in release_times:
+                if _burst_slot_already_reserved(new_day.isoformat(), target_time):
+                    continue
                 late_relay_queued = bool(_enqueue_work(
                     "weekend_late_relay",
-                    {"date": new_day.isoformat(), "time": "9:00 AM"},
+                    {"date": new_day.isoformat(), "time": target_time},
                     delay_seconds=780,  # fires ~13 min later → ~8:15 AM
                 ))
                 if late_relay_queued:
-                    print(f"Queued weekend_late_relay for {new_day.isoformat()} 9:00 AM (~8:15 AM).")
+                    print(f"Queued weekend_late_relay for {new_day.isoformat()} {target_time} (~8:15 AM).")
             return
 
         while True:
@@ -932,7 +1027,8 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
         print(f"Late probes: {target_date} {target_time} already reserved. Skipping.")
         return
     try:
-        jwt = _get_cached_jwt(state) or _firebase_login()
+        _rec_booking_sessions(state)
+        save_state(state)
     except Exception as exc:
         print(f"Late probes: login failed: {exc}")
         return
@@ -951,7 +1047,6 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
             _, booked = _api_scan(
                 target_times_by_date=targets,
                 auto_book_slots=auto_book_slots,
-                jwt=jwt,
             )
             if booked:
                 print(f"  [late probe {probe_num + 1}/10] Booked: {booked}")
@@ -967,6 +1062,171 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
     print(f"Late probes complete: {target_date} {target_time} not booked after 10 probes.")
 
 
+def _run_one_off_probe(
+    target_date: str,
+    target_time: str,
+    max_bookings: int = 1,
+    courts: list[str] | None = None,
+) -> None:
+    """Run a one-off blind booking attempt for a single date/time."""
+    if target_time not in SLOT_TIMES:
+        print(f"One-off probe: invalid time {target_time!r}.")
+        return
+    try:
+        date.fromisoformat(target_date)
+    except ValueError:
+        print(f"One-off probe: invalid date {target_date!r}.")
+        return
+    target_courts = [court for court in (courts or _paired_court_order([])) if court in COURT_PREFERENCE]
+    if not target_courts:
+        print(f"One-off probe: invalid courts {courts!r}.")
+        return
+
+    state = load_state()
+    active_scan = _active_scan_started_at(state)
+    if active_scan:
+        print(f"One-off probe: scan running since {active_scan.isoformat()}, skipping.")
+        return
+
+    started_at = _utc_now_iso()
+    targets = {target_date: [target_time]}
+    print(
+        f"One-off blind booking: {target_date} {target_time}, "
+        f"courts={target_courts}, max_bookings={max_bookings}."
+    )
+    booked: list[dict] = []
+    attempts: list[dict] = []
+    try:
+        sessions = _rec_booking_sessions(state)
+        if not sessions:
+            raise RuntimeError("No rec.us booking accounts configured")
+        target_day = date.fromisoformat(target_date)
+        target_count = min(max(1, max_bookings), len(sessions))
+        used_accounts: set[int] = set()
+        used_courts: set[str] = set()
+
+        try:
+            send_telegram(f"🎯 Trying to book {target_date} {target_time} (courts: {', '.join(target_courts)})")
+        except Exception:
+            pass
+
+        for booking_num in range(target_count):
+            booked_one = False
+            for round_num in range(2):
+                if booked_one:
+                    break
+                if round_num > 0:
+                    print(f"  One-off: all courts failed for booking {booking_num + 1}/{target_count}, retrying immediately.")
+                for session in sessions:
+                    account_index = int(session.get("account_index") or 1)
+                    if account_index in used_accounts:
+                        continue
+                    court_order = (
+                        _paired_court_order(list(used_courts), target_courts)
+                        if target_count > 1
+                        else target_courts
+                    )
+                    for court in court_order:
+                        if court in used_courts:
+                            continue
+                        transaction_log: dict = {}
+                        attempt = {
+                            "round": round_num + 1,
+                            "booking_num": booking_num + 1,
+                            "account_index": account_index,
+                            "court": court,
+                            "result": "trying",
+                            "transaction": transaction_log,
+                        }
+                        attempts.append(attempt)
+                        try:
+                            ok = book_slot_api(
+                                str(session["jwt"]),
+                                target_day,
+                                target_time,
+                                court,
+                                transaction_log=transaction_log,
+                                participant_user_id=str(session.get("participant_user_id") or ""),
+                            )
+                        except Exception as exc:
+                            attempt["result"] = "error"
+                            attempt["error"] = str(exc)
+                            print(f"  One-off booking error {target_date} {target_time} Court {court}: {exc}")
+                            ok = False
+                        if ok:
+                            attempt["result"] = "booked"
+                            booked_slot = {
+                                "date": target_date,
+                                "time": target_time,
+                                "court": court,
+                                "account_index": account_index,
+                            }
+                            booked.append(booked_slot)
+                            used_accounts.add(account_index)
+                            used_courts.add(court)
+                            booked_one = True
+                            break
+                        attempt.setdefault("result", "failed")
+                    if booked_one:
+                        break
+
+        state = load_state()
+        log = list(state.get("app_booking_log") or [])
+        for booked_slot in booked:
+            log.insert(0, {
+                "booked_at": _utc_now_iso(),
+                "date": booked_slot["date"],
+                "time": booked_slot["time"],
+                "court": booked_slot["court"],
+                "account_index": booked_slot["account_index"],
+                "attempts": attempts,
+            })
+        state["app_booking_log"] = log
+        state["last_scan_started_at"] = started_at
+        state["last_scanned"] = _utc_now_iso()
+        state["last_scan_kind"] = "one_off_probe"
+        _record_scan_history(
+            state,
+            kind="one_off_probe",
+            started_at=started_at,
+            completed_at=state["last_scanned"],
+            status="completed",
+            targets=_history_targets_from_map(targets),
+        )
+        _apply_booked_slots(state, booked)
+        save_state(state)
+        _notify_booked_slots(booked)
+        if not booked:
+            failures = list(state.get("auto_book_failures") or [])
+            failures.insert(0, {
+                "failed_at": _utc_now_iso(),
+                "date": target_date,
+                "time": target_time,
+                "error": "One-off blind booking failed",
+                "attempts": attempts,
+            })
+            state["auto_book_failures"] = failures
+            save_state(state)
+            try:
+                send_telegram(f"❌ Failed to book {target_date} {target_time} after one-off blind booking")
+            except Exception:
+                pass
+        print(f"One-off blind booking complete: booked={booked}.")
+    except Exception as exc:
+        state = load_state()
+        _record_scan_history(
+            state,
+            kind="one_off_probe",
+            started_at=started_at,
+            completed_at=_utc_now_iso(),
+            status="failed",
+            targets=_history_targets_from_map(targets),
+            error=str(exc),
+        )
+        save_state(state)
+        raise
+
+
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
     """At 7:45 AM on weekends: cache JWT now, then queue the probe session to start at ~7:58 AM."""
     from config import WORK_QUEUE_URL
@@ -976,11 +1236,9 @@ def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None 
     if now_pt.weekday() >= 5:
         # Pre-cache JWT at 7:45 AM so the probe session skips login entirely.
         try:
-            if not _get_cached_jwt(state):
-                jwt = _firebase_login()
-                _cache_jwt(state, jwt)
-                save_state(state)
-                print("Pre-cached JWT at 7:45 AM for 8 AM probe session.")
+            _rec_booking_sessions(state)
+            save_state(state)
+            print("Pre-cached JWT at 7:45 AM for 8 AM probe session.")
         except Exception as exc:
             print(f"7:45 AM JWT pre-cache failed: {exc}")
     if not WORK_QUEUE_URL:
@@ -1026,6 +1284,13 @@ def _run_queue_work(message: dict) -> None:
         _run_weekend_late_probes(
             str(message.get("date") or ""),
             str(message.get("time") or ""),
+        )
+    elif kind == "one_off_probe":
+        _run_one_off_probe(
+            str(message.get("date") or ""),
+            str(message.get("time") or ""),
+            int(message.get("max_bookings") or 1),
+            [str(court) for court in (message.get("courts") or [])],
         )
     else:
         print(f"Ignoring unknown queue work kind: {kind}")

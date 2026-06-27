@@ -27,7 +27,7 @@ from scheduler import (
     _queue_release_probe_session_if_needed, _queued_scheduled_probe_is_current,
     _queue_next_scheduled_probe, _clear_queued_scheduled_probe,
     _run_full_refresh_worker, _run_scheduled_worker, _run_targeted_daily_scan,
-    _should_run_scheduled_tick,
+    _run_one_off_probe, _should_run_scheduled_tick,
 )
 from telegram import handle_telegram
 from routes import (
@@ -53,6 +53,15 @@ def handler(event, context):
     if event.get("_booking_agent"):
         from booking_agent import run_agent
         run_agent(event.get("phase", "prep"))
+        return
+
+    if event.get("_one_off_probe"):
+        _run_one_off_probe(
+            str(event.get("date") or ""),
+            str(event.get("time") or ""),
+            int(event.get("max_bookings") or 1),
+            [str(court) for court in (event.get("courts") or [])],
+        )
         return
 
     if event.get("source") == "aws.events":
