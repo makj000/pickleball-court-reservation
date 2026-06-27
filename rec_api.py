@@ -7,16 +7,42 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
 from config import (
-    COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, FIREBASE_SIGN_IN_URL, PASSWORD,
-    PARTICIPANT_USER_ID, SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
+    COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, EMAIL2, FIREBASE_SIGN_IN_URL, PASSWORD,
+    PASSWORD2, PARTICIPANT_USER_ID, PARTICIPANT_USER_ID2, SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
     _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
 )
 from state import _normalize_court_number, _normalize_slot_records, _utc_now_iso
 
 
-def _get_cached_jwt(state: dict) -> str | None:
-    jwt = state.get("cached_jwt")
-    expires_at = state.get("cached_jwt_expires_at")
+def _configured_rec_accounts() -> list[dict[str, str | int]]:
+    accounts: list[dict[str, str | int]] = []
+    if EMAIL and PASSWORD:
+        accounts.append({
+            "index": 1,
+            "email": EMAIL,
+            "password": PASSWORD,
+            "participant_user_id": PARTICIPANT_USER_ID,
+        })
+    if EMAIL2 and PASSWORD2:
+        accounts.append({
+            "index": 2,
+            "email": EMAIL2,
+            "password": PASSWORD2,
+            "participant_user_id": PARTICIPANT_USER_ID2,
+        })
+    return accounts
+
+
+def _jwt_cache_keys(account_index: int = 1) -> tuple[str, str]:
+    if account_index == 1:
+        return "cached_jwt", "cached_jwt_expires_at"
+    return f"cached_jwt_{account_index}", f"cached_jwt_{account_index}_expires_at"
+
+
+def _get_cached_jwt(state: dict, account_index: int = 1) -> str | None:
+    jwt_key, expires_key = _jwt_cache_keys(account_index)
+    jwt = state.get(jwt_key)
+    expires_at = state.get(expires_key)
     if not jwt or not expires_at:
         return None
     try:
@@ -28,17 +54,23 @@ def _get_cached_jwt(state: dict) -> str | None:
     return None
 
 
-def _cache_jwt(state: dict, jwt: str) -> None:
-    state["cached_jwt"] = jwt
-    state["cached_jwt_expires_at"] = (datetime.now(tz=timezone.utc) + timedelta(minutes=55)).isoformat()
+def _cache_jwt(state: dict, jwt: str, account_index: int = 1) -> None:
+    jwt_key, expires_key = _jwt_cache_keys(account_index)
+    state[jwt_key] = jwt
+    state[expires_key] = (datetime.now(tz=timezone.utc) + timedelta(minutes=55)).isoformat()
 
 
-def _firebase_login() -> str:
+def _firebase_login(account: dict[str, str | int] | None = None) -> str:
     """Return a fresh rec.us Bearer token via Firebase REST auth (~0.4 s, no browser)."""
+    if account is None:
+        account = {
+            "email": EMAIL,
+            "password": PASSWORD,
+        }
     payload = json.dumps({
         "returnSecureToken": True,
-        "email": EMAIL,
-        "password": PASSWORD,
+        "email": account.get("email", ""),
+        "password": account.get("password", ""),
         "clientType": "CLIENT_TYPE_WEB",
     }).encode()
     hdrs = {
@@ -51,6 +83,25 @@ def _firebase_login() -> str:
     req = Request(FIREBASE_SIGN_IN_URL, data=payload, headers=hdrs, method="POST")
     with urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())["idToken"]
+
+
+def _rec_booking_sessions(state: dict) -> list[dict[str, str | int]]:
+    sessions: list[dict[str, str | int]] = []
+    for account in _configured_rec_accounts():
+        account_index = int(account["index"])
+        jwt = _get_cached_jwt(state, account_index)
+        if not jwt:
+            jwt = _firebase_login(account)
+            _cache_jwt(state, jwt, account_index)
+        participant_user_id = str(account.get("participant_user_id") or "")
+        if not participant_user_id:
+            participant_user_id = _rec_user_id(jwt)
+        sessions.append({
+            "account_index": account_index,
+            "jwt": jwt,
+            "participant_user_id": participant_user_id,
+        })
+    return sessions
 
 
 def _rec_api(url: str, method: str = "GET", body=None, jwt: str = "") -> tuple[int, dict]:
@@ -251,6 +302,7 @@ def book_slot_api(
     time_text: str,
     court: str,
     transaction_log: dict | None = None,
+    participant_user_id: str | None = None,
 ) -> bool:
     """Book a court fully via API (no browser)."""
     if transaction_log is None:
@@ -275,7 +327,7 @@ def book_slot_api(
     reservation_body = {
         "courtSportIds": [court_sport_id],
         "from": {"date": date_str, "time": time_str},
-        "participantUserId": PARTICIPANT_USER_ID,
+        "participantUserId": participant_user_id or PARTICIPANT_USER_ID or _rec_user_id(jwt),
         "to": {"date": date_str, "time": end_str},
     }
 

@@ -7,7 +7,7 @@ import json
 
 from config import COURT_PREFERENCE, COURT_SITE_IDS, PT, SLOT_TIMES, TARGET_COURTS, _HHMM_TO_TIME_TEXT
 from state import _preferred_open_court, _utc_now_iso, load_state, save_state
-from rec_api import _firebase_login, _get_cached_jwt, book_slot_api
+from rec_api import _firebase_login, _get_cached_jwt, _rec_booking_sessions, book_slot_api
 from notify import send_telegram
 
 _REC_API_BASE = "https://api.rec.us/v1/sites"
@@ -72,8 +72,8 @@ def _api_fetch_availability(
     return result
 
 
-_DAY_CAP = 2       # max sessions per calendar date
-_RATE_CAP = 4      # max app-initiated bookings per rate window
+_DAY_CAP = 6       # allows two-account bookings for both weekend target times.
+_RATE_CAP = 6      # max app-initiated bookings per rate window
 _RATE_WINDOW_HOURS = 1  # daytime rolling window
 
 
@@ -101,11 +101,56 @@ def _recent_booking_count(state: dict) -> int:
     )
 
 
+def _weekend_double_book_count(
+    date_str: str,
+    time_text: str,
+    sessions: list[dict[str, str | int]],
+) -> int:
+    try:
+        slot_date = date.fromisoformat(date_str)
+    except ValueError:
+        return 1
+    if slot_date.weekday() == 5 and time_text in ("9:00 AM", "10:00 AM"):
+        return min(2, max(1, len(sessions)))
+    if slot_date.weekday() == 6 and time_text in ("8:00 AM", "9:00 AM"):
+        return min(2, max(1, len(sessions)))
+    return 1
+
+
+def _weekend_followup_time(date_str: str, time_text: str) -> str | None:
+    try:
+        slot_date = date.fromisoformat(date_str)
+    except ValueError:
+        return None
+    if slot_date.weekday() == 5 and time_text == "9:00 AM":
+        return "10:00 AM"
+    if slot_date.weekday() == 6 and time_text == "9:00 AM":
+        return "8:00 AM"
+    return None
+
+
+def _paired_court_order(booked_courts: list[str], candidates: list[str] | None = None) -> list[str]:
+    candidates = candidates or COURT_PREFERENCE
+    remaining = [court for court in candidates if court not in booked_courts]
+    if not booked_courts:
+        preferred = ["6", "5", "4"]
+    elif booked_courts[-1] == "6":
+        preferred = ["5", "4"]
+    elif booked_courts[-1] == "4":
+        preferred = ["5", "6"]
+    else:
+        preferred = ["6", "4"]
+    ordered = [court for court in preferred if court in remaining]
+    ordered.extend(court for court in remaining if court not in ordered)
+    return ordered
+
+
 def _api_scan(
     target_times_by_date: dict[str, list[str]] | None = None,
     auto_book_slots: list[dict] | None = None,
     jwt: str | None = None,
     detailed_log: list[dict] | None = None,
+    max_bookings_per_slot: int | None = None,
 ) -> tuple[dict[str, dict[str, dict[str, bool | None]]], list[dict]]:
     """Scan via HTTP API and book any newly open auto-book slots.
 
@@ -145,7 +190,11 @@ def _api_scan(
     state_obj = load_state()
     if jwt is None:
         try:
-            jwt = _get_cached_jwt(state_obj) or _firebase_login()
+            sessions = _rec_booking_sessions(state_obj)
+            if not sessions:
+                jwt = _get_cached_jwt(state_obj) or _firebase_login()
+                sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
+            save_state(state_obj)
         except Exception as exc:
             failures = list(state_obj.get("auto_book_failures") or [])
             failures.insert(0, {"failed_at": _utc_now_iso(), "date": None, "time": None, "error": f"Login failed: {exc}"})
@@ -156,11 +205,16 @@ def _api_scan(
             except Exception:
                 pass
             raise
+    else:
+        sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
+    include_account_index = len(sessions) > 1
 
     i = 0
+    processed_slots: set[tuple[str, str]] = set()
     while i < len(to_book):
         date_str, time_text, court_avail = to_book[i]
         i += 1
+        processed_slots.add((date_str, time_text))
         # Per-day cap: count existing reservations + already booked this session
         sessions_on_day = (
             sum(1 for r in (state_obj.get("my_reservations") or []) if r["date"] == date_str)
@@ -176,11 +230,17 @@ def _api_scan(
                 "attempts": [],
             }
             detailed_log.append(slot_log)
+        target_count = (
+            max(1, min(int(max_bookings_per_slot), len(sessions)))
+            if max_bookings_per_slot is not None
+            else _weekend_double_book_count(date_str, time_text, sessions)
+        )
         if sessions_on_day >= _DAY_CAP:
             print(f"  Skipping {date_str} {time_text}: day cap reached ({sessions_on_day}/{_DAY_CAP}).")
             if slot_log is not None:
                 slot_log["result"] = "skipped_day_cap"
             continue
+        target_count = min(target_count, _DAY_CAP - sessions_on_day)
 
         # Rate limit: cap total app-initiated bookings within the current time window
         recent = _recent_booking_count(state_obj)
@@ -200,56 +260,132 @@ def _api_scan(
             send_telegram(f"🎯 Trying to book {date_str} {time_text} (courts: {', '.join(open_courts)})")
         except Exception:
             pass
-        booked_court: str | None = None
+        booked_in_slot: list[dict] = []
+        used_accounts: set[int] = set()
         all_attempts: list[dict] = []
-        for attempt in range(1, 6):
-            for court in COURT_PREFERENCE:
-                if court_avail.get(court) is not True:
-                    continue
-                transaction_log: dict = {}
-                slot_attempt = {"attempt": attempt, "court": court, "result": "trying"}
-                all_attempts.append(slot_attempt)
-                if slot_log is not None:
-                    slot_log["attempts"].append(slot_attempt)
+        for booking_num in range(target_count):
+            recent = _recent_booking_count(state_obj)
+            if recent >= _RATE_CAP:
+                msg = f"⚠️ Booking rate limit reached ({recent} in window). Halting auto-book."
+                print(msg)
                 try:
-                    ok = book_slot_api(jwt, date.fromisoformat(date_str), time_text, court, transaction_log=transaction_log)
-                except Exception as exc:
-                    print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
-                    slot_attempt["result"] = "error"
-                    slot_attempt["error"] = str(exc)
-                    ok = False
-                slot_attempt["transaction"] = transaction_log
-                if ok:
-                    booked_court = court
-                    slot_attempt["result"] = "booked"
-                    break
-                if slot_attempt["result"] == "trying":
-                    slot_attempt["result"] = "failed"
-            if booked_court:
-                break
-            if attempt < 5:
-                print(f"  All courts failed (attempt {attempt}/5), retrying…")
-                retry_entry = {"attempt": attempt, "result": "retrying"}
-                all_attempts.append(retry_entry)
+                    send_telegram(msg)
+                except Exception:
+                    pass
                 if slot_log is not None:
-                    slot_log["attempts"].append(retry_entry)
-        if booked_court:
-            booked.append({"date": date_str, "time": time_text, "court": booked_court})
+                    slot_log["result"] = "rate_limited"
+                break
+
+            booked_court: str | None = None
+            booked_account: int | None = None
+            for attempt in range(1, 6):
+                for session in sessions:
+                    account_index = int(session.get("account_index") or 1)
+                    if account_index in used_accounts:
+                        continue
+                    court_order = (
+                        _paired_court_order([b["court"] for b in booked_in_slot])
+                        if target_count > 1
+                        else COURT_PREFERENCE
+                    )
+                    for court in court_order:
+                        if court_avail.get(court) is not True:
+                            continue
+                        transaction_log: dict = {}
+                        slot_attempt = {
+                            "attempt": attempt,
+                            "account_index": account_index,
+                            "court": court,
+                            "result": "trying",
+                        }
+                        all_attempts.append(slot_attempt)
+                        if slot_log is not None:
+                            slot_log["attempts"].append(slot_attempt)
+                        try:
+                            participant_user_id = str(session.get("participant_user_id") or "")
+                            if participant_user_id:
+                                ok = book_slot_api(
+                                    str(session["jwt"]),
+                                    date.fromisoformat(date_str),
+                                    time_text,
+                                    court,
+                                    transaction_log=transaction_log,
+                                    participant_user_id=participant_user_id,
+                                )
+                            else:
+                                ok = book_slot_api(
+                                    str(session["jwt"]),
+                                    date.fromisoformat(date_str),
+                                    time_text,
+                                    court,
+                                    transaction_log=transaction_log,
+                                )
+                        except Exception as exc:
+                            print(f"  Booking error {date_str} {time_text} Court {court} (attempt {attempt}/5): {exc}")
+                            slot_attempt["result"] = "error"
+                            slot_attempt["error"] = str(exc)
+                            ok = False
+                        slot_attempt["transaction"] = transaction_log
+                        if ok:
+                            booked_court = court
+                            booked_account = account_index
+                            slot_attempt["result"] = "booked"
+                            break
+                        if slot_attempt["result"] == "trying":
+                            slot_attempt["result"] = "failed"
+                    if booked_court:
+                        break
+                if booked_court:
+                    break
+                if attempt < 5:
+                    print(f"  All courts failed for booking {booking_num + 1}/{target_count} (attempt {attempt}/5), retrying…")
+                    retry_entry = {"attempt": attempt, "booking_num": booking_num + 1, "result": "retrying"}
+                    all_attempts.append(retry_entry)
+                    if slot_log is not None:
+                        slot_log["attempts"].append(retry_entry)
+            if not booked_court:
+                break
+            booked_item = {"date": date_str, "time": time_text, "court": booked_court}
+            if booked_account is not None:
+                booked_item["account_index"] = booked_account
+                used_accounts.add(booked_account)
+            if not include_account_index:
+                booked_item.pop("account_index", None)
+            booked_in_slot.append(booked_item)
+            court_avail[booked_court] = False
+
+            booked.append(booked_item)
             if date_str in new_avail and time_text in new_avail[date_str]:
                 new_avail[date_str][time_text][booked_court] = False
             log = list(state_obj.get("app_booking_log") or [])
-            entry = {"booked_at": _utc_now_iso(), "date": date_str, "time": time_text, "court": booked_court, "attempts": all_attempts}
+            entry = {
+                "booked_at": _utc_now_iso(),
+                "date": date_str,
+                "time": time_text,
+                "court": booked_court,
+                "attempts": all_attempts,
+            }
+            if include_account_index and booked_account is not None:
+                entry["account_index"] = booked_account
             log.insert(0, entry)
             state_obj["app_booking_log"] = log
             save_state(state_obj)
             if slot_log is not None:
                 slot_log["result"] = "booked"
                 slot_log["court"] = booked_court
-            # After a successful 9 AM booking on a weekend, also try 8 AM if available.
-            if time_text == "9:00 AM" and date.fromisoformat(date_str).weekday() >= 5:
-                eight_avail = new_avail.get(date_str, {}).get("8:00 AM", {})
-                if _preferred_open_court(eight_avail) is not None:
-                    to_book.insert(i, (date_str, "8:00 AM", eight_avail))
+                slot_log["booked"] = booked_in_slot.copy()
+        if booked_in_slot:
+            followup_time = _weekend_followup_time(date_str, time_text)
+            if followup_time:
+                followup_avail = new_avail.get(date_str, {}).get(followup_time, {})
+                followup_key = (date_str, followup_time)
+                queued_slots = {(d, t) for d, t, _ in to_book[i:]}
+                if (
+                    followup_key not in processed_slots
+                    and followup_key not in queued_slots
+                    and _preferred_open_court(followup_avail) is not None
+                ):
+                    to_book.insert(i, (date_str, followup_time, followup_avail))
         else:
             failures = list(state_obj.get("auto_book_failures") or [])
             failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts", "attempts": all_attempts}
