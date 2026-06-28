@@ -441,7 +441,7 @@ def test_weekend_auto_book_uses_two_accounts_for_saturday_targets(monkeypatch):
     assert len(saved_states[-1]["app_booking_log"]) == 4
 
 
-def test_release_probe_post_scan_does_not_require_single_jwt(monkeypatch):
+def test_release_probe_window_does_not_call_api_scan(monkeypatch):
     import copy
     import scheduler as scheduler_mod
     from config import PT
@@ -465,6 +465,7 @@ def test_release_probe_post_scan_does_not_require_single_jwt(monkeypatch):
         "app_booking_log": [],
     }
     api_scan_calls = []
+    book_calls = []
 
     def fake_save_state(value):
         snapshot = copy.deepcopy(value)
@@ -482,7 +483,11 @@ def test_release_probe_post_scan_does_not_require_single_jwt(monkeypatch):
             {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
         ],
     )
-    monkeypatch.setattr(scheduler_mod, "book_slot_api", lambda *args, **kwargs: False)
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        book_calls.append((jwt, participant_user_id, slot_date.isoformat(), time_text, court))
+        return False
+
+    monkeypatch.setattr(scheduler_mod, "book_slot_api", fake_book_slot)
     monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
     monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
     monkeypatch.setattr(scheduler_mod, "_enqueue_work", lambda *args, **kwargs: False)
@@ -497,8 +502,9 @@ def test_release_probe_post_scan_does_not_require_single_jwt(monkeypatch):
 
     scheduler_mod._run_release_probe_session()
 
-    assert api_scan_calls
-    assert all("jwt" not in call for call in api_scan_calls)
+    assert api_scan_calls == []
+    assert book_calls
+    assert {call[0] for call in book_calls} == {"jwt-1", "jwt-2"}
 
 
 def test_one_off_probe_blind_books_exact_target(monkeypatch):
@@ -785,6 +791,7 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     monkeypatch.setattr(scheduler_mod, "_firebase_login", lambda: (_ for _ in ()).throw(AssertionError("login should not run")))
     monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
     monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
+    monkeypatch.setattr(scheduler_mod, "_enqueue_work", lambda *args, **kwargs: False)
     monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
     monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
@@ -826,6 +833,127 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
         and entry.get("targets")
         for entry in saved_states[-1]["release_probe_log"]
     )
+
+
+def test_release_probe_session_blind_books_entire_two_minute_window(monkeypatch):
+    import copy
+    import scheduler as scheduler_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            if cls.calls == 1:
+                value = datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT)
+            elif cls.calls == 2:
+                value = datetime(2026, 5, 30, 8, 0, 10, tzinfo=PT)
+            else:
+                value = datetime(2026, 5, 30, 8, 2, 1, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {
+        "cached_jwt": "jwt",
+        "cached_jwt_expires_at": "2026-05-30T16:30:00.000Z",
+        "my_reservations": [],
+        "auto_book_slots": [],
+        "release_probe_log": [],
+        "app_booking_log": [],
+        "auto_book_failures": [],
+    }
+    saved_states = []
+    book_calls = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
+
+    monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: [{"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"}],
+    )
+    monkeypatch.setattr(scheduler_mod, "_get_cached_jwt", lambda value: "jwt")
+    monkeypatch.setattr(scheduler_mod, "_firebase_login", lambda: (_ for _ in ()).throw(AssertionError("login should not run")))
+    monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
+    monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
+    monkeypatch.setattr(scheduler_mod, "_enqueue_work", lambda *args, **kwargs: False)
+    monkeypatch.setattr(scheduler_mod, "send_telegram", lambda msg: None)
+    monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        book_calls.append((slot_date.isoformat(), time_text, court))
+        transaction_log["reservation"] = {"response": {"status": 409}}
+        return False
+
+    monkeypatch.setattr(scheduler_mod, "book_slot_api", fake_book_slot)
+
+    scheduler_mod._run_release_probe_session()
+
+    assert len(book_calls) == 24
+    assert book_calls[:6] == [
+        ("2026-06-13", "9:00 AM", "6"),
+        ("2026-06-13", "9:00 AM", "5"),
+        ("2026-06-13", "9:00 AM", "4"),
+        ("2026-06-13", "9:00 AM", "6"),
+        ("2026-06-13", "9:00 AM", "5"),
+        ("2026-06-13", "9:00 AM", "4"),
+    ]
+    burst_failures = [
+        entry for entry in saved_states[-1]["release_probe_log"]
+        if entry.get("phase") == "burst" and entry.get("result") == "failed"
+    ]
+    assert len(burst_failures) == 4
+
+
+def test_weekend_late_probe_uses_blind_booking(monkeypatch):
+    import copy
+    import scheduler as scheduler_mod
+
+    state = {
+        "my_reservations": [],
+        "app_booking_log": [],
+        "auto_book_failures": [],
+    }
+    saved_states = []
+    book_calls = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
+
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: [{"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"}],
+    )
+    monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, booked: None)
+    monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda booked: None)
+    monkeypatch.setattr(scheduler_mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("late retry should not scan")))
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        book_calls.append((jwt, participant_user_id, slot_date.isoformat(), time_text, court))
+        return len(book_calls) == 1
+
+    monkeypatch.setattr(scheduler_mod, "book_slot_api", fake_book_slot)
+
+    scheduler_mod._run_weekend_late_probes("2026-06-13", "9:00 AM")
+
+    assert book_calls == [("jwt-1", "user-1", "2026-06-13", "9:00 AM", "6")]
+    assert saved_states[-1]["app_booking_log"][0]["date"] == "2026-06-13"
 
 
 def test_release_probe_session_skips_weekday_before_login(monkeypatch):

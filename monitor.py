@@ -43,11 +43,11 @@ def handler(event, context):
         return
 
     if event.get("_targeted_daily_scan"):
-        _run_targeted_daily_scan()
+        print("Skipping targeted daily scan: automatic API probing is disabled.")
         return
 
     if event.get("_scheduled"):
-        _run_full_refresh_worker(force=True)
+        print("Skipping scheduled refresh: automatic API probing is disabled.")
         return
 
     if event.get("_booking_agent"):
@@ -66,27 +66,12 @@ def handler(event, context):
 
     if event.get("source") == "aws.events":
         state = load_state()
-        interval = float(state.get("scan_interval_hours") or 1.0)
         _queue_release_probe_session_if_needed(state)
         state = load_state()
-        interval = float(state.get("scan_interval_hours") or 1.0)
-        from datetime import datetime, timezone
-        if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
-            print(f"Skipping tick: interval={interval} hr.")
-            return
-        if interval < 0.25:
-            state = load_state()
-            if _queued_scheduled_probe_is_current(state, interval):
-                print(f"Skipping tick: scheduled probe already queued for {state.get('queued_scheduled_probe_at')}.")
-                return
-            _run_scheduled_worker()
-            state = load_state()
-            _queue_next_scheduled_probe(float(state.get("scan_interval_hours") or 1.0), state=state, force=True)
-        else:
-            if state.get("queued_scheduled_probe_token"):
-                _clear_queued_scheduled_probe(state)
-                save_state(state)
-            _run_targeted_daily_scan()
+        if state.get("queued_scheduled_probe_token"):
+            _clear_queued_scheduled_probe(state)
+            save_state(state)
+        print("Skipping EventBridge scan tick: automatic API probing is disabled.")
         return
 
     method = get_method(event)

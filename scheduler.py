@@ -882,8 +882,8 @@ def _run_release_probe_session() -> None:
                 _time.sleep(delay_seconds)
             for target_time in release_times:
                 _blind_book_release_target(target_time)
-            # Post-burst: probe every 15s until 8:02 AM for any target still not reserved.
-            release_targets: dict[str, list[str]] = {new_day.isoformat(): list(release_times)}
+            # Keep direct booking attempts through 8:02 AM; availability probes can lag
+            # or fail while the reservation endpoint is already accepting requests.
             while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
                 if all(
                     _burst_slot_already_reserved(new_day.isoformat(), target_time)
@@ -891,7 +891,10 @@ def _run_release_probe_session() -> None:
                 ):
                     break
                 t0 = _time.monotonic()
-                _one_probe("post", targets_override=release_targets)
+                for target_time in release_times:
+                    if _burst_slot_already_reserved(new_day.isoformat(), target_time):
+                        continue
+                    _blind_book_release_target(target_time)
                 elapsed = _time.monotonic() - t0
                 _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
             # Queue late relays (~8:15 AM) only for slots still not reserved.
@@ -998,7 +1001,7 @@ def _run_weekend_payment_check(target_date: str, target_time: str) -> None:
 
 
 def _run_weekend_late_relay(target_date: str, target_time: str) -> None:
-    """~8:15 AM: run payment check, then queue the 8:30-8:40 late probe session."""
+    """~8:15 AM: run payment check, then queue the 8:32-8:42 late probe session."""
     _run_weekend_payment_check(target_date, target_time)
     state = load_state()
     if any(
@@ -1010,14 +1013,14 @@ def _run_weekend_late_relay(target_date: str, target_time: str) -> None:
     late_probes_queued = bool(_enqueue_work(
         "weekend_late_probes",
         {"date": target_date, "time": target_time},
-        delay_seconds=900,  # 15 min → fires ~8:30 AM
+        delay_seconds=1020,  # 17 min -> fires ~8:32 AM
     ))
     if late_probes_queued:
-        print(f"Queued weekend_late_probes for {target_date} {target_time} (~8:30 AM).")
+        print(f"Queued weekend_late_probes for {target_date} {target_time} (~8:32 AM).")
 
 
 def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
-    """~8:30 AM: probe every 60s for 10 minutes to catch reservation expirations."""
+    """~8:32 AM: blind-book every 60s for 10 minutes to catch reservation expirations."""
     import time as _time
     state = load_state()
     if any(
@@ -1032,34 +1035,111 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
     except Exception as exc:
         print(f"Late probes: login failed: {exc}")
         return
-    targets = {target_date: [target_time]}
-    for probe_num in range(10):
+    target_day = date.fromisoformat(target_date)
+    target_count = min(2, max(1, len(_rec_booking_sessions(state))))
+    target_courts = _paired_court_order([])
+    for attempt_num in range(10):
         state = load_state()
         if any(
             r.get("date") == target_date and r.get("time") == target_time
             for r in (state.get("my_reservations") or [])
         ):
-            print(f"Late probe {probe_num + 1}: {target_date} {target_time} now reserved. Done.")
+            print(f"Late blind booking {attempt_num + 1}: {target_date} {target_time} now reserved. Done.")
             return
-        auto_book_slots = state.get("auto_book_slots") or []
-        print(f"  [late probe {probe_num + 1}/10] scanning {target_date} {target_time}…")
-        try:
-            _, booked = _api_scan(
-                target_times_by_date=targets,
-                auto_book_slots=auto_book_slots,
-            )
-            if booked:
-                print(f"  [late probe {probe_num + 1}/10] Booked: {booked}")
-                state = load_state()
-                _apply_booked_slots(state, booked)
-                save_state(state)
-                _notify_booked_slots(booked)
-                return
-        except Exception as exc:
-            print(f"  [late probe {probe_num + 1}/10] Error: {exc}")
-        if probe_num < 9:
+        print(f"  [late blind booking {attempt_num + 1}/10] trying {target_date} {target_time}…")
+        booked: list[dict] = []
+        booking_attempts: list[dict] = []
+        used_accounts: set[int] = set()
+        used_courts: set[str] = set()
+        for booking_num in range(target_count):
+            booked_one = False
+            for round_num in range(2):
+                if booked_one:
+                    break
+                for session in _rec_booking_sessions(state):
+                    account_index = int(session.get("account_index") or 1)
+                    if account_index in used_accounts:
+                        continue
+                    court_order = (
+                        _paired_court_order(list(used_courts), target_courts)
+                        if target_count > 1
+                        else target_courts
+                    )
+                    for court in court_order:
+                        if court in used_courts:
+                            continue
+                        transaction_log: dict = {}
+                        attempt = {
+                            "round": round_num + 1,
+                            "booking_num": booking_num + 1,
+                            "account_index": account_index,
+                            "court": court,
+                            "result": "trying",
+                            "transaction": transaction_log,
+                        }
+                        booking_attempts.append(attempt)
+                        try:
+                            ok = book_slot_api(
+                                str(session["jwt"]),
+                                target_day,
+                                target_time,
+                                court,
+                                transaction_log=transaction_log,
+                                participant_user_id=str(session.get("participant_user_id") or ""),
+                            )
+                        except Exception as exc:
+                            attempt["result"] = "error"
+                            attempt["error"] = str(exc)
+                            print(f"  Late blind booking error {target_date} {target_time} Court {court}: {exc}")
+                            ok = False
+                        if ok:
+                            attempt["result"] = "booked"
+                            booked_slot = {
+                                "date": target_date,
+                                "time": target_time,
+                                "court": court,
+                                "account_index": account_index,
+                            }
+                            booked.append(booked_slot)
+                            used_accounts.add(account_index)
+                            used_courts.add(court)
+                            booked_one = True
+                            break
+                        attempt.setdefault("result", "failed")
+                    if booked_one:
+                        break
+        state = load_state()
+        if booked:
+            log = list(state.get("app_booking_log") or [])
+            for booked_slot in booked:
+                log.insert(0, {
+                    "booked_at": _utc_now_iso(),
+                    "date": booked_slot["date"],
+                    "time": booked_slot["time"],
+                    "court": booked_slot["court"],
+                    "account_index": booked_slot["account_index"],
+                    "attempts": booking_attempts,
+                })
+            state["app_booking_log"] = log
+            _apply_booked_slots(state, booked)
+            save_state(state)
+            _notify_booked_slots(booked)
+            print(f"  [late blind booking {attempt_num + 1}/10] Booked: {booked}")
+            return
+        if attempt_num == 9:
+            failures = list(state.get("auto_book_failures") or [])
+            failures.insert(0, {
+                "failed_at": _utc_now_iso(),
+                "date": target_date,
+                "time": target_time,
+                "error": "Late blind booking failed",
+                "attempts": booking_attempts,
+            })
+            state["auto_book_failures"] = failures
+            save_state(state)
+        if attempt_num < 9:
             _time.sleep(60)
-    print(f"Late probes complete: {target_date} {target_time} not booked after 10 probes.")
+    print(f"Late blind booking complete: {target_date} {target_time} not booked after 10 attempts.")
 
 
 def _run_one_off_probe(
@@ -1265,7 +1345,7 @@ def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None 
 def _run_queue_work(message: dict) -> None:
     kind = message.get("kind")
     if kind == "scheduled_probe":
-        _run_queued_scheduled_probe(str(message.get("token") or ""))
+        print("Skipping scheduled probe queue item: automatic API probing is disabled.")
     elif kind == "release_probe_session":
         _run_release_probe_session()
     elif kind == "booking_agent_prep_retry":

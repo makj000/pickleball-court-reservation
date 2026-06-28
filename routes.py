@@ -274,12 +274,8 @@ def handle_scan_interval(event) -> dict:
     state = load_state()
     state["scan_interval_hours"] = requested
     _clear_queued_scheduled_probe(state)
-    if requested < 0.25:
-        queued = _queue_next_scheduled_probe(requested, state=state, force=True)
-        state = load_state()
-    else:
-        save_state(state)
-        queued = False
+    save_state(state)
+    queued = False
     return {
         "statusCode": 200,
         "headers": CORS_HEADERS,
