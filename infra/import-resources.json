@@ -1,0 +1,69 @@
+[
+  {
+    "ResourceType": "AWS::SQS::Queue",
+    "LogicalResourceId": "WorkQueue",
+    "ResourceIdentifier": {
+      "QueueUrl": "https://sqs.us-west-2.amazonaws.com/392202703753/pickleball-monitor-work"
+    }
+  },
+  {
+    "ResourceType": "AWS::IAM::RolePolicy",
+    "LogicalResourceId": "LambdaSqsPolicy",
+    "ResourceIdentifier": {
+      "RoleName": "pickleball-lambda-role",
+      "PolicyName": "pickleball-monitor-work-queue"
+    }
+  },
+  {
+    "ResourceType": "AWS::Lambda::EventSourceMapping",
+    "LogicalResourceId": "LambdaQueueEventSourceMapping",
+    "ResourceIdentifier": {
+      "Id": "373ea22f-4df3-492c-a0b8-3ac3595cf109"
+    }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "BookingAgentPrepRule",
+    "ResourceIdentifier": {
+      "Arn": "arn:aws:events:us-west-2:392202703753:rule/booking-agent-prep"
+    }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "BookingAgentReportRule",
+    "ResourceIdentifier": {
+      "Arn": "arn:aws:events:us-west-2:392202703753:rule/booking-agent-report"
+    }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Permission",
+    "LogicalResourceId": "BookingAgentPrepInvokePermission",
+    "ResourceIdentifier": {
+      "FunctionName": "pickleball-monitor",
+      "Id": "booking-agent-prep-invoke"
+    }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Permission",
+    "LogicalResourceId": "BookingAgentReportInvokePermission",
+    "ResourceIdentifier": {
+      "FunctionName": "pickleball-monitor",
+      "Id": "booking-agent-report-invoke"
+    }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Permission",
+    "LogicalResourceId": "FunctionUrlInvokePermission",
+    "ResourceIdentifier": {
+      "FunctionName": "pickleball-monitor",
+      "Id": "public-function-url-invoke"
+    }
+  },
+  {
+    "ResourceType": "AWS::S3::BucketPolicy",
+    "LogicalResourceId": "UiBucketPolicy",
+    "ResourceIdentifier": {
+      "Bucket": "pickleball-monitor-kma"
+    }
+  }
+]
