@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 
 os.environ.setdefault("EMAIL", "x")
 os.environ.setdefault("PASSWORD", "x")
+os.environ.setdefault("SCANS_ENABLED", "1")
+os.environ.setdefault("AUTO_BOOKING_ENABLED", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
@@ -373,7 +375,7 @@ def test_release_probe_auto_books_preferred_release_day_first(monkeypatch):
     ]
 
 
-def test_weekend_auto_book_uses_two_accounts_for_saturday_targets(monkeypatch):
+def test_weekend_auto_book_uses_main_account_for_saturday_targets(monkeypatch):
     import copy
     import scanner as scanner_mod
 
@@ -398,8 +400,8 @@ def test_weekend_auto_book_uses_two_accounts_for_saturday_targets(monkeypatch):
         "_api_fetch_availability",
         lambda target_times_by_date=None: {
             "2026-06-13": {
+                "8:00 AM": {"6": True, "4": True, "5": True},
                 "9:00 AM": {"6": True, "4": True, "5": True},
-                "10:00 AM": {"6": True, "4": True, "5": True},
             },
         },
     )
@@ -421,24 +423,20 @@ def test_weekend_auto_book_uses_two_accounts_for_saturday_targets(monkeypatch):
 
     _, booked = scanner_mod._api_scan(
         auto_book_slots=[
+            {"date": "2026-06-13", "time": "8:00 AM"},
             {"date": "2026-06-13", "time": "9:00 AM"},
-            {"date": "2026-06-13", "time": "10:00 AM"},
         ],
     )
 
     assert booked == [
-        {"date": "2026-06-13", "time": "9:00 AM", "court": "6", "account_index": 1},
-        {"date": "2026-06-13", "time": "9:00 AM", "court": "5", "account_index": 2},
-        {"date": "2026-06-13", "time": "10:00 AM", "court": "6", "account_index": 1},
-        {"date": "2026-06-13", "time": "10:00 AM", "court": "5", "account_index": 2},
+        {"date": "2026-06-13", "time": "9:00 AM", "court": "6"},
+        {"date": "2026-06-13", "time": "8:00 AM", "court": "6"},
     ]
     assert booked_calls == [
         ("jwt-1", "user-1", "2026-06-13", "9:00 AM", "6"),
-        ("jwt-2", "user-2", "2026-06-13", "9:00 AM", "5"),
-        ("jwt-1", "user-1", "2026-06-13", "10:00 AM", "6"),
-        ("jwt-2", "user-2", "2026-06-13", "10:00 AM", "5"),
+        ("jwt-1", "user-1", "2026-06-13", "8:00 AM", "6"),
     ]
-    assert len(saved_states[-1]["app_booking_log"]) == 4
+    assert len(saved_states[-1]["app_booking_log"]) == 2
 
 
 def test_release_probe_window_does_not_call_api_scan(monkeypatch):
@@ -504,7 +502,73 @@ def test_release_probe_window_does_not_call_api_scan(monkeypatch):
 
     assert api_scan_calls == []
     assert book_calls
-    assert {call[0] for call in book_calls} == {"jwt-1", "jwt-2"}
+    assert {call[0] for call in book_calls} == {"jwt-1"}
+
+
+def test_queue_release_probe_allows_late_eventbridge_tick(monkeypatch):
+    import copy
+    import config as config_mod
+    import scheduler as scheduler_mod
+    from config import PT
+
+    state = {
+        "auto_book_slots": [{"date": "2026-07-25", "time": "8:00 AM"}],
+        "watched_slots": [],
+    }
+    saved_states = []
+    enqueued = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
+
+    monkeypatch.setattr(config_mod, "WORK_QUEUE_URL", "https://sqs.example/queue")
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scheduler_mod, "_rec_booking_sessions", lambda st: [{"jwt": "jwt"}])
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_enqueue_work",
+        lambda kind, payload=None, delay_seconds=0: enqueued.append((kind, payload, delay_seconds)) or True,
+    )
+
+    queued = scheduler_mod._queue_release_probe_session_if_needed(
+        state,
+        now_pt=datetime(2026, 5, 30, 7, 46, tzinfo=PT),
+    )
+
+    assert queued is True
+    assert state["release_probe_session_date"] == "2026-05-30"
+    assert enqueued == [("release_probe_session", {}, 780)]
+    assert saved_states
+
+
+def test_queue_release_probe_dedupes_within_window(monkeypatch):
+    import config as config_mod
+    import scheduler as scheduler_mod
+    from config import PT
+
+    state = {
+        "release_probe_session_date": "2026-05-30",
+        "auto_book_slots": [{"date": "2026-07-25", "time": "8:00 AM"}],
+    }
+
+    monkeypatch.setattr(config_mod, "WORK_QUEUE_URL", "https://sqs.example/queue")
+    monkeypatch.setattr(scheduler_mod, "save_state", lambda value: None)
+    monkeypatch.setattr(scheduler_mod, "_rec_booking_sessions", lambda st: [{"jwt": "jwt"}])
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_enqueue_work",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue twice")),
+    )
+
+    queued = scheduler_mod._queue_release_probe_session_if_needed(
+        state,
+        now_pt=datetime(2026, 5, 30, 7, 50, tzinfo=PT),
+    )
+
+    assert queued is True
 
 
 def test_one_off_probe_blind_books_exact_target(monkeypatch):
@@ -662,8 +726,8 @@ def test_set_auto_book_uses_saturday_release_targets(monkeypatch):
 
     assert result["ok"] is True
     assert result["auto_book_slots"] == [
+        {"date": "2026-06-13", "time": "8:00 AM"},
         {"date": "2026-06-13", "time": "9:00 AM"},
-        {"date": "2026-06-13", "time": "10:00 AM"},
     ]
 
 
@@ -816,17 +880,14 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     scheduler_mod._run_release_probe_session()
 
     assert book_calls == [
+        ("2026-06-13", "8:00 AM", "6"),
         ("2026-06-13", "9:00 AM", "6"),
-        ("2026-06-13", "9:00 AM", "5"),
-        ("2026-06-13", "10:00 AM", "6"),
-        ("2026-06-13", "10:00 AM", "5"),
     ]
     assert saved_states[-1]["last_release_probe_session"] is not None
     assert any(
         entry.get("phase") == "burst"
         and entry.get("booked") == [
-            "2026-06-13 9:00 AM Court 6",
-            "2026-06-13 9:00 AM Court 5",
+            "2026-06-13 8:00 AM Court 6",
         ]
         and entry.get("booking_attempts")
         and entry["booking_attempts"][0]["transaction"]["verification"]["confirmed"] is True
@@ -900,6 +961,14 @@ def test_release_probe_session_blind_books_entire_two_minute_window(monkeypatch)
 
     assert len(book_calls) == 24
     assert book_calls[:6] == [
+        ("2026-06-13", "8:00 AM", "6"),
+        ("2026-06-13", "8:00 AM", "5"),
+        ("2026-06-13", "8:00 AM", "4"),
+        ("2026-06-13", "8:00 AM", "6"),
+        ("2026-06-13", "8:00 AM", "5"),
+        ("2026-06-13", "8:00 AM", "4"),
+    ]
+    assert book_calls[6:12] == [
         ("2026-06-13", "9:00 AM", "6"),
         ("2026-06-13", "9:00 AM", "5"),
         ("2026-06-13", "9:00 AM", "4"),

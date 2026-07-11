@@ -5,7 +5,10 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 import json
 
-from config import COURT_PREFERENCE, COURT_SITE_IDS, PT, SLOT_TIMES, TARGET_COURTS, _HHMM_TO_TIME_TEXT
+from config import (
+    COURT_PREFERENCE, COURT_SITE_IDS, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
+    SLOT_TIMES, TARGET_COURTS, _HHMM_TO_TIME_TEXT,
+)
 from state import _preferred_open_court, _utc_now_iso, load_state, save_state
 from rec_api import _firebase_login, _get_cached_jwt, _rec_booking_sessions, book_slot_api
 from notify import send_telegram
@@ -31,6 +34,9 @@ def _api_fetch_availability(
 
     Returns {date_iso: {time_text: {court_num: True|False|None}}}.
     """
+    if not SCANS_ENABLED:
+        raise RuntimeError(SCANS_DISABLED_MESSAGE)
+
     raw: dict[str, dict[str, dict]] = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
@@ -72,7 +78,7 @@ def _api_fetch_availability(
     return result
 
 
-_DAY_CAP = 6       # allows two-account bookings for both weekend target times.
+_DAY_CAP = 6
 _RATE_CAP = 6      # max app-initiated bookings per rate window
 _RATE_WINDOW_HOURS = 1  # daytime rolling window
 
@@ -110,10 +116,8 @@ def _weekend_double_book_count(
         slot_date = date.fromisoformat(date_str)
     except ValueError:
         return 1
-    if slot_date.weekday() == 5 and time_text in ("9:00 AM", "10:00 AM"):
-        return min(2, max(1, len(sessions)))
-    if slot_date.weekday() == 6 and time_text in ("8:00 AM", "9:00 AM"):
-        return min(2, max(1, len(sessions)))
+    if slot_date.weekday() >= 5 and time_text in ("8:00 AM", "9:00 AM"):
+        return 1
     return 1
 
 
@@ -122,8 +126,6 @@ def _weekend_followup_time(date_str: str, time_text: str) -> str | None:
         slot_date = date.fromisoformat(date_str)
     except ValueError:
         return None
-    if slot_date.weekday() == 5 and time_text == "9:00 AM":
-        return "10:00 AM"
     if slot_date.weekday() == 6 and time_text == "9:00 AM":
         return "8:00 AM"
     return None
@@ -156,6 +158,9 @@ def _api_scan(
 
     Returns (availability, booked_slots).
     """
+    if not SCANS_ENABLED:
+        raise RuntimeError(SCANS_DISABLED_MESSAGE)
+
     new_avail = _api_fetch_availability(target_times_by_date)
 
     if not auto_book_slots:
@@ -194,6 +199,7 @@ def _api_scan(
             if not sessions:
                 jwt = _get_cached_jwt(state_obj) or _firebase_login()
                 sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
+            sessions = sessions[:1]
             save_state(state_obj)
         except Exception as exc:
             failures = list(state_obj.get("auto_book_failures") or [])
