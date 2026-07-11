@@ -10,7 +10,10 @@ Lambda entry point — all logic lives in the sub-modules:
 import asyncio
 import json
 
-from config import CORS_HEADERS, DEFAULT_TIME_FILTER, load_check_dates
+from config import (
+    AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, CORS_HEADERS,
+    DEFAULT_TIME_FILTER, SCANS_DISABLED_MESSAGE, SCANS_ENABLED, load_check_dates,
+)
 from http_utils import (
     _build_sync_redirect, _check_auth, _is_lambda_url_request,
     _mark_booked_slots_in_scan_results, build_scan_payload,
@@ -56,6 +59,9 @@ def handler(event, context):
         return
 
     if event.get("_one_off_probe"):
+        if not AUTO_BOOKING_ENABLED:
+            print(f"Skipping one-off probe: {AUTO_BOOKING_DISABLED_MESSAGE}")
+            return
         _run_one_off_probe(
             str(event.get("date") or ""),
             str(event.get("time") or ""),
@@ -118,10 +124,22 @@ def handler(event, context):
         return handle_auto_book(event)
 
     if path == "/force-scan" and method == "POST":
+        if not SCANS_ENABLED:
+            return {
+                "statusCode": 503,
+                "headers": CORS_HEADERS,
+                "body": json.dumps({"error": SCANS_DISABLED_MESSAGE}),
+            }
         _run_full_refresh_worker(force=True)
         return handle_state(event)
 
     if path in ("/scan", "/prod/scan"):
+        if not SCANS_ENABLED:
+            return {
+                "statusCode": 503,
+                "headers": CORS_HEADERS,
+                "body": json.dumps({"error": SCANS_DISABLED_MESSAGE}),
+            }
         params = parse_query_params(event)
         mode   = (params.get("mode") or "sync").strip().lower()
 
@@ -183,6 +201,8 @@ def handler(event, context):
 
 
 if __name__ == "__main__":
+    if not SCANS_ENABLED:
+        raise SystemExit(SCANS_DISABLED_MESSAGE)
     import asyncio
     from browser import main as browser_main
     targets = load_check_dates()

@@ -80,6 +80,18 @@ Resources:
           Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
           Input: '{"_booking_agent":true,"phase":"report"}'
 
+  ReleaseProbeQueueRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: pickleball-release-probe-queue
+      ScheduleExpression: cron(45 14 ? * SAT,SUN *)
+      State: ENABLED
+      Targets:
+        - Id: lambda
+          Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
+
   BookingAgentPrepInvokePermission:
     Type: AWS::Lambda::Permission
     DeletionPolicy: Retain
@@ -99,6 +111,16 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt BookingAgentReportRule.Arn
+
+  ReleaseProbeQueueInvokePermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref FunctionName
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReleaseProbeQueueRule.Arn
 
   FunctionUrlInvokePermission:
     Type: AWS::Lambda::Permission
@@ -136,3 +158,5 @@ Outputs:
     Value: !GetAtt BookingAgentPrepRule.Arn
   BookingAgentReportRuleArn:
     Value: !GetAtt BookingAgentReportRule.Arn
+  ReleaseProbeQueueRuleArn:
+    Value: !GetAtt ReleaseProbeQueueRule.Arn

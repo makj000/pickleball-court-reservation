@@ -48,6 +48,10 @@ _RELEASE_END_S           = 120
 SYNC_SIGNING_SECRET = os.environ.get("SYNC_SIGNING_SECRET") or os.environ.get("API_PASSWORD", "")
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+SCANS_ENABLED       = os.environ.get("SCANS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+SCANS_DISABLED_MESSAGE = "Scans are disabled by SCANS_ENABLED=false."
+AUTO_BOOKING_ENABLED   = os.environ.get("AUTO_BOOKING_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+AUTO_BOOKING_DISABLED_MESSAGE = "Auto-booking is disabled by AUTO_BOOKING_ENABLED=false."
 
 BOT_HISTORY_PREFIX    = "telegram_history/"
 BOT_MAX_HISTORY_TURNS = 12

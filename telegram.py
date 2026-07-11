@@ -3,7 +3,10 @@ import os
 from datetime import date, datetime
 from urllib.request import Request, urlopen
 
-from config import CORS_HEADERS, COURT_PREFERENCE, PT, SLOT_TIMES, TELEGRAM_BOT_TOKEN
+from config import (
+    CORS_HEADERS, COURT_PREFERENCE, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
+    SLOT_TIMES, TELEGRAM_BOT_TOKEN,
+)
 from state import (
     _has_future_watched_slots, _load_chat_history, _load_telegram_usage,
     _normalize_slot_records, _record_telegram_usage, _save_chat_history, _utc_now_iso,
@@ -261,6 +264,8 @@ def _bot_run_tool(name: str, args: dict):
         save_state(state)
         return {"ok": True, "auto_watch_weekends_enabled": bool(args.get("enabled"))}
     if name == "book_slot":
+        if not SCANS_ENABLED:
+            return {"ok": False, "error": SCANS_DISABLED_MESSAGE}
         date_str = str(args.get("date", ""))
         time_text = str(args.get("time", ""))
         try:

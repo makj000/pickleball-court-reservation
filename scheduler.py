@@ -4,8 +4,10 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 from config import (
-    COURT_PREFERENCE, PT, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
-    _RELEASE_BURST_UNTIL_S, _RELEASE_END_S, _RELEASE_POST_INTERVAL_S, _RELEASE_PRE_INTERVAL_S,
+    AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, COURT_PREFERENCE, PT,
+    SCANS_DISABLED_MESSAGE, SCANS_ENABLED, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
+    _RELEASE_BURST_UNTIL_S, _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
+    _RELEASE_PRE_INTERVAL_S,
 )
 from state import (
     _active_scan_started_at, _attach_history_results, _auto_watch_on_new_day_openings,
@@ -30,7 +32,7 @@ ALLOWED_SCAN_INTERVALS = (_INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0
 
 def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
     if target_date.weekday() == 5:
-        return ("9:00 AM", "10:00 AM")
+        return ("8:00 AM", "9:00 AM")
     if target_date.weekday() == 6:
         return ("8:00 AM", "9:00 AM")
     return ()
@@ -210,6 +212,10 @@ def _queue_next_scheduled_probe(interval_hours: float, *, state: dict | None = N
 
 
 def _run_full_refresh_worker(*, force: bool = False) -> None:
+    if not SCANS_ENABLED:
+        print(f"Skipping full refresh: {SCANS_DISABLED_MESSAGE}")
+        return
+
     state = load_state()
     active_scan = _active_scan_started_at(state)
     if active_scan:
@@ -289,6 +295,10 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
 
 
 def _run_scheduled_worker() -> None:
+    if not SCANS_ENABLED:
+        print(f"Skipping scheduled scan: {SCANS_DISABLED_MESSAGE}")
+        return
+
     if not _is_within_scan_window():
         print("Outside scan window (8 AM – 10 PM PT). Skipping.")
         return
@@ -388,6 +398,10 @@ def _run_scheduled_worker() -> None:
 
 def _run_targeted_daily_scan() -> None:
     """Probe scan: weekends at 9 AM plus the newly published day for all times."""
+    if not SCANS_ENABLED:
+        print(f"Skipping targeted daily scan: {SCANS_DISABLED_MESSAGE}")
+        return
+
     import time as _time
     state = load_state()
     active_scan = _active_scan_started_at(state)
@@ -561,6 +575,10 @@ def _run_release_probe_session() -> None:
       burst (8:00–8:00:30): direct booking attempts for the new weekend release targets
       post (8:00:30–8:02): probe only the new weekend release targets every 15s
     """
+    if not AUTO_BOOKING_ENABLED:
+        print(f"Skipping release probe session: {AUTO_BOOKING_DISABLED_MESSAGE}")
+        return
+
     import time as _time
 
     now_pt = datetime.now(tz=PT)
@@ -595,6 +613,7 @@ def _run_release_probe_session() -> None:
             sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
             if not state.get("cached_jwt"):
                 _cache_jwt(state, jwt)
+        sessions = sessions[:1]
         save_state(state)
         print(f"Release probe session: logged in, JWT expires {state.get('cached_jwt_expires_at', '?')}")
         if burst_target:
@@ -619,10 +638,8 @@ def _run_release_probe_session() -> None:
 
     def _target_booking_count(target_date: str, target_time: str) -> int:
         release_target_date = date.fromisoformat(target_date)
-        if release_target_date.weekday() == 5 and target_time in ("9:00 AM", "10:00 AM"):
-            return min(2, max(1, len(sessions)))
-        if release_target_date.weekday() == 6 and target_time in ("8:00 AM", "9:00 AM"):
-            return min(2, max(1, len(sessions)))
+        if release_target_date.weekday() >= 5 and target_time in _weekend_release_booking_times(release_target_date):
+            return 1
         return 1
 
     def _reserved_count(target_date: str, target_time: str) -> int:
@@ -1002,6 +1019,10 @@ def _run_weekend_payment_check(target_date: str, target_time: str) -> None:
 
 def _run_weekend_late_relay(target_date: str, target_time: str) -> None:
     """~8:15 AM: run payment check, then queue the 8:32-8:42 late probe session."""
+    if not AUTO_BOOKING_ENABLED:
+        print(f"Skipping late relay: {AUTO_BOOKING_DISABLED_MESSAGE}")
+        return
+
     _run_weekend_payment_check(target_date, target_time)
     state = load_state()
     if any(
@@ -1021,6 +1042,10 @@ def _run_weekend_late_relay(target_date: str, target_time: str) -> None:
 
 def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
     """~8:32 AM: blind-book every 60s for 10 minutes to catch reservation expirations."""
+    if not AUTO_BOOKING_ENABLED:
+        print(f"Skipping late probes: {AUTO_BOOKING_DISABLED_MESSAGE}")
+        return
+
     import time as _time
     state = load_state()
     if any(
@@ -1036,7 +1061,7 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
         print(f"Late probes: login failed: {exc}")
         return
     target_day = date.fromisoformat(target_date)
-    target_count = min(2, max(1, len(_rec_booking_sessions(state))))
+    target_count = 1
     target_courts = _paired_court_order([])
     for attempt_num in range(10):
         state = load_state()
@@ -1056,7 +1081,7 @@ def _run_weekend_late_probes(target_date: str, target_time: str) -> None:
             for round_num in range(2):
                 if booked_one:
                     break
-                for session in _rec_booking_sessions(state):
+                for session in _rec_booking_sessions(state)[:1]:
                     account_index = int(session.get("account_index") or 1)
                     if account_index in used_accounts:
                         continue
@@ -1149,6 +1174,10 @@ def _run_one_off_probe(
     courts: list[str] | None = None,
 ) -> None:
     """Run a one-off blind booking attempt for a single date/time."""
+    if not AUTO_BOOKING_ENABLED:
+        print(f"Skipping one-off probe: {AUTO_BOOKING_DISABLED_MESSAGE}")
+        return
+
     if target_time not in SLOT_TIMES:
         print(f"One-off probe: invalid time {target_time!r}.")
         return
@@ -1308,19 +1337,23 @@ def _run_one_off_probe(
 
 
 def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None = None) -> bool:
-    """At 7:45 AM on weekends: cache JWT now, then queue the probe session to start at ~7:58 AM."""
+    """Around 7:45 AM on weekends: cache JWT, then queue the probe session to start at ~7:58 AM."""
+    if not AUTO_BOOKING_ENABLED:
+        print(f"Not queueing release probe session: {AUTO_BOOKING_DISABLED_MESSAGE}")
+        return False
+
     from config import WORK_QUEUE_URL
     now_pt = now_pt or datetime.now(tz=PT)
-    if now_pt.hour != 7 or now_pt.minute != 45:
+    if now_pt.hour != 7 or not (44 <= now_pt.minute <= 50):
         return False
     if now_pt.weekday() >= 5:
-        # Pre-cache JWT at 7:45 AM so the probe session skips login entirely.
+        # Pre-cache JWT so the probe session skips login entirely.
         try:
             _rec_booking_sessions(state)
             save_state(state)
-            print("Pre-cached JWT at 7:45 AM for 8 AM probe session.")
+            print("Pre-cached JWT for 8 AM probe session.")
         except Exception as exc:
-            print(f"7:45 AM JWT pre-cache failed: {exc}")
+            print(f"Release probe JWT pre-cache failed: {exc}")
     if not WORK_QUEUE_URL:
         print("Work queue not configured; cannot queue release probe session.")
         return False

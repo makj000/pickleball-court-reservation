@@ -22,7 +22,7 @@ PREP_RETRY_DELAY_SECONDS = 15 * 60
 
 def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
     if target_date.weekday() == 5:
-        return ("9:00 AM", "10:00 AM")
+        return ("8:00 AM", "9:00 AM")
     if target_date.weekday() == 6:
         return ("8:00 AM", "9:00 AM")
     return ()
@@ -258,7 +258,7 @@ Context:
 - The existing release probe system (7:58–8:02 AM) will automatically book whatever \
 is in auto_book_slots the moment a court opens. You don't need to do the booking yourself.
 - Courts in preference order: 6 > 4 > 5.
-- For Saturday targets, book 9:00 AM and 10:00 AM.
+- For Saturday targets, book 8:00 AM and 9:00 AM.
 - For Sunday targets, book 8:00 AM and 9:00 AM.
 
 Your task:
@@ -266,7 +266,7 @@ Your task:
 2. If the new day (14 days out) is a weekday: call done immediately. No message needed.
 3. Otherwise decide whether to queue a booking:
    - Skip if reservations already exist for all target times on that date.
-   - Queue Saturday targets as 9:00 AM and 10:00 AM; queue Sunday targets as 8:00 AM and 9:00 AM.
+   - Queue Saturday targets as 8:00 AM and 9:00 AM; queue Sunday targets as 8:00 AM and 9:00 AM.
 4. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
 5. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
 or why you're skipping). Only send if the new day is a weekend.

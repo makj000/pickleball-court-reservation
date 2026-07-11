@@ -8,6 +8,8 @@ set -a; source "$ROOT_DIR/.env" 2>/dev/null || true; set +a
 REGION="${REGION:-us-west-2}"
 STACK_NAME="${STACK_NAME:-pickleball-monitor-infra}"
 TEMPLATE="$ROOT_DIR/infra/pickleball-monitor.yaml"
+PROJECT_TAG="${PROJECT_TAG:-Pickleball}"
+SERVICE_TAG="${SERVICE_TAG:-pickleball-monitor}"
 
 : "${FUNCTION:?set FUNCTION}"
 : "${UI_BUCKET:?set UI_BUCKET}"
@@ -27,6 +29,10 @@ aws cloudformation deploy \
   --template-file "$TEMPLATE" \
   --capabilities CAPABILITY_NAMED_IAM \
   --region "$REGION" \
+  --tags \
+    Project="$PROJECT_TAG" \
+    Service="$SERVICE_TAG" \
+    Stack="$STACK_NAME" \
   --parameter-overrides \
     FunctionName="$FUNCTION" \
     LambdaRoleName="$ROLE_NAME" \
