@@ -1364,9 +1364,6 @@ def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None 
     if state.get("release_probe_session_date") == today_str:
         print(f"Release probe session already queued for {today_str}.")
         return True
-    if not _watched_and_auto_book_targets(state):
-        print("No watched/auto-book slots — skipping release probe session.")
-        return False
     state["release_probe_session_date"] = today_str
     save_state(state)
     queued = bool(_enqueue_work("release_probe_session", {}, delay_seconds=780))
@@ -1381,10 +1378,6 @@ def _run_queue_work(message: dict) -> None:
         print("Skipping scheduled probe queue item: automatic API probing is disabled.")
     elif kind == "release_probe_session":
         _run_release_probe_session()
-    elif kind == "booking_agent_prep_retry":
-        from booking_agent import run_agent
-        attempt = int(message.get("attempt") or 1)
-        run_agent("prep", retry_attempt=attempt)
     elif kind == "calendar_event":
         from calendar_sync import handle_calendar_event_work
         handle_calendar_event_work(message.get("slot") or {})

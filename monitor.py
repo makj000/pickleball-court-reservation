@@ -55,7 +55,7 @@ def handler(event, context):
 
     if event.get("_booking_agent"):
         from booking_agent import run_agent
-        run_agent(event.get("phase", "prep"))
+        run_agent(event.get("phase", "report"))
         return
 
     if event.get("_one_off_probe"):

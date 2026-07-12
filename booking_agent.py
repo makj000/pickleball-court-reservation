@@ -1,8 +1,9 @@
-"""Booking agent: intelligent prep and reporting for the 8am slot-release session.
+"""Booking agent: reporting for the 8am slot-release session.
 
-Two phases, each triggered by a separate EventBridge rule:
-  prep   (7:30am PT): decide what to auto-book, send a preview message
-  report (8:30am PT): read probe log + reservations, send results
+report (8:30am PT, EventBridge rule): read probe log + reservations, send results.
+
+The release probe session books the new day (today + 14) directly; no prep
+phase is needed to pick targets.
 """
 from __future__ import annotations
 
@@ -12,20 +13,11 @@ from datetime import date, datetime, timedelta
 
 import anthropic
 
-from config import COURT_PREFERENCE, PT, REPORT_EMAIL, SLOT_TIMES
+from config import PT, REPORT_EMAIL
 from notify import send_report_email, send_telegram
-from state import _enqueue_work, load_state, save_state
+from state import load_state
 
-MODEL = "claude-sonnet-4-6"
-PREP_RETRY_DELAY_SECONDS = 15 * 60
-
-
-def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
-    if target_date.weekday() == 5:
-        return ("8:00 AM", "9:00 AM")
-    if target_date.weekday() == 6:
-        return ("8:00 AM", "9:00 AM")
-    return ()
+MODEL = "claude-haiku-4-5"
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -39,31 +31,6 @@ TOOLS: list[dict] = [
             "release probe log entries with detailed booking attempts."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "set_auto_book",
-        "description": (
-            "Replace the auto_book_slots list. Pass the full desired list of {date, time} "
-            "pairs. The existing release probe session (7:58-8:02 AM) will book them the "
-            "moment a court opens."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "slots": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "date": {"type": "string", "description": "YYYY-MM-DD"},
-                            "time": {"type": "string", "description": "e.g. '9:00 AM'"},
-                        },
-                        "required": ["date", "time"],
-                    },
-                }
-            },
-            "required": ["slots"],
-        },
     },
     {
         "name": "send_message",
@@ -114,108 +81,6 @@ def _get_context() -> dict:
     }
 
 
-def _set_auto_book(slots: list[dict]) -> dict:
-    state = load_state()
-    today_str = date.today().isoformat()
-    new_day = date.today() + timedelta(days=14)
-    release_times = _weekend_release_booking_times(new_day)
-    new_dates = {s["date"] for s in slots}
-    slots_by_key = {
-        (s.get("date"), s.get("time")): s
-        for s in slots
-        if isinstance(s, dict)
-    }
-    if release_times and new_day.isoformat() in new_dates:
-        slots_by_key = {
-            key: slot
-            for key, slot in slots_by_key.items()
-            if key[0] != new_day.isoformat() or key[1] in release_times
-        }
-        for time_text in release_times:
-            slots_by_key.setdefault(
-                (new_day.isoformat(), time_text),
-                {"date": new_day.isoformat(), "time": time_text},
-            )
-        slots = list(slots_by_key.values())
-    kept = [
-        s for s in (state.get("auto_book_slots") or [])
-        if s.get("date", "") >= today_str and s.get("date") not in new_dates
-    ]
-
-    def _slot_sort_key(slot: dict) -> tuple[str, int]:
-        time_text = slot.get("time", "")
-        slot_date = slot.get("date", "")
-        try:
-            slot_release_times = _weekend_release_booking_times(date.fromisoformat(slot_date))
-        except ValueError:
-            slot_release_times = ()
-        if time_text in slot_release_times:
-            time_rank = slot_release_times.index(time_text)
-        else:
-            time_rank = len(slot_release_times) + (
-                SLOT_TIMES.index(time_text) if time_text in SLOT_TIMES else len(SLOT_TIMES)
-            )
-        return (slot.get("date", ""), time_rank)
-
-    state["auto_book_slots"] = sorted(kept + slots, key=_slot_sort_key)
-    save_state(state)
-    return {"ok": True, "auto_book_slots": state["auto_book_slots"]}
-
-
-def _prep_target_date() -> date:
-    return date.today() + timedelta(days=14)
-
-
-def _prep_is_complete(state: dict) -> tuple[bool, str]:
-    target_date = _prep_target_date()
-    target_str = target_date.isoformat()
-    release_times = _weekend_release_booking_times(target_date)
-    if not release_times:
-        return True, "weekday skip"
-
-    reservations = {
-        (r.get("date"), r.get("time"))
-        for r in (state.get("my_reservations") or [])
-        if isinstance(r, dict)
-    }
-    if all((target_str, time_text) in reservations for time_text in release_times):
-        return True, "already reserved"
-
-    auto_book_slots = {
-        (s.get("date"), s.get("time"))
-        for s in (state.get("auto_book_slots") or [])
-        if isinstance(s, dict)
-    }
-    if all((target_str, time_text) in auto_book_slots for time_text in release_times):
-        return True, "prep complete"
-
-    return False, f"{target_str} {' / '.join(release_times)} is not queued for auto-book"
-
-
-def _schedule_prep_retry(*, attempt: int, reason: str) -> str | None:
-    state = load_state()
-    scheduled_for = datetime.now(tz=PT) + timedelta(seconds=PREP_RETRY_DELAY_SECONDS)
-    state["booking_agent_prep_retry_attempt"] = attempt
-    state["booking_agent_prep_retry_scheduled_at"] = scheduled_for.isoformat(timespec="seconds")
-    state["booking_agent_prep_last_error"] = reason
-    save_state(state)
-    queued = _enqueue_work(
-        "booking_agent_prep_retry",
-        {"attempt": attempt},
-        delay_seconds=PREP_RETRY_DELAY_SECONDS,
-    )
-    return scheduled_for.strftime("%Y-%m-%d %I:%M %p PT") if queued else None
-
-
-def _send_prep_failure(reason: str, retry_at: str | None) -> None:
-    lines = [f"❌ Prep agent failed: {reason}"]
-    if retry_at:
-        lines.append(f"Retry scheduled: {retry_at}")
-    else:
-        lines.append("Retry not scheduled.")
-    send_telegram("\n".join(lines))
-
-
 def _weekday_report_text(state: dict, now_pt: datetime) -> str:
     booked_today = []
     for entry in state.get("app_booking_log") or []:
@@ -238,8 +103,6 @@ def _weekday_report_text(state: dict, now_pt: datetime) -> str:
 def _run_tool(name: str, args: dict) -> dict:
     if name == "get_context":
         return _get_context()
-    if name == "set_auto_book":
-        return _set_auto_book(args["slots"])
     if name == "send_message":
         send_telegram(args["text"])
         return {"ok": True}
@@ -248,32 +111,7 @@ def _run_tool(name: str, args: dict) -> dict:
     return {"error": f"unknown tool: {name}"}
 
 
-# ── System prompts ─────────────────────────────────────────────────────────────
-
-_PREP_SYSTEM = """\
-You are a pickleball court booking agent running at 7:30 AM PT.
-
-Context:
-- rec.us releases new slots at exactly 8:00 AM PT, 14 days in advance.
-- The existing release probe system (7:58–8:02 AM) will automatically book whatever \
-is in auto_book_slots the moment a court opens. You don't need to do the booking yourself.
-- Courts in preference order: 6 > 4 > 5.
-- For Saturday targets, book 8:00 AM and 9:00 AM.
-- For Sunday targets, book 8:00 AM and 9:00 AM.
-
-Your task:
-1. Call get_context.
-2. If the new day (14 days out) is a weekday: call done immediately. No message needed.
-3. Otherwise decide whether to queue a booking:
-   - Skip if reservations already exist for all target times on that date.
-   - Queue Saturday targets as 8:00 AM and 9:00 AM; queue Sunday targets as 8:00 AM and 9:00 AM.
-4. If needed, call set_auto_book with the full desired list for the target date (keep any other future slots).
-5. Send a short Telegram preview (1–2 lines: what you're targeting and why, \
-or why you're skipping). Only send if the new day is a weekend.
-6. Call done.
-
-Keep the message tight. No markdown, plain text only.
-When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
+# ── System prompt ──────────────────────────────────────────────────────────────
 
 _REPORT_SYSTEM = """\
 You are a pickleball court booking agent running at 8:10 AM PT.
@@ -296,10 +134,13 @@ When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 
-def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
-    """Run prep or report phase. Called from monitor.handler."""
+def run_agent(phase: str) -> bool:
+    """Run the report phase. Called from monitor.handler."""
+    if phase != "report":
+        print(f"Booking agent ({phase}): phase removed — skipping.")
+        return True
     now_pt = datetime.now(tz=PT)
-    if phase == "report" and now_pt.weekday() < 5:
+    if now_pt.weekday() < 5:
         report_text = _weekday_report_text(load_state(), now_pt)
         if report_text == "Nothing booked.":
             print(f"Booking agent ({phase}): weekday, nothing booked — skipping Telegram.")
@@ -316,22 +157,12 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
         print(f"Booking agent ({phase}): weekday summary sent.")
         return True
 
-    if phase == "prep" and now_pt.weekday() < 5:
-        print(f"Booking agent (prep): weekday — skipping.")
-        return True
-
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
-        if phase == "prep":
-            retry_at = _schedule_prep_retry(
-                attempt=retry_attempt + 1,
-                reason="ANTHROPIC_API_KEY not set",
-            )
-            _send_prep_failure("ANTHROPIC_API_KEY not set", retry_at)
         return False
 
     client = anthropic.Anthropic()
-    system = _PREP_SYSTEM if phase == "prep" else _REPORT_SYSTEM
+    system = _REPORT_SYSTEM
     now_str = now_pt.strftime("%Y-%m-%d %H:%M %Z")
 
     messages: list[dict] = [
@@ -342,8 +173,6 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
 
     print(f"Booking agent ({phase}) started at {now_str}.")
 
-    had_exception = False
-    error_reason = ""
     for iteration in range(12):
         try:
             response = client.messages.create(
@@ -354,9 +183,7 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
                 messages=messages,
             )
         except Exception as exc:
-            had_exception = True
-            error_reason = f"{type(exc).__name__}: {exc}"
-            print(f"Booking agent ({phase}) error: {error_reason}")
+            print(f"Booking agent ({phase}) error: {type(exc).__name__}: {exc}")
             break
         messages.append({"role": "assistant", "content": response.content})
 
@@ -372,7 +199,7 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
             if block.type != "tool_use":
                 continue
             print(f"  [{phase}] tool: {block.name}({json.dumps(block.input, default=str)[:120]})")
-            if phase == "report" and block.name == "send_message":
+            if block.name == "send_message":
                 text = str(block.input.get("text", "")).strip()
                 if text:
                     report_texts.append(text)
@@ -397,37 +224,17 @@ def run_agent(phase: str, *, retry_attempt: int = 1) -> bool:
             print(f"Booking agent ({phase}) done after {iteration + 1} iteration(s).")
             break
 
-    if phase == "report":
-        email_body = "\n\n".join(report_texts).strip()
-        if not email_body:
-            email_body = final_text
-        if email_body and REPORT_EMAIL:
-            try:
-                send_report_email(
-                    f"Pickleball {datetime.now(tz=PT).strftime('%Y-%m-%d')} 8:30 AM probe report",
-                    email_body,
-                )
-            except Exception as exc:
-                print(f"Booking agent ({phase}) report email failed: {exc}")
-
-    if phase == "prep":
-        state = load_state()
-        ready, reason = _prep_is_complete(state)
-        if ready and not had_exception:
-            state["booking_agent_prep_retry_attempt"] = None
-            state["booking_agent_prep_retry_scheduled_at"] = None
-            state["booking_agent_prep_last_error"] = None
-            save_state(state)
-            print(f"Booking agent ({phase}) prep validated: {reason}.")
-            print(f"Booking agent ({phase}) done.")
-            return True
-
-        failure_reason = error_reason or reason
-        retry_at = _schedule_prep_retry(
-            attempt=retry_attempt + 1,
-            reason=failure_reason,
-        )
-        _send_prep_failure(failure_reason, retry_at)
+    email_body = "\n\n".join(report_texts).strip()
+    if not email_body:
+        email_body = final_text
+    if email_body and REPORT_EMAIL:
+        try:
+            send_report_email(
+                f"Pickleball {datetime.now(tz=PT).strftime('%Y-%m-%d')} 8:30 AM probe report",
+                email_body,
+            )
+        except Exception as exc:
+            print(f"Booking agent ({phase}) report email failed: {exc}")
 
     print(f"Booking agent ({phase}) done.")
-    return phase != "prep" or (not had_exception and _prep_is_complete(load_state())[0])
+    return True
