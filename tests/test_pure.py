@@ -705,58 +705,6 @@ def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     assert len(transaction_log["verification"]["attempts"]) == 3
 
 
-def test_set_auto_book_uses_saturday_release_targets(monkeypatch):
-    import booking_agent as booking_agent_mod
-
-    class FixedDate(date):
-        @classmethod
-        def today(cls):
-            return cls(2026, 5, 30)
-
-    state = {"auto_book_slots": []}
-    saved_states = []
-
-    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
-    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
-    monkeypatch.setattr(booking_agent_mod, "save_state", lambda value: saved_states.append(value.copy()))
-
-    result = booking_agent_mod._set_auto_book([
-        {"date": "2026-06-13", "time": "8:00 AM"},
-    ])
-
-    assert result["ok"] is True
-    assert result["auto_book_slots"] == [
-        {"date": "2026-06-13", "time": "8:00 AM"},
-        {"date": "2026-06-13", "time": "9:00 AM"},
-    ]
-
-
-def test_set_auto_book_uses_sunday_release_targets(monkeypatch):
-    import booking_agent as booking_agent_mod
-
-    class FixedDate(date):
-        @classmethod
-        def today(cls):
-            return cls(2026, 5, 31)
-
-    state = {"auto_book_slots": []}
-    saved_states = []
-
-    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
-    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
-    monkeypatch.setattr(booking_agent_mod, "save_state", lambda value: saved_states.append(value.copy()))
-
-    result = booking_agent_mod._set_auto_book([
-        {"date": "2026-06-14", "time": "10:00 AM"},
-    ])
-
-    assert result["ok"] is True
-    assert result["auto_book_slots"] == [
-        {"date": "2026-06-14", "time": "8:00 AM"},
-        {"date": "2026-06-14", "time": "9:00 AM"},
-    ]
-
-
 def test_with_weekday_dates_adds_weekday_to_iso_dates():
     message = "2026-06-01 9:00 AM and 2026-06-06 8:00 AM"
     assert with_weekday_dates(message) == (
@@ -1104,47 +1052,6 @@ def test_weekday_report_includes_booking_made_today():
     assert booking_agent_mod._weekday_report_text(state, now_pt) == (
         "Booked: Court 6 2026-06-22 9:00 AM."
     )
-
-
-def test_prep_retry_helpers_schedule_and_notify(monkeypatch):
-    import booking_agent as booking_agent_mod
-    from config import PT
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            value = datetime(2026, 5, 23, 7, 30, tzinfo=PT)
-            return value.astimezone(tz) if tz is not None else value
-
-    state = {}
-    saved_states = []
-    enqueued = []
-    messages = []
-
-    def fake_save_state(value):
-        snapshot = value.copy()
-        state.clear()
-        state.update(snapshot)
-        saved_states.append(snapshot)
-
-    monkeypatch.setattr(booking_agent_mod, "datetime", FixedDateTime)
-    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
-    monkeypatch.setattr(booking_agent_mod, "save_state", fake_save_state)
-    monkeypatch.setattr(
-        booking_agent_mod,
-        "_enqueue_work",
-        lambda kind, payload=None, delay_seconds=0: enqueued.append((kind, payload, delay_seconds)) or True,
-    )
-    monkeypatch.setattr(booking_agent_mod, "send_telegram", lambda text: messages.append(text))
-
-    retry_at = booking_agent_mod._schedule_prep_retry(attempt=2, reason="boom")
-    booking_agent_mod._send_prep_failure("boom", retry_at)
-
-    assert enqueued == [("booking_agent_prep_retry", {"attempt": 2}, 900)]
-    assert state["booking_agent_prep_retry_attempt"] == 2
-    assert state["booking_agent_prep_retry_scheduled_at"] == "2026-05-23T07:45:00-07:00"
-    assert retry_at == "2026-05-23 07:45 AM PT"
-    assert messages == ["❌ Prep agent failed: boom\nRetry scheduled: 2026-05-23 07:45 AM PT"]
 
 
 def test_should_run_scheduled_tick_1h():

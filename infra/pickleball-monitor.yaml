@@ -54,19 +54,6 @@ Resources:
       BatchSize: 1
       Enabled: true
 
-  BookingAgentPrepRule:
-    Type: AWS::Events::Rule
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      Name: booking-agent-prep
-      ScheduleExpression: cron(30 14 ? * SAT,SUN *)
-      State: ENABLED
-      Targets:
-        - Id: lambda
-          Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
-          Input: '{"_booking_agent":true,"phase":"prep"}'
-
   BookingAgentReportRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -91,16 +78,6 @@ Resources:
       Targets:
         - Id: lambda
           Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
-
-  BookingAgentPrepInvokePermission:
-    Type: AWS::Lambda::Permission
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      FunctionName: !Ref FunctionName
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt BookingAgentPrepRule.Arn
 
   BookingAgentReportInvokePermission:
     Type: AWS::Lambda::Permission
@@ -154,8 +131,6 @@ Outputs:
     Value: !Ref WorkQueue
   WorkQueueArn:
     Value: !GetAtt WorkQueue.Arn
-  BookingAgentPrepRuleArn:
-    Value: !GetAtt BookingAgentPrepRule.Arn
   BookingAgentReportRuleArn:
     Value: !GetAtt BookingAgentReportRule.Arn
   ReleaseProbeQueueRuleArn:
