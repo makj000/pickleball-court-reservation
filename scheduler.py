@@ -613,7 +613,6 @@ def _run_release_probe_session() -> None:
             sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
             if not state.get("cached_jwt"):
                 _cache_jwt(state, jwt)
-        sessions = sessions[:1]
         save_state(state)
         print(f"Release probe session: logged in, JWT expires {state.get('cached_jwt_expires_at', '?')}")
         if burst_target:
@@ -637,9 +636,10 @@ def _run_release_probe_session() -> None:
     probe_log: list[dict] = []
 
     def _target_booking_count(target_date: str, target_time: str) -> int:
-        release_target_date = date.fromisoformat(target_date)
-        if release_target_date.weekday() >= 5 and target_time in _weekend_release_booking_times(release_target_date):
-            return 1
+        st = load_state()
+        for ab in (st.get("auto_book_slots") or []):
+            if ab.get("date") == target_date and ab.get("time") == target_time:
+                return max(1, min(3, int(ab.get("count") or 1)))
         return 1
 
     def _reserved_count(target_date: str, target_time: str) -> int:

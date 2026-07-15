@@ -410,6 +410,21 @@
       pointer-events: none;
       z-index: 2;
     }
+    .cell-account-label {
+      position: absolute;
+      left: 2px;
+      bottom: 1px;
+      max-width: calc(100% - 4px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.48rem;
+      font-weight: 800;
+      color: #1d4ed8;
+      line-height: 1;
+      pointer-events: none;
+      z-index: 2;
+    }
     .watching.s-open { animation: pulse-open 2s ease-in-out infinite; }
     .cell-watch-label {
       position: absolute;
@@ -763,15 +778,13 @@
     <span class="version-chip is-unknown" id="api-version"></span>
     <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
     <div class="mode-toggle">
-      <button class="mode-btn active-watch" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁</button>
+      <button class="mode-btn" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁</button>
+      <button class="mode-btn active-book" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens · will not book within 32 h of slot time (not enough time to cancel)">$</button>
     </div>
     <div class="mode-toggle">
       <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Mark as my reservation (shift+click)">✓</button>
       <button class="mode-btn" id="btn-friend" onclick="setMode('friend')" title="Mark as friend reservation">F</button>
       <button class="mode-btn" id="btn-sync-mine" onclick="syncMine()" title="Sync my rec.us reservations">↻</button>
-    </div>
-    <div class="mode-toggle">
-      <button class="mode-btn" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens · will not book within 32 h of slot time (not enough time to cancel)">$</button>
     </div>
     <span id="scan-current"></span>
     <div class="spacer"></div>
@@ -1208,7 +1221,7 @@ function isFocusedScanSlot(dateStr, timeStr) {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], release_probe_log: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {}, friend_reservations: [], friend_reservations_updated_at: null };
-let clickMode = 'watch';
+let clickMode = 'book';
 let toastTimer = null;
 let _logIdSeq = 0;
 let _logResizeState = null;
@@ -2238,6 +2251,7 @@ function renderGrid() {
           available: null,
           watching: false,
           mine: false,
+          reservation_accounts: [],
           friend: false,
         };
         const cell = document.createElement('div');
@@ -2250,7 +2264,7 @@ function renderGrid() {
         cell.style.gridRow = String(row);
         cell.style.gridColumn = String(2 + timeIndex * courtCount + courtIndex);
         if (slot.mine) {
-          cell.appendChild(createMineLabel());
+          cell.appendChild(createMineLabel(slot));
         } else if (slot.friend) {
           cell.appendChild(createFriendLabel());
         }
@@ -2262,7 +2276,8 @@ function renderGrid() {
         if (slot.auto_booking && !isAutoBookTooClose(day.date, slot.time)) {
           const lbl = document.createElement('span');
           lbl.className = 'cell-book-label';
-          lbl.textContent = '$';
+          const count = slot.auto_book_count || 1;
+          lbl.textContent = count > 1 ? '$' + count : '$';
           cell.appendChild(lbl);
         }
         cell.addEventListener('click', onCellClick);
@@ -2291,10 +2306,16 @@ function cellClass(slot, dateStr) {
 function cellLabel(slot, dateStr) {
   const avail = slot.available === true ? 'Open' : slot.available === false ? 'Taken' : 'Not scanned';
   let label = 'Court #' + slot.court + ' · ' + avail;
-  if (slot.mine) label += ' · My reservation';
+  if (slot.mine) label += ' · ' + reservationAccountTitle(slot);
   else if (slot.friend) label += ' · Friend reservation';
   if (slot.watching) label += ' · Watching';
-  if (slot.auto_booking && !isAutoBookTooClose(dateStr, slot.time)) label += ' · Auto-booking';
+  if (slot.auto_booking && !isAutoBookTooClose(dateStr, slot.time)) {
+    const count = slot.auto_book_count || 1;
+    label += ' · Auto-booking (' + count + ' court' + (count > 1 ? 's' : '') + ')';
+    label += count < AUTO_BOOK_MAX_COURTS
+      ? ' · click again for ' + (count + 1)
+      : ' · click again to turn off';
+  }
   if (isPastSlot(dateStr, slot.time)) label += ' · Past';
   return label;
 }
@@ -2328,11 +2349,38 @@ function createPendingDots() {
   return wrap;
 }
 
-function createMineLabel() {
+function reservationAccounts(slot) {
+  return Array.isArray(slot.reservation_accounts) ? slot.reservation_accounts : [];
+}
+
+function reservationAccountShortLabel(account) {
+  if (!account) return '✓';
+  if (account.index) return 'A' + account.index;
+  return '✓';
+}
+
+function reservationAccountTitle(slot) {
+  const accounts = reservationAccounts(slot);
+  if (!accounts.length) return 'My reservation';
+  return 'Reserved by ' + accounts.map(a => a.email || a.label || reservationAccountShortLabel(a)).join(', ');
+}
+
+function createMineLabel(slot) {
   const label = document.createElement('span');
   label.className = 'cell-mine-label';
-  label.textContent = '✓';
-  return label;
+  const accounts = reservationAccounts(slot);
+  label.textContent = accounts.length ? accounts.map(reservationAccountShortLabel).join(',') : '✓';
+  if (accounts.length) label.title = reservationAccountTitle(slot);
+  const labelText = accounts.map(a => a.label || '').filter(Boolean).join(', ');
+  if (!labelText) return label;
+  const wrap = document.createDocumentFragment();
+  wrap.appendChild(label);
+  const accountLabel = document.createElement('span');
+  accountLabel.className = 'cell-account-label';
+  accountLabel.textContent = labelText;
+  accountLabel.title = reservationAccountTitle(slot);
+  wrap.appendChild(accountLabel);
+  return wrap;
 }
 
 function createFriendLabel() {
@@ -2473,21 +2521,27 @@ async function syncMine() {
   }
 }
 
+const AUTO_BOOK_MAX_COURTS = 3;
+
 async function toggleAutoBook(date, time) {
   // auto_booking is per date+time (all courts share it) — find any slot for this date+time
   const day = appState.grid.find(d => d.date === date);
   if (!day) return;
   const anySlot = day.slots.find(s => s.time === time);
   if (!anySlot) return;
-  const wasBooking = !!anySlot.auto_booking;
-  // Toggle auto_booking for ALL courts in this date+time
+  const wasCount = anySlot.auto_booking ? (anySlot.auto_book_count || 1) : 0;
+  // Cycle 0 -> 1 -> 2 -> 3 -> 0 (one court per rec.us account), any day of the week.
+  const nextCount = (wasCount + 1) % (AUTO_BOOK_MAX_COURTS + 1);
   for (const s of day.slots) {
-    if (s.time === time) s.auto_booking = !wasBooking;
+    if (s.time === time) {
+      s.auto_booking = nextCount > 0;
+      s.auto_book_count = nextCount > 0 ? nextCount : 1;
+    }
   }
-  if (!wasBooking) {
+  if (nextCount > 0) {
     const slotMs = slotStartAt(date, time);
     if (slotMs && slotMs - Date.now() < 32 * 60 * 60 * 1000) {
-      for (const s of day.slots) { if (s.time === time) s.auto_booking = false; }
+      for (const s of day.slots) { if (s.time === time) { s.auto_booking = false; s.auto_book_count = 1; } }
       renderGrid();
       toast('Too soon: within 32 h of slot (not enough time to cancel)');
       return;
@@ -2495,10 +2549,12 @@ async function toggleAutoBook(date, time) {
   }
   renderGrid();
   const todayStr = localToday();
-  if (!wasBooking) {
+  if (nextCount === 0) {
+    toast('Auto-book removed: ' + time + ' on ' + date);
+  } else if (nextCount === 1) {
     toast('Auto-book set: ' + time + ' on ' + date);
   } else {
-    toast('Auto-book removed: ' + time + ' on ' + date);
+    toast('Auto-book set: ' + time + ' on ' + date + ' (' + nextCount + ' courts)');
   }
   // Collect unique date+time pairs marked for auto-booking
   const seen = new Set();
@@ -2509,7 +2565,9 @@ async function toggleAutoBook(date, time) {
       const key = d.date + '|' + s.time;
       if (s.auto_booking && !seen.has(key)) {
         seen.add(key);
-        autoBookSlots.push({ date: d.date, time: s.time });
+        const entry = { date: d.date, time: s.time };
+        if ((s.auto_book_count || 1) > 1) entry.count = s.auto_book_count;
+        autoBookSlots.push(entry);
       }
     }
   }

@@ -1,81 +1,40 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from datetime import date, datetime, timedelta, timezone
-from urllib.request import Request, urlopen
-import json
 
 from config import (
-    COURT_PREFERENCE, COURT_SITE_IDS, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
-    SLOT_TIMES, TARGET_COURTS, _HHMM_TO_TIME_TEXT,
+    COURT_PREFERENCE, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
+    SLOT_TIMES,
 )
 from state import _preferred_open_court, _utc_now_iso, load_state, save_state
 from rec_api import _firebase_login, _get_cached_jwt, _rec_booking_sessions, book_slot_api
 from notify import send_telegram
 
-_REC_API_BASE = "https://api.rec.us/v1/sites"
-_API_TIMEOUT  = 10
-
-
-def _fetch_one_court_raw(court_num: str, site_id: str) -> tuple[str, dict[str, dict]]:
-    """Fetch 14-day availability for one court from the rec.us API."""
-    url = f"{_REC_API_BASE}/{site_id}/availability"
-    req = Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=_API_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode())
-    date_map = data.get("data") if isinstance(data, dict) else {}
-    return court_num, date_map or {}
-
 
 def _api_fetch_availability(
     target_times_by_date: dict[str, list[str]] | None = None,
 ) -> dict[str, dict[str, dict[str, bool | None]]]:
-    """Fetch availability for all courts in parallel via the rec.us REST API.
+    """Fetch availability for all courts via a browser-based scan.
+
+    The unauthenticated rec.us REST endpoint this used to call
+    (GET /v1/sites/{site_id}/availability) now returns a bare 403 from
+    rec.us's load balancer regardless of auth, so this renders the real
+    calendar page via browser.fetch_availability_map (Playwright) instead.
 
     Returns {date_iso: {time_text: {court_num: True|False|None}}}.
     """
     if not SCANS_ENABLED:
         raise RuntimeError(SCANS_DISABLED_MESSAGE)
 
-    raw: dict[str, dict[str, dict]] = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(_fetch_one_court_raw, court_num, site_id): court_num
-            for court_num, site_id in COURT_SITE_IDS.items()
-        }
-        for future in as_completed(futures):
-            court_num, date_map = future.result()
-            raw[court_num] = date_map
+    from browser import fetch_availability_map
 
-    date_strs = {
-        (date.today() + timedelta(days=offset)).isoformat()
-        for offset in range(16)
-    }
-    if target_times_by_date is not None:
-        date_strs.update(target_times_by_date.keys())
-    for date_map in raw.values():
-        date_strs.update(date_map.keys())
+    if target_times_by_date:
+        target_dates = sorted(date.fromisoformat(d) for d in target_times_by_date)
+    else:
+        target_dates = [date.today() + timedelta(days=offset) for offset in range(16)]
 
-    result: dict[str, dict[str, dict[str, bool | None]]] = {
-        date_str: {
-            time_text: {court: False for court in TARGET_COURTS}
-            for time_text in SLOT_TIMES
-        }
-        for date_str in sorted(date_strs)
-    }
-
-    for court_num, date_map in raw.items():
-        for date_str, times_dict in date_map.items():
-            for time_key in times_dict:
-                hhmm = time_key[:5]
-                time_text = _HHMM_TO_TIME_TEXT.get(hhmm)
-                if time_text is None:
-                    continue
-                result.setdefault(date_str, {}).setdefault(
-                    time_text, {c: False for c in TARGET_COURTS}
-                )[court_num] = True
-
-    return result
+    return asyncio.run(fetch_availability_map(target_dates))
 
 
 _DAY_CAP = 6
@@ -105,20 +64,6 @@ def _recent_booking_count(state: dict) -> int:
         1 for e in (state.get("app_booking_log") or [])
         if isinstance(e, dict) and e.get("booked_at", "") >= window_start
     )
-
-
-def _weekend_double_book_count(
-    date_str: str,
-    time_text: str,
-    sessions: list[dict[str, str | int]],
-) -> int:
-    try:
-        slot_date = date.fromisoformat(date_str)
-    except ValueError:
-        return 1
-    if slot_date.weekday() >= 5 and time_text in ("8:00 AM", "9:00 AM"):
-        return 1
-    return 1
 
 
 def _weekend_followup_time(date_str: str, time_text: str) -> str | None:
@@ -172,6 +117,10 @@ def _api_scan(
         for ab in auto_book_slots
         if ab.get("date", "") >= today_str and ab.get("time", "") in SLOT_TIMES
     }
+    auto_book_count: dict[tuple[str, str], int] = {
+        (ab["date"], ab["time"]): int(ab.get("count") or 1)
+        for ab in auto_book_slots
+    }
 
     booked: list[dict] = []
     to_book = [
@@ -199,7 +148,6 @@ def _api_scan(
             if not sessions:
                 jwt = _get_cached_jwt(state_obj) or _firebase_login()
                 sessions = [{"account_index": 1, "jwt": jwt, "participant_user_id": ""}]
-            sessions = sessions[:1]
             save_state(state_obj)
         except Exception as exc:
             failures = list(state_obj.get("auto_book_failures") or [])
@@ -239,7 +187,7 @@ def _api_scan(
         target_count = (
             max(1, min(int(max_bookings_per_slot), len(sessions)))
             if max_bookings_per_slot is not None
-            else _weekend_double_book_count(date_str, time_text, sessions)
+            else max(1, min(auto_book_count.get((date_str, time_text), 1), len(sessions)))
         )
         if sessions_on_day >= _DAY_CAP:
             print(f"  Skipping {date_str} {time_text}: day cap reached ({sessions_on_day}/{_DAY_CAP}).")

@@ -113,7 +113,13 @@ def _auto_book_slot_is_too_close(slot_date: str, slot_time: str, *, now: datetim
     return now_pt > slot_start - timedelta(hours=32)
 
 
-def _normalize_slot_records(slots, *, expand_legacy: bool, default_court: str | None = None) -> list[dict]:
+def _normalize_slot_records(
+    slots,
+    *,
+    expand_legacy: bool,
+    default_court: str | None = None,
+    preserve_fields: tuple[str, ...] = (),
+) -> list[dict]:
     normalized: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for slot in slots or []:
@@ -137,7 +143,11 @@ def _normalize_slot_records(slots, *, expand_legacy: bool, default_court: str | 
             if key in seen:
                 continue
             seen.add(key)
-            normalized.append({"date": slot_date, "time": slot_time, "court": court_num})
+            record = {"date": slot_date, "time": slot_time, "court": court_num}
+            for field in preserve_fields:
+                if slot.get(field) is not None:
+                    record[field] = slot.get(field)
+            normalized.append(record)
     return normalized
 
 
@@ -234,6 +244,7 @@ def _normalize_state(state: dict) -> dict:
         state.get("my_reservations"),
         expand_legacy=False,
         default_court=COURT_PREFERENCE[0],
+        preserve_fields=("account_index", "account_email"),
     )
     normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
     normalized["my_reservations_source"] = state.get("my_reservations_source")
@@ -281,7 +292,14 @@ def _normalize_state(state: dict) -> dict:
         if key in seen_ab:
             continue
         seen_ab.add(key)
-        auto_book_slots.append({"date": slot_date, "time": slot_time})
+        try:
+            count = max(1, min(3, int(slot.get("count") or 1)))
+        except (TypeError, ValueError):
+            count = 1
+        entry = {"date": slot_date, "time": slot_time}
+        if count > 1:
+            entry["count"] = count
+        auto_book_slots.append(entry)
     normalized["auto_book_slots"] = auto_book_slots
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
     normalized["app_booking_log"] = [

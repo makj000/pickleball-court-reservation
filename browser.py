@@ -218,6 +218,27 @@ def _slots_to_availability(slots: list[dict]) -> dict[str, dict[str, bool | None
     return availability
 
 
+async def fetch_availability_map(
+    targets: list[date],
+) -> dict[str, dict[str, dict[str, bool | None]]]:
+    """Browser-based scan of the given dates, keyed by ISO date string.
+
+    Returns {date_iso: {time_text: {court: bool}}} for every SLOT_TIMES entry,
+    for use by scanner.py's periodic scan/auto-book workers now that the
+    unauthenticated rec.us availability REST endpoint (used by the old
+    _fetch_one_court_raw) returns 403.
+    """
+    result: dict[str, dict[str, dict[str, bool | None]]] = {}
+    async with async_playwright() as pw:
+        browser, context, page = await _new_page(pw)
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+        for target in targets:
+            slots = await scan_day(page, target)
+            result[target.isoformat()] = _slots_to_availability(slots)
+        await browser.close()
+    return result
+
+
 async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
     """Browser-based full scan — used by the /scan endpoint."""
     import asyncio
