@@ -7,8 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
 from config import (
-    COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, EMAIL2, FIREBASE_SIGN_IN_URL, PASSWORD,
-    PASSWORD2, PARTICIPANT_USER_ID, PARTICIPANT_USER_ID2, SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
+    COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, EMAIL2, EMAIL3, FIREBASE_SIGN_IN_URL, PASSWORD,
+    PASSWORD2, PASSWORD3, PARTICIPANT_USER_ID, PARTICIPANT_USER_ID2, PARTICIPANT_USER_ID3,
+    SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
     _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
 )
 from state import _normalize_court_number, _normalize_slot_records, _utc_now_iso
@@ -29,6 +30,13 @@ def _configured_rec_accounts() -> list[dict[str, str | int]]:
             "email": EMAIL2,
             "password": PASSWORD2,
             "participant_user_id": PARTICIPANT_USER_ID2,
+        })
+    if EMAIL3 and PASSWORD3:
+        accounts.append({
+            "index": 3,
+            "email": EMAIL3,
+            "password": PASSWORD3,
+            "participant_user_id": PARTICIPANT_USER_ID3,
         })
     return accounts
 
@@ -217,7 +225,12 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
     return _normalize_slot_records(slots, expand_legacy=False)
 
 
-def fetch_rec_my_reservations(jwt: str | None = None) -> list[dict]:
+def fetch_rec_my_reservations(
+    jwt: str | None = None,
+    *,
+    account_index: int | None = None,
+    account_email: str | None = None,
+) -> list[dict]:
     jwt = jwt or _firebase_login()
     user_id = _rec_user_id(jwt)
     all_slots: list[dict] = []
@@ -241,6 +254,11 @@ def fetch_rec_my_reservations(jwt: str | None = None) -> list[dict]:
     order = {time_text: idx for idx, time_text in enumerate(SLOT_TIMES)}
     court_order = {court: idx for idx, court in enumerate(COURT_PREFERENCE)}
     normalized = _normalize_slot_records(all_slots, expand_legacy=False)
+    for slot in normalized:
+        if account_index is not None:
+            slot["account_index"] = account_index
+        if account_email:
+            slot["account_email"] = account_email
     return sorted(
         normalized,
         key=lambda s: (
@@ -252,15 +270,36 @@ def fetch_rec_my_reservations(jwt: str | None = None) -> list[dict]:
 
 
 def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
+    accounts = _configured_rec_accounts()
+    all_slots: list[dict] = []
     try:
-        slots = fetch_rec_my_reservations()
+        if len(accounts) <= 1:
+            all_slots = fetch_rec_my_reservations()
+        else:
+            for account in accounts:
+                account_index = int(account["index"])
+                jwt = _get_cached_jwt(state, account_index)
+                if not jwt:
+                    jwt = _firebase_login(account)
+                    _cache_jwt(state, jwt, account_index)
+                all_slots.extend(
+                    fetch_rec_my_reservations(
+                        jwt,
+                        account_index=account_index,
+                        account_email=str(account.get("email") or ""),
+                    )
+                )
     except Exception as exc:
         print(f"rec.us reservations sync failed: {exc}")
         if strict:
             raise
         return False
 
-    state["my_reservations"] = slots
+    state["my_reservations"] = _normalize_slot_records(
+        all_slots,
+        expand_legacy=False,
+        preserve_fields=("account_index", "account_email"),
+    )
     state["my_reservations_synced_at"] = _utc_now_iso()
     state["my_reservations_source"] = "rec.us"
     return True

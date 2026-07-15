@@ -19,9 +19,25 @@ def handle_state(event) -> dict:
     today = date.today()
 
     watched_set   = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
-    mine_set      = {(s["date"], s["time"], s["court"]) for s in state.get("my_reservations", [])}
+    mine_by_slot: dict[tuple[str, str, str], list[dict]] = {}
+    for reservation in state.get("my_reservations", []) or []:
+        key = (reservation["date"], reservation["time"], reservation["court"])
+        account_index = reservation.get("account_index")
+        account_email = reservation.get("account_email")
+        mine_by_slot.setdefault(key, []).append({
+            "index": account_index,
+            "email": account_email,
+            "label": account_email.split("@", 1)[0] if account_email else (
+                f"Account {account_index}" if account_index else "Mine"
+            ),
+        })
+    mine_set      = set(mine_by_slot)
     friend_set    = {(s["date"], s["time"], s["court"]) for s in state.get("friend_reservations", [])}
-    auto_book_set = {(ab["date"], ab["time"]) for ab in state.get("auto_book_slots", [])}
+    auto_book_set   = {(ab["date"], ab["time"]) for ab in state.get("auto_book_slots", [])}
+    auto_book_count = {
+        (ab["date"], ab["time"]): int(ab.get("count") or 1)
+        for ab in state.get("auto_book_slots", [])
+    }
 
     grid = []
     for i in range(16):
@@ -32,14 +48,17 @@ def handle_state(event) -> dict:
         for t in SLOT_TIMES:
             time_avail = _normalize_time_availability(day_avail.get(t))
             for court in COURT_PREFERENCE:
+                key = (d_str, t, court)
                 slots.append({
                     "time":        t,
                     "court":       court,
                     "available":   time_avail.get(court),
-                    "watching":    (d_str, t, court) in watched_set,
-                    "mine":        (d_str, t, court) in mine_set,
-                    "friend":      (d_str, t, court) in friend_set,
+                    "watching":    key in watched_set,
+                    "mine":        key in mine_set,
+                    "reservation_accounts": mine_by_slot.get(key, []),
+                    "friend":      key in friend_set,
                     "auto_booking": (d_str, t) in auto_book_set,
+                    "auto_book_count": auto_book_count.get((d_str, t), 1),
                 })
         grid.append({
             "date":  d_str,
@@ -203,11 +222,14 @@ def handle_auto_book(event) -> dict:
         if key in seen:
             continue
         seen.add(key)
-        normalized.append({"date": slot_date, "time": slot_time})
+        entry = {"date": slot_date, "time": slot_time}
+        if s.get("count") is not None:
+            entry["count"] = s.get("count")
+        normalized.append(entry)
 
     state = load_state()
     state["auto_book_slots"] = normalized
-    save_state(state)
+    save_state(state)  # save_state normalizes: clamps count to 1-3
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "auto_book": len(normalized)})}
 
 

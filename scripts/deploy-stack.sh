@@ -56,12 +56,33 @@ aws lambda get-function-configuration \
   --output json > "$ENV_IN"
 python3 - "$ENV_IN" "$ENV_OUT" "$QUEUE_URL" <<'PY'
 import json
+import os
 import sys
 
 env_in, env_out, queue_url = sys.argv[1:]
 with open(env_in, "r", encoding="utf-8") as f:
     variables = json.load(f) or {}
 variables["PICKLEBALL_QUEUE_URL"] = queue_url
+for key in (
+    "EMAIL",
+    "PASSWORD",
+    "REC_US_LOGIN",
+    "REC_US_PASSWORD",
+    "EMAIL2",
+    "PASSWORD2",
+    "REC_US_LOGIN2",
+    "REC_US_PASSWORD2",
+    "EMAIL3",
+    "PASSWORD3",
+    "REC_US_LOGIN3",
+    "REC_US_PASSWORD3",
+    "PARTICIPANT_USER_ID",
+    "PARTICIPANT_USER_ID2",
+    "PARTICIPANT_USER_ID3",
+):
+    value = os.environ.get(key)
+    if value:
+        variables[key] = value
 with open(env_out, "w", encoding="utf-8") as f:
     json.dump({"Variables": variables}, f)
 PY
