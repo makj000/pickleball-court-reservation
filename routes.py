@@ -1,17 +1,23 @@
 import json
 from datetime import date, timedelta
 
-from config import APP_VERSION, CORS_HEADERS, COURT_PREFERENCE, SLOT_TIMES
+from config import (
+    APP_VERSION, AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, CORS_HEADERS,
+    COURT_PREFERENCE, SLOT_TIMES,
+)
 from state import (
     _auto_book_slot_is_too_close, _has_future_watched_slots, _load_telegram_usage,
     _normalize_court_number, _normalize_slot_records, _normalize_time_availability,
     _utc_now_iso, load_state, save_state,
 )
 from http_utils import get_body
-from rec_api import sync_rec_my_reservations
+from rec_api import _configured_rec_accounts, _firebase_login, _get_cached_jwt, _cache_jwt, cancel_booking_api, sync_rec_my_reservations
 from scheduler import (
-    ALLOWED_SCAN_INTERVALS, _clear_queued_scheduled_probe, _queue_next_scheduled_probe,
+    ALLOWED_SCAN_INTERVALS, _auto_book_time_map, _clear_queued_scheduled_probe,
+    _queue_next_scheduled_probe,
 )
+from scanner import _api_scan
+from booking import _apply_booked_slots, _notify_booked_slots
 
 
 def handle_state(event) -> dict:
@@ -24,13 +30,17 @@ def handle_state(event) -> dict:
         key = (reservation["date"], reservation["time"], reservation["court"])
         account_index = reservation.get("account_index")
         account_email = reservation.get("account_email")
-        mine_by_slot.setdefault(key, []).append({
+        account_entry = {
             "index": account_index,
             "email": account_email,
             "label": account_email.split("@", 1)[0] if account_email else (
                 f"Account {account_index}" if account_index else "Mine"
             ),
-        })
+        }
+        for field in ("booking_id", "reservation_id", "facility_rental_id"):
+            if reservation.get(field):
+                account_entry[field] = reservation.get(field)
+        mine_by_slot.setdefault(key, []).append(account_entry)
     mine_set      = set(mine_by_slot)
     friend_set    = {(s["date"], s["time"], s["court"]) for s in state.get("friend_reservations", [])}
     auto_book_set   = {(ab["date"], ab["time"]) for ab in state.get("auto_book_slots", [])}
@@ -97,6 +107,85 @@ def handle_state(event) -> dict:
             "seen_open_days": state.get("seen_open_days") or {},
             "auto_book_failures": state.get("auto_book_failures") or [],
             "telegram_call_history": _load_telegram_usage(),
+        }),
+    }
+
+
+def handle_cancel_reservation(event) -> dict:
+    body = get_body(event)
+    slot_date = body.get("date")
+    slot_time = body.get("time")
+    court = _normalize_court_number(body.get("court"))
+    booking_id = body.get("booking_id")
+    account_index = body.get("account_index")
+    try:
+        date.fromisoformat(slot_date)
+    except (TypeError, ValueError):
+        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Invalid date"})}
+    if slot_time not in SLOT_TIMES or court is None:
+        return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Invalid time or court"})}
+
+    state = load_state()
+    sync_rec_my_reservations(state)
+    reservations = [
+        r for r in (state.get("my_reservations") or [])
+        if r.get("date") == slot_date and r.get("time") == slot_time and r.get("court") == court
+    ]
+    if account_index is not None:
+        try:
+            wanted_account = int(account_index)
+        except (TypeError, ValueError):
+            return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"error": "Invalid account_index"})}
+        reservations = [r for r in reservations if int(r.get("account_index") or 0) == wanted_account]
+    if booking_id:
+        reservations = [r for r in reservations if r.get("booking_id") == booking_id]
+    if not reservations:
+        save_state(state)
+        return {"statusCode": 404, "headers": CORS_HEADERS, "body": json.dumps({"error": "Matching rec.us reservation not found after sync."})}
+
+    reservation = reservations[0]
+    booking_id = reservation.get("booking_id")
+    account_index = int(reservation.get("account_index") or 1)
+    if not booking_id:
+        save_state(state)
+        return {"statusCode": 409, "headers": CORS_HEADERS, "body": json.dumps({"error": "Reservation is missing rec.us booking_id; sync reservations and try again."})}
+
+    account = next((a for a in _configured_rec_accounts() if int(a["index"]) == account_index), None)
+    if account is None:
+        return {"statusCode": 409, "headers": CORS_HEADERS, "body": json.dumps({"error": f"Account {account_index} is not configured."})}
+
+    jwt = _get_cached_jwt(state, account_index)
+    if not jwt:
+        jwt = _firebase_login(account)
+        _cache_jwt(state, jwt, account_index)
+
+    transaction_log: dict = {}
+    ok, rec_body = cancel_booking_api(jwt, str(booking_id), transaction_log)
+    if not ok:
+        save_state(state)
+        status = transaction_log.get("cancel", {}).get("response", {}).get("status") or 502
+        return {
+            "statusCode": 502,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({
+                "error": f"rec.us cancellation failed [{status}]",
+                "slot": reservation,
+                "transaction_log": transaction_log,
+            }),
+        }
+
+    sync_rec_my_reservations(state)
+    save_state(state)
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({
+            "ok": True,
+            "slot": reservation,
+            "rec_response": rec_body,
+            "transaction_log": transaction_log,
+            "my_reservations": state.get("my_reservations", []),
+            "synced_at": state.get("my_reservations_synced_at"),
         }),
     }
 
@@ -231,6 +320,69 @@ def handle_auto_book(event) -> dict:
     state["auto_book_slots"] = normalized
     save_state(state)  # save_state normalizes: clamps count to 1-3
     return {"statusCode": 200, "headers": CORS_HEADERS, "body": json.dumps({"ok": True, "auto_book": len(normalized)})}
+
+
+def handle_force_book(event) -> dict:
+    if not AUTO_BOOKING_ENABLED:
+        return {
+            "statusCode": 503,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": AUTO_BOOKING_DISABLED_MESSAGE}),
+        }
+
+    state = load_state()
+    auto_book_slots = state.get("auto_book_slots") or []
+    targets = _auto_book_time_map(auto_book_slots)
+    if not targets:
+        return {
+            "statusCode": 400,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": "No future auto-book slots are configured."}),
+        }
+
+    detailed_log: list[dict] = []
+    try:
+        availability, booked_slots = _api_scan(
+            target_times_by_date=targets,
+            auto_book_slots=auto_book_slots,
+            detailed_log=detailed_log,
+        )
+    except Exception as exc:
+        return {
+            "statusCode": 502,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({
+                "error": f"Force booking failed: {exc}",
+                "targets": targets,
+                "attempt_log": detailed_log,
+            }),
+        }
+
+    state = load_state()
+    state_availability = state.get("availability", {})
+    for date_str, day_avail in availability.items():
+        day_state = state_availability.get(date_str, {})
+        for time_text, court_avail in day_avail.items():
+            day_state[time_text] = _normalize_time_availability(court_avail)
+        state_availability[date_str] = day_state
+    state["availability"] = state_availability
+    if booked_slots:
+        _apply_booked_slots(state, booked_slots)
+    sync_rec_my_reservations(state)
+    save_state(state)
+    if booked_slots:
+        _notify_booked_slots(booked_slots)
+
+    return {
+        "statusCode": 200,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({
+            "ok": True,
+            "targets": targets,
+            "booked_slots": booked_slots,
+            "attempt_log": detailed_log,
+        }),
+    }
 
 
 def handle_auto_watch_weekends(event) -> dict:
