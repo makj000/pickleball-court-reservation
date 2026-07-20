@@ -121,6 +121,9 @@ def test_sanitize_chat_history_keeps_matched_tool_result():
 def test_normalize_state_strips_too_close_auto_book_slots(monkeypatch):
     import state as state_mod
 
+    monkeypatch.setattr(state_mod, "date", type("FixedDate", (date,), {
+        "today": classmethod(lambda cls: cls(2026, 7, 1)),
+    }))
     monkeypatch.setattr(state_mod, "_auto_book_slot_is_too_close", lambda slot_date, slot_time, now=None: slot_time == "9:00 AM")
     normalized = state_mod._normalize_state({
         "auto_book_slots": [
@@ -227,6 +230,9 @@ def test_normalize_state_preserves_my_reservation_account_metadata():
                 "court": "6",
                 "account_index": 3,
                 "account_email": "zhaoyphome@gmail.com",
+                "booking_id": "booking-3",
+                "reservation_id": "reservation-3",
+                "facility_rental_id": "facility-3",
             },
         ],
     })
@@ -238,6 +244,9 @@ def test_normalize_state_preserves_my_reservation_account_metadata():
             "court": "6",
             "account_index": 3,
             "account_email": "zhaoyphome@gmail.com",
+            "booking_id": "booking-3",
+            "reservation_id": "reservation-3",
+            "facility_rental_id": "facility-3",
         },
     ]
 
@@ -850,6 +859,123 @@ def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     assert checks == ["jwt", "jwt", "jwt"]
     assert transaction_log["verification"]["confirmed"] is False
     assert len(transaction_log["verification"]["attempts"]) == 3
+
+
+def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatch):
+    import json
+    import routes as routes_mod
+
+    state = {
+        "auto_book_slots": [{"date": "2026-07-25", "time": "9:00 AM", "count": 1}],
+        "availability": {},
+        "my_reservations": [],
+    }
+    saved = []
+    scan_calls = []
+    applied = []
+    notified = []
+
+    monkeypatch.setattr(routes_mod, "AUTO_BOOKING_ENABLED", True)
+    monkeypatch.setattr(routes_mod, "date", type("FixedDate", (date,), {
+        "today": classmethod(lambda cls: cls(2026, 7, 19)),
+    }))
+    monkeypatch.setattr(routes_mod, "load_state", lambda: state)
+    monkeypatch.setattr(routes_mod, "save_state", lambda value: saved.append(value.copy()))
+
+    def fake_api_scan(target_times_by_date=None, auto_book_slots=None, detailed_log=None):
+        scan_calls.append((target_times_by_date, auto_book_slots))
+        if detailed_log is not None:
+            detailed_log.append({"date": "2026-07-25", "time": "9:00 AM", "result": "booked"})
+        return (
+            {"2026-07-25": {"9:00 AM": {"6": False, "4": True, "5": False}}},
+            [{"date": "2026-07-25", "time": "9:00 AM", "court": "6"}],
+        )
+
+    monkeypatch.setattr(routes_mod, "_api_scan", fake_api_scan)
+    monkeypatch.setattr(routes_mod, "_apply_booked_slots", lambda st, slots: applied.extend(slots))
+    monkeypatch.setattr(routes_mod, "_notify_booked_slots", lambda slots: notified.extend(slots))
+    monkeypatch.setattr(routes_mod, "sync_rec_my_reservations", lambda st: True)
+
+    response = routes_mod.handle_force_book({})
+    body = json.loads(response["body"])
+
+    assert response["statusCode"] == 200
+    assert scan_calls == [
+        (
+            {"2026-07-25": ["9:00 AM"]},
+            [{"date": "2026-07-25", "time": "9:00 AM", "count": 1}],
+        )
+    ]
+    assert applied == [{"date": "2026-07-25", "time": "9:00 AM", "court": "6"}]
+    assert notified == applied
+    assert body["booked_slots"] == applied
+    assert body["attempt_log"] == [{"date": "2026-07-25", "time": "9:00 AM", "result": "booked"}]
+    assert saved[-1]["availability"]["2026-07-25"]["9:00 AM"] == {"6": False, "4": True, "5": False}
+
+
+def test_handle_cancel_reservation_calls_rec_cancel_and_syncs(monkeypatch):
+    import json
+    import routes as routes_mod
+
+    state = {
+        "my_reservations": [
+            {
+                "date": "2026-07-25",
+                "time": "9:00 AM",
+                "court": "6",
+                "account_index": 2,
+                "account_email": "two@example.com",
+                "booking_id": "booking-2",
+                "reservation_id": "reservation-2",
+                "facility_rental_id": "facility-2",
+            }
+        ],
+    }
+    saved = []
+    cancel_calls = []
+    sync_calls = []
+
+    def fake_sync(st):
+        sync_calls.append(len(sync_calls) + 1)
+        if len(sync_calls) == 2:
+            st["my_reservations"] = []
+            st["my_reservations_synced_at"] = "2026-07-19T12:00:00.000Z"
+        return True
+
+    def fake_cancel(jwt, booking_id, transaction_log=None):
+        cancel_calls.append((jwt, booking_id))
+        if transaction_log is not None:
+            transaction_log["cancel"] = {"response": {"status": 200}}
+        return True, {"data": {"id": booking_id, "status": "canceled"}}
+
+    monkeypatch.setattr(routes_mod, "load_state", lambda: state)
+    monkeypatch.setattr(routes_mod, "save_state", lambda value: saved.append(json.loads(json.dumps(value))))
+    monkeypatch.setattr(routes_mod, "sync_rec_my_reservations", fake_sync)
+    monkeypatch.setattr(
+        routes_mod,
+        "_configured_rec_accounts",
+        lambda: [{"index": 2, "email": "two@example.com", "password": "pw"}],
+    )
+    monkeypatch.setattr(routes_mod, "_get_cached_jwt", lambda st, account_index: "jwt-2")
+    monkeypatch.setattr(routes_mod, "cancel_booking_api", fake_cancel)
+
+    response = routes_mod.handle_cancel_reservation({
+        "body": json.dumps({
+            "date": "2026-07-25",
+            "time": "9:00 AM",
+            "court": "6",
+            "account_index": 2,
+            "booking_id": "booking-2",
+        })
+    })
+    body = json.loads(response["body"])
+
+    assert response["statusCode"] == 200
+    assert cancel_calls == [("jwt-2", "booking-2")]
+    assert sync_calls == [1, 2]
+    assert body["ok"] is True
+    assert body["slot"]["booking_id"] == "booking-2"
+    assert saved[-1]["my_reservations"] == []
 
 
 def test_with_weekday_dates_adds_weekday_to_iso_dates():

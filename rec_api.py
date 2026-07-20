@@ -151,7 +151,7 @@ def _rec_user_id(jwt: str) -> str:
     return user_id
 
 
-def _slot_from_rec_reservation(reservation: dict, court: str) -> dict | None:
+def _slot_from_rec_reservation(reservation: dict, court: str, booking: dict | None = None) -> dict | None:
     time_range = reservation.get("reservationTimestampRange")
     if not isinstance(time_range, list) or not time_range:
         return None
@@ -165,7 +165,16 @@ def _slot_from_rec_reservation(reservation: dict, court: str) -> dict | None:
     slot_time = _HHMM_TO_TIME_TEXT.get(time_text[:5])
     if slot_time is None:
         return None
-    return {"date": date_text, "time": slot_time, "court": court}
+    slot = {
+        "date": date_text,
+        "time": slot_time,
+        "court": court,
+        "reservation_id": reservation.get("id"),
+        "facility_rental_id": reservation.get("facilityRentalId"),
+    }
+    if booking and booking.get("id"):
+        slot["booking_id"] = booking.get("id")
+    return slot
 
 
 def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
@@ -219,10 +228,14 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
                 court = _normalize_court_number(site.get("courtNumber") or site.get("name"))
                 if not court:
                     continue
-                slot = _slot_from_rec_reservation(reservation, court)
+                slot = _slot_from_rec_reservation(reservation, court, booking)
                 if slot and slot["date"] >= date.today().isoformat():
                     slots.append(slot)
-    return _normalize_slot_records(slots, expand_legacy=False)
+    return _normalize_slot_records(
+        slots,
+        expand_legacy=False,
+        preserve_fields=("booking_id", "reservation_id", "facility_rental_id"),
+    )
 
 
 def fetch_rec_my_reservations(
@@ -253,7 +266,11 @@ def fetch_rec_my_reservations(
 
     order = {time_text: idx for idx, time_text in enumerate(SLOT_TIMES)}
     court_order = {court: idx for idx, court in enumerate(COURT_PREFERENCE)}
-    normalized = _normalize_slot_records(all_slots, expand_legacy=False)
+    normalized = _normalize_slot_records(
+        all_slots,
+        expand_legacy=False,
+        preserve_fields=("booking_id", "reservation_id", "facility_rental_id"),
+    )
     for slot in normalized:
         if account_index is not None:
             slot["account_index"] = account_index
@@ -298,11 +315,23 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     state["my_reservations"] = _normalize_slot_records(
         all_slots,
         expand_legacy=False,
-        preserve_fields=("account_index", "account_email"),
+        preserve_fields=("account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id"),
     )
     state["my_reservations_synced_at"] = _utc_now_iso()
     state["my_reservations_source"] = "rec.us"
     return True
+
+
+def cancel_booking_api(jwt: str, booking_id: str, transaction_log: dict | None = None) -> tuple[bool, dict]:
+    if transaction_log is None:
+        transaction_log = {}
+    url = f"https://api.rec.us/v1/bookings/{booking_id}/cancel"
+    status, body = _rec_api(url, method="POST", jwt=jwt)
+    transaction_log["cancel"] = {
+        "request": {"method": "POST", "url": url},
+        "response": {"status": status, "body": body},
+    }
+    return status in (200, 201), body
 
 
 def _stripe_confirm_payment_intent(pi_id: str, client_secret: str, pm_id: str) -> tuple[int, dict]:

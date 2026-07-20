@@ -50,16 +50,6 @@
       border-color: #d1d5db;
       color: #64748b;
     }
-    .rec-link {
-      font-size: 0.74rem;
-      font-weight: 600;
-      color: #2563eb;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-      white-space: nowrap;
-      margin-right: 10px;
-    }
-    .rec-link:hover { color: #1d4ed8; }
     .spacer { flex: 1 1 12px; }
     #scan-current {
       font-size: 0.72rem; color: #6b7280; white-space: nowrap; flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
@@ -79,6 +69,22 @@
     /* ── Mode toggle ── */
     .mode-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .mode-control { display: flex; align-items: center; gap: 6px; }
+    .control-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      overflow: hidden;
+      background: white;
+    }
+    .control-group > .btn,
+    .control-group > select,
+    .control-group > .mode-toggle {
+      border: none;
+      border-radius: 0;
+    }
+    .control-group > * + * { border-left: 1px solid #d1d5db !important; }
     .mode-toggle { display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden; }
     .mode-btn {
       min-width: 34px; padding: 5px 10px; font-size: 0.95rem; font-weight: 600;
@@ -104,8 +110,8 @@
       width: 13px; height: 13px; border-radius: 3px;
       border: 1px solid transparent; flex: 0 0 auto;
     }
-    .legend-swatch.open { background: #bbf7d0; }
-    .legend-swatch.booked { background: #bfdbfe; border-color: #93c5fd; }
+    .legend-swatch.open { background: #ffffff; border-color: #d1d5db; }
+    .legend-swatch.booked { background: #d1d5db; border-color: #9ca3af; }
     .legend-swatch.unknown { background: transparent; border-color: transparent; }
     .mode-hint {
       font-size: 0.69rem;
@@ -263,7 +269,7 @@
       font-size: 0.6rem; font-weight: 600; color: #374151;
       line-height: 1;
     }
-    .scan-court-sq.sc-open    { background: #bbf7d0; }
+    .scan-court-sq.sc-open    { background: #ffffff; border: 1px solid #d1d5db; }
     .scan-court-sq.sc-closed  { background: #d1d5db; }
     .scan-court-sq.sc-unknown { background: #ffffff; border: 1px solid #e5e7eb; }
     .scan-badge {
@@ -392,9 +398,11 @@
 
     .s-unknown { background: transparent; border-color: transparent; }
     .day-start.cell.s-unknown { border-top-color: transparent; }
-    .s-taken   { background: #bfdbfe; border-color: #93c5fd; }
-    .s-open    { background: #bbf7d0; }
+    .s-taken   { background: #d1d5db; border-color: #9ca3af; }
+    .s-open    { background: #ffffff; border-color: #d1d5db; }
+    .day-start.cell.weekend.s-open { background: #ffffff; border-color: #d1d5db; }
     .mine { background: #3b82f6; border-color: #2563eb; }
+    .friend { background: #3b82f6; border-color: #2563eb; }
     .mine.watching { border-color: #2563eb; }
     .mine.watching::after {
       display: block;
@@ -418,7 +426,7 @@
       bottom: 1px;
       font-size: 0.58rem;
       font-weight: 800;
-      color: #c2410c;
+      color: #ffffff;
       line-height: 1;
       pointer-events: none;
       z-index: 2;
@@ -724,6 +732,47 @@
     }
     .auth-actions { display: flex; justify-content: flex-end; gap: 8px; }
     .auth-actions button { min-width: 92px; }
+    #reservation-popover {
+      position: fixed;
+      z-index: 180;
+      display: none;
+      width: min(320px, calc(100vw - 24px));
+      background: white;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      box-shadow: 0 14px 35px rgba(15, 23, 42, 0.18);
+      padding: 12px;
+      font-size: 0.8rem;
+      color: #111827;
+    }
+    #reservation-popover.show { display: block; }
+    .reservation-popover-title { font-weight: 700; margin-bottom: 8px; }
+    .reservation-popover-row { margin-top: 4px; color: #4b5563; line-height: 1.35; }
+    .reservation-popover-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    .btn-danger {
+      border-color: #dc2626;
+      color: #dc2626;
+      background: #fff;
+    }
+    .btn-danger:hover { background: #fef2f2; }
+    #cancel-modal {
+      position: fixed; inset: 0; z-index: 220;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(17, 24, 39, 0.62);
+      padding: 20px;
+    }
+    #cancel-modal.show { display: flex; }
+    .cancel-card {
+      width: min(460px, 100%);
+      background: white;
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.18);
+      padding: 22px 22px 18px;
+    }
+    .cancel-card h2 { font-size: 1.05rem; font-weight: 700; color: #111827; margin-bottom: 10px; }
+    .cancel-details { font-size: 0.84rem; color: #4b5563; line-height: 1.5; margin-bottom: 14px; }
+    .cancel-warning { font-size: 0.8rem; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 9px 10px; margin-bottom: 14px; }
+    .cancel-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
     /* ── Spinner ── */
     .spinner {
@@ -767,6 +816,42 @@
       padding: 3px 6px; background: white; color: #374151; cursor: pointer;
     }
 
+    /* ── Persistent operation banners ── */
+    #scan-events, #cancel-events { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    #scan-events:empty, #cancel-events:empty { display: none; }
+    .scan-event-banner {
+      background: #eff6ff; border: 1px solid #93c5fd; border-left: 4px solid #2563eb;
+      border-radius: 8px; padding: 8px 12px;
+      font-size: 0.77rem; color: #1e3a8a;
+      display: flex; align-items: flex-start; gap: 8px;
+    }
+    .scan-event-banner.is-success {
+      background: #f0fdf4; border-color: #86efac; border-left-color: #16a34a;
+      color: #166534;
+    }
+    .scan-event-banner.is-failed {
+      background: #fef2f2; border-color: #fca5a5; border-left-color: #dc2626;
+      color: #991b1b;
+    }
+    .scan-event-banner.is-active .scan-event-icon {
+      animation: booking-pulse 1s ease-in-out infinite;
+    }
+    .scan-event-icon { flex-shrink: 0; font-size: 0.9rem; margin-top: 1px; }
+    .scan-event-body { flex: 1; min-width: 0; }
+    .scan-event-title { font-weight: 600; }
+    .scan-event-meta { color: #6b7280; font-size: 0.68rem; margin-top: 2px; }
+    .scan-event-log {
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.72);
+      color: #374151;
+      font-size: 0.68rem;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+
     /* ── Booking failure banner ── */
     #booking-failures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
     #booking-failures:empty { display: none; }
@@ -776,6 +861,19 @@
       font-size: 0.77rem; color: #991b1b;
       display: flex; align-items: flex-start; gap: 8px;
     }
+    .booking-failure-banner.is-active {
+      background: #eff6ff; border-color: #93c5fd; border-left-color: #2563eb;
+      color: #1e3a8a;
+    }
+    .booking-failure-banner.is-active .booking-failure-icon {
+      animation: booking-pulse 1s ease-in-out infinite;
+    }
+    .booking-failure-banner.is-success {
+      background: #f0fdf4; border-color: #86efac; border-left-color: #16a34a;
+      color: #166534;
+    }
+    .booking-failure-banner.is-active .booking-failure-slot { color: #1e40af; }
+    .booking-failure-banner.is-success .booking-failure-slot { color: #14532d; }
     .booking-failure-icon { flex-shrink: 0; font-size: 0.9rem; margin-top: 1px; }
     .booking-failure-body { flex: 1; min-width: 0; }
     .booking-failure-slot { font-weight: 600; color: #7f1d1d; }
@@ -783,6 +881,21 @@
     .booking-failure-action { margin-top: 4px; }
     .booking-failure-action a { color: #dc2626; text-decoration: underline; }
     .booking-failure-action a:hover { color: #b91c1c; }
+    .booking-failure-log {
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.72);
+      color: #374151;
+      font-size: 0.68rem;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+    @keyframes booking-pulse {
+      0%, 100% { opacity: 0.45; }
+      50% { opacity: 1; }
+    }
 
     @media (max-width: 720px) {
       header { padding-left: 14px; padding-right: 14px; }
@@ -798,20 +911,33 @@
     <h1><img src="img/pickleball.jpg" alt="🏓" style="width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:6px;"> Pickleball Court Monitor</h1>
     <span class="version-chip is-ui" id="ui-version"></span>
     <span class="version-chip is-unknown" id="api-version"></span>
-    <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
-    <div class="mode-toggle">
-      <button class="mode-btn" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁</button>
-      <button class="mode-btn active-book" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens · will not book within 32 h of slot time (not enough time to cancel)">$</button>
+    <div class="control-group" aria-label="Scan controls">
+      <button class="btn" id="btn-scan-now" onclick="forceScan()">Scan Now</button>
+      <select id="freq-select" onchange="setFrequency(this.value)" aria-label="Scan frequency">
+        <option value="0.004167">every 15 sec</option>
+        <option value="0.016667">every 1 min</option>
+        <option value="0.083333">every 5 min</option>
+        <option value="0.25">every 15 min</option>
+        <option value="0.5">every 30 min</option>
+        <option value="1">hourly</option>
+        <option value="2">every 2 hours</option>
+        <option value="3">every 3 hours</option>
+      </select>
+    </div>
+    <div class="control-group" aria-label="Booking controls">
+      <div class="mode-toggle">
+        <button class="mode-btn" id="btn-watch" onclick="setMode('watch')" title="Click cells to watch/unwatch">👁</button>
+        <button class="mode-btn active-book" id="btn-book" onclick="setMode('book')" title="Auto-book when a court opens · will not book within 32 h of slot time (not enough time to cancel)">$</button>
+      </div>
+      <button class="btn" id="btn-force-book" onclick="forceBook()" title="Immediately scan and try booking slots marked with $">Book Now</button>
     </div>
     <div class="mode-toggle">
       <button class="mode-btn" id="btn-mine" onclick="setMode('mine')" title="Mark as my reservation (shift+click)">✓</button>
       <button class="mode-btn" id="btn-friend" onclick="setMode('friend')" title="Mark as friend reservation">F</button>
-      <button class="mode-btn" id="btn-sync-mine" onclick="syncMine()" title="Sync my rec.us reservations">↻</button>
+      <button class="mode-btn" id="btn-sync-mine" onclick="syncMine()" title="Load reservations from rec.us">⇅</button>
     </div>
     <span id="scan-current"></span>
     <div class="spacer"></div>
-    <a class="rec-link" id="rec-link" href="https://www.rec.us" target="_blank" rel="noopener">Open rec.us</a>
-    <button class="btn" onclick="jumpToTelegramLog()" id="btn-bot-log" title="Jump to Telegram bot call log" style="font-size:0.72rem;padding:4px 10px;">Bot Log</button>
     <button class="btn" onclick="toggleLogPanel()" id="btn-log-toggle" title="Show API log" style="font-size:0.72rem;padding:4px 10px;">API Log</button>
     <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
   </div>
@@ -826,20 +952,22 @@
       9 AM
     </label>
   </div>
-  <div class="header-controls-row legend-row" aria-label="Timetable color legend">
-    <span class="legend-item"><span class="legend-swatch open"></span>Green: open</span>
-    <span class="legend-item"><span class="legend-swatch booked"></span>Blue: booked or unavailable</span>
-    <span class="legend-item"><span class="legend-swatch unknown"></span>Blank: not scanned yet</span>
-  </div>
 </header>
 
 <div id="content-shell" class="dock-right">
   <!-- Grid -->
   <div class="grid-wrapper">
+    <div id="scan-events"></div>
+    <div id="cancel-events"></div>
     <div id="booking-failures"></div>
     <div class="grid-row">
       <div class="grid" id="grid"></div>
       <div id="telegram-calls-table"></div>
+    </div>
+    <div class="header-controls-row legend-row" aria-label="Timetable color legend">
+      <span class="legend-item"><span class="legend-swatch open"></span>White: open</span>
+      <span class="legend-item"><span class="legend-swatch booked"></span>Gray: booked or unavailable</span>
+      <span class="legend-item"><span class="legend-swatch unknown"></span>Blank: not scanned yet</span>
     </div>
     <div id="upcoming-scans-table"></div>
     <div id="release-probe-log"></div>
@@ -861,6 +989,20 @@
 
 <!-- Toast -->
 <div id="toast"></div>
+
+<div id="reservation-popover"></div>
+
+<div id="cancel-modal">
+  <div class="cancel-card">
+    <h2>Cancel Reservation?</h2>
+    <div class="cancel-details" id="cancel-details"></div>
+    <div class="cancel-warning">This will call rec.us and cancel the selected booking for that account.</div>
+    <div class="cancel-actions">
+      <button class="btn" type="button" onclick="closeCancelModal()">Keep the reservation</button>
+      <button class="btn btn-danger" id="btn-confirm-cancel" type="button" onclick="confirmCancelReservation()">Yes, proceed with cancel</button>
+    </div>
+  </div>
+</div>
 
 <!-- Auth modal -->
 <div id="auth-modal">
@@ -1135,7 +1277,7 @@ function historicalTimingText() {
 function renderScanButton() {
   const btn = document.getElementById('btn-scan-now');
   if (!btn) return;
-  btn.textContent = 'Scan Now';
+  btn.textContent = isFullScanBusy() ? 'Scanning...' : 'Scan Now';
   btn.disabled = isFullScanBusy();
 }
 
@@ -1254,11 +1396,21 @@ let _logIdSeq = 0;
 let _logResizeState = null;
 let _manualScanPending = false;
 let _localScanRequestedAt = null;
+let _localScanEvents = [];
+let _forceScanTimer = null;
+let _forceScanStartedAt = null;
+let _localBookingEvents = [];
+let _forceBookTimer = null;
+let _forceBookStartedAt = null;
+let _localCancelEvents = [];
+let _pendingCancelSlot = null;
+let _cancelTimer = null;
+let _cancelStartedAt = null;
 
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.3.1';
+const UI_VERSION = '1.4.3';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1268,6 +1420,14 @@ function renderVersionInfo() {
   const apiVersion = appState.app_version || null;
   apiEl.textContent = apiVersion ? 'API v' + apiVersion : 'API unknown';
   apiEl.className = 'version-chip ' + (apiVersion ? 'is-api' : 'is-unknown');
+}
+
+function syncFrequencySelect() {
+  const freqSelect = document.getElementById('freq-select');
+  if (!freqSelect) return;
+  const current = Number(appState.scan_interval_hours) || 1;
+  const option = Array.from(freqSelect.options).find(o => Math.abs(Number(o.value) - current) < 0.0001);
+  if (option) freqSelect.value = option.value;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1284,6 +1444,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  closeReservationPopover();
+  closeCancelModal();
   const authModal = document.getElementById('auth-modal');
   if (!authModal.classList.contains('show')) return;
   closeAuthModal();
@@ -1875,16 +2037,6 @@ function renderUpcomingScans() {
       `<a href="#" class="scan-log-toggle" data-prev-view="24h">show last 24 h</a>`;
   }
 
-  // Frequency select HTML (wired after insertion)
-  const iv = Number(appState.scan_interval_hours) || 1;
-  const freqOptions = [
-    [0.004167, 'every 15 sec'], [0.016667, 'every 1 min'], [0.083333, 'every 5 min'],
-    [0.25, 'every 15 min'], [0.5, 'every 30 min'], [1, 'hourly'],
-    [2, 'every 2 hours'], [3, 'every 3 hours'],
-  ].map(([v, label]) =>
-    `<option value="${v}"${Math.abs(v - iv) < 0.0001 ? ' selected' : ''}>${label}</option>`
-  ).join('');
-
   // Meta info
   const lastScanMeta = lastScanMetaText();
   const histTiming = historicalTimingText();
@@ -1928,9 +2080,6 @@ function renderUpcomingScans() {
   }
 
   container.innerHTML =
-    `<div id="prev-scans-freq" style="margin-top:14px;">` +
-      `<label id="freq-label">Scan freq <select id="freq-select">${freqOptions}</select></label>` +
-    `</div>` +
     `<div id="prev-scans-controls">` +
       `<span class="section-label">Previous Scans</span>` +
       `${pastToggles}` +
@@ -1948,11 +2097,7 @@ function renderUpcomingScans() {
     `<tbody>${upcomingRows}</tbody>` +
     `</table>`;
 
-  const freqSelect = container.querySelector('#freq-select');
-  if (freqSelect && !freqSelect.dataset.wired) {
-    freqSelect.addEventListener('change', e => setFrequency(e.target.value));
-    freqSelect.dataset.wired = '1';
-  }
+  syncFrequencySelect();
 
   container.querySelectorAll('[data-prev-view]').forEach(a => {
     a.addEventListener('click', e => {
@@ -2067,24 +2212,314 @@ function syncTelegramCallsPanelHeight() {
 function renderBookingFailures() {
   const container = document.getElementById('booking-failures');
   if (!container) return;
-  const failures = appState.auto_book_failures || [];
+  const failures = _localBookingEvents.concat(appState.auto_book_failures || []);
   if (!failures.length) { container.innerHTML = ''; return; }
   container.innerHTML = failures.map(f => {
     const slotLabel = f.date && f.time ? `${f.date} ${f.time}` : 'auto-book session';
-    const when = f.failed_at ? ' at ' + fmtScanTime(f.failed_at) : '';
-    const recUrl = appState.rec_url || 'https://www.rec.us';
-    const actionHtml = f.date
-      ? `<div class="booking-failure-action"><a href="${escHtml(recUrl)}" target="_blank" rel="noopener">Open rec.us to book ${escHtml(f.date)} manually →</a></div>`
+    const status = f.status || 'failed';
+    const whenRaw = f.failed_at || f.started_at || f.completed_at;
+    const when = whenRaw ? ' at ' + fmtScanTime(whenRaw) : '';
+    const bannerClass = status === 'active' ? 'booking-failure-banner is-active'
+      : status === 'success' ? 'booking-failure-banner is-success'
+      : 'booking-failure-banner';
+    const icon = status === 'active' ? '$' : status === 'success' ? 'OK' : '&#10060;';
+    const prefix = status === 'active' ? 'Booking now'
+      : status === 'success' ? 'Completed'
+      : 'Failed';
+    const logHtml = f.log
+      ? `<pre class="booking-failure-log">${escHtml(f.log)}</pre>`
       : '';
-    return `<div class="booking-failure-banner">
-      <span class="booking-failure-icon">&#10060;</span>
+    return `<div class="${bannerClass}">
+      <span class="booking-failure-icon">${icon}</span>
       <div class="booking-failure-body">
         <span class="booking-failure-slot">${escHtml(slotLabel)}</span> — ${escHtml(f.error || 'Booking failed')}
-        <div class="booking-failure-meta">Failed${escHtml(when)}</div>
-        ${actionHtml}
+        <div class="booking-failure-meta">${prefix}${escHtml(when)}</div>
+        ${logHtml}
       </div>
     </div>`;
   }).join('');
+}
+
+// ── Force scan banner ────────────────────────────────────────────────────────
+function renderScanEvents() {
+  const container = document.getElementById('scan-events');
+  if (!container) return;
+  if (!_localScanEvents.length) { container.innerHTML = ''; return; }
+  container.innerHTML = _localScanEvents.map(event => {
+    const status = event.status || 'active';
+    const bannerClass = status === 'success' ? 'scan-event-banner is-success'
+      : status === 'failed' ? 'scan-event-banner is-failed'
+      : 'scan-event-banner is-active';
+    const icon = status === 'success' ? 'OK' : status === 'failed' ? '&#10060;' : '...';
+    const whenRaw = event.completed_at || event.started_at;
+    const when = whenRaw ? ' at ' + fmtScanTime(whenRaw) : '';
+    const logHtml = event.log
+      ? `<pre class="scan-event-log">${escHtml(event.log)}</pre>`
+      : '';
+    return `<div class="${bannerClass}">
+      <span class="scan-event-icon">${icon}</span>
+      <div class="scan-event-body">
+        <span class="scan-event-title">${escHtml(event.title || 'Ad-hoc scan')}</span> — ${escHtml(event.message || '')}
+        <div class="scan-event-meta">${escHtml(scanEventStatusLabel(status))}${escHtml(when)}</div>
+        ${logHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function scanEventStatusLabel(status) {
+  if (status === 'success') return 'Completed';
+  if (status === 'failed') return 'Failed';
+  return 'Running';
+}
+
+function upsertForceScanStatus(status, message, logText = '') {
+  const id = 'force-scan-current';
+  _localScanEvents = _localScanEvents.filter(event => event.id !== id);
+  _localScanEvents.unshift({
+    id,
+    status,
+    title: 'Ad-hoc full scan',
+    message,
+    started_at: _localScanRequestedAt || new Date().toISOString(),
+    completed_at: status === 'active' ? null : new Date().toISOString(),
+    log: logText,
+  });
+  renderScanEvents();
+}
+
+function stopForceScanTimer() {
+  if (_forceScanTimer) clearInterval(_forceScanTimer);
+  _forceScanTimer = null;
+  _forceScanStartedAt = null;
+}
+
+function startForceScanTimer() {
+  stopForceScanTimer();
+  _forceScanStartedAt = Date.now();
+  const update = () => {
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - _forceScanStartedAt) / 1000));
+    upsertForceScanStatus(
+      'active',
+      'Still scanning. Elapsed ' + elapsedSeconds + 's. A full scan can take several minutes.',
+      'Waiting for POST /force-scan to return.'
+    );
+  };
+  update();
+  _forceScanTimer = setInterval(update, 1000);
+}
+
+function formatForceScanLog(data) {
+  const lines = [];
+  if (data?.last_scanned) lines.push('Last scanned: ' + fmtScanTime(data.last_scanned));
+  const days = Array.isArray(data?.grid) ? data.grid : [];
+  days.forEach(day => {
+    const byTime = new Map();
+    const slots = Array.isArray(day.slots) ? day.slots : [];
+    let unknownCount = 0;
+    slots.forEach(slot => {
+      if (slot.available === true) {
+        if (!byTime.has(slot.time)) byTime.set(slot.time, []);
+        byTime.get(slot.time).push(slot.court);
+      } else if (slot.available == null) {
+        unknownCount += 1;
+      }
+    });
+    const openLines = Array.from(byTime.entries()).map(([time, courts]) => {
+      const orderedCourts = courts.slice().sort((a, b) => {
+        const order = appState.court_preference || [];
+        const ai = order.indexOf(String(a));
+        const bi = order.indexOf(String(b));
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      });
+      return time + ' Courts ' + orderedCourts.join('/');
+    });
+    const label = day.label ? `${day.date} (${day.label})` : day.date;
+    if (openLines.length) {
+      lines.push(label + ': ' + openLines.join('; '));
+    } else if (unknownCount) {
+      lines.push(label + ': no open courts detected; ' + unknownCount + ' cells not scanned');
+    } else {
+      lines.push(label + ': no open courts detected');
+    }
+  });
+  if (!days.length) lines.push('No grid data returned.');
+  return lines.join('\n');
+}
+
+function renderCancelEvents() {
+  const container = document.getElementById('cancel-events');
+  if (!container) return;
+  if (!_localCancelEvents.length) { container.innerHTML = ''; return; }
+  container.innerHTML = _localCancelEvents.map(event => {
+    const status = event.status || 'active';
+    const bannerClass = status === 'success' ? 'scan-event-banner is-success'
+      : status === 'failed' ? 'scan-event-banner is-failed'
+      : 'scan-event-banner is-active';
+    const icon = status === 'success' ? 'OK' : status === 'failed' ? '&#10060;' : '...';
+    const whenRaw = event.completed_at || event.started_at;
+    const when = whenRaw ? ' at ' + fmtScanTime(whenRaw) : '';
+    const logHtml = event.log
+      ? `<pre class="scan-event-log">${escHtml(event.log)}</pre>`
+      : '';
+    return `<div class="${bannerClass}">
+      <span class="scan-event-icon">${icon}</span>
+      <div class="scan-event-body">
+        <span class="scan-event-title">${escHtml(event.title || 'Cancel Reservation')}</span> — ${escHtml(event.message || '')}
+        <div class="scan-event-meta">${escHtml(scanEventStatusLabel(status))}${escHtml(when)}</div>
+        ${logHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function cancelSlotLabel(slot) {
+  if (!slot) return 'reservation';
+  return `${slot.date} ${slot.time} Court ${slot.court}`;
+}
+
+function cancelAccountLabel(slot) {
+  const account = slot?.account || {};
+  return account.email || account.label || (account.index ? 'Account ' + account.index : 'unknown account');
+}
+
+function formatCancelLog(slot, extraLines = []) {
+  const lines = [
+    cancelSlotLabel(slot),
+    'Account: ' + cancelAccountLabel(slot),
+    ...extraLines,
+  ];
+  return lines.join('\n');
+}
+
+function upsertCancelStatus(status, message, slot, extraLines = []) {
+  const id = 'cancel-current';
+  _localCancelEvents = _localCancelEvents.filter(event => event.id !== id);
+  _localCancelEvents.unshift({
+    id,
+    status,
+    title: 'Cancel Reservation',
+    message,
+    started_at: _cancelStartedAt ? new Date(_cancelStartedAt).toISOString() : new Date().toISOString(),
+    completed_at: status === 'active' ? null : new Date().toISOString(),
+    log: formatCancelLog(slot, extraLines),
+  });
+  renderCancelEvents();
+}
+
+function stopCancelTimer() {
+  if (_cancelTimer) clearInterval(_cancelTimer);
+  _cancelTimer = null;
+  _cancelStartedAt = null;
+}
+
+function startCancelTimer(slot) {
+  stopCancelTimer();
+  _cancelStartedAt = Date.now();
+  const update = () => {
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - _cancelStartedAt) / 1000));
+    upsertCancelStatus('active', 'Still canceling. Elapsed ' + elapsedSeconds + 's.', slot, [
+      fmtLogTimestamp(new Date()) + ' Calling rec.us cancellation API',
+    ]);
+  };
+  update();
+  _cancelTimer = setInterval(update, 1000);
+}
+
+function addPersistentBookingFailure(error, date, time, status = 'failed') {
+  _localBookingEvents.unshift({
+    failed_at: new Date().toISOString(),
+    date: date || null,
+    time: time || null,
+    error: error || 'Booking failed',
+    status,
+  });
+  renderBookingFailures();
+}
+
+function upsertForceBookingStatus(status, message, target, bookedCount, logText = '') {
+  const id = 'force-book-current';
+  _localBookingEvents = _localBookingEvents.filter(f => f.id !== id);
+  _localBookingEvents.unshift({
+    id,
+    status,
+    date: target?.date || null,
+    time: target?.time || null,
+    error: message,
+    started_at: new Date().toISOString(),
+    completed_at: status === 'active' ? null : new Date().toISOString(),
+    booked_count: bookedCount || 0,
+    log: logText,
+  });
+  renderBookingFailures();
+}
+
+function formatForceBookLog(data) {
+  const lines = [];
+  const targets = data && data.targets ? data.targets : {};
+  Object.keys(targets).sort().forEach(dateStr => {
+    lines.push('Targets for ' + dateStr + ': ' + (targets[dateStr] || []).join(', '));
+  });
+  const attemptLog = Array.isArray(data?.attempt_log) ? data.attempt_log : [];
+  attemptLog.forEach(entry => {
+    const prefix = `${entry.date || '?'} ${entry.time || '?'}`;
+    const open = Array.isArray(entry.open_courts) && entry.open_courts.length
+      ? ' Open courts: ' + entry.open_courts.join(', ')
+      : '';
+    let resultText = 'checked';
+    if (entry.result === 'skipped_day_cap') {
+      const count = entry.day_count ?? '?';
+      const cap = entry.day_cap ?? '?';
+      resultText = `skipped, day cap reached (${count}/${cap})`;
+    } else if (entry.result === 'rate_limited') {
+      resultText = 'skipped, booking rate limit reached';
+    } else if (entry.result === 'booked') {
+      resultText = entry.court ? `booked Court ${entry.court}` : 'booked';
+    } else if (entry.result === 'failed') {
+      resultText = 'failed after booking attempts';
+    } else if (entry.result) {
+      resultText = entry.result.replaceAll('_', ' ');
+    }
+    lines.push(`${prefix}: ${resultText}.${open}`);
+    const attempts = Array.isArray(entry.attempts) ? entry.attempts : [];
+    attempts.slice(-4).forEach(a => {
+      const court = a.court ? ` Court ${a.court}` : '';
+      const account = a.account_index ? ` account ${a.account_index}` : '';
+      const error = a.error ? ` error: ${a.error}` : '';
+      const attemptResult = (a.result || 'unknown').replaceAll('_', ' ');
+      lines.push(`${prefix}: attempt ${a.attempt || '?'} ${attemptResult}${court}${account}${error}`);
+    });
+  });
+  const booked = Array.isArray(data?.booked_slots) ? data.booked_slots : [];
+  booked.forEach(slot => lines.push(`${slot.date} ${slot.time}: booked Court ${slot.court}`));
+  return lines.join('\n');
+}
+
+function stopForceBookTimer() {
+  if (_forceBookTimer) clearInterval(_forceBookTimer);
+  _forceBookTimer = null;
+  _forceBookStartedAt = null;
+}
+
+function startForceBookTimer(target) {
+  stopForceBookTimer();
+  _forceBookStartedAt = Date.now();
+  const update = () => {
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - _forceBookStartedAt) / 1000));
+    upsertForceBookingStatus(
+      'active',
+      'Still running. Elapsed ' + elapsedSeconds + 's. Scanning can take 1-3 minutes before booking results return.',
+      target,
+      0
+    );
+  };
+  update();
+  _forceBookTimer = setInterval(update, 1000);
+}
+
+function firstAutoBookTarget() {
+  const slots = Array.isArray(appState.auto_book_slots) ? appState.auto_book_slots : [];
+  return slots.length ? slots[0] : {};
 }
 
 // ── Fetch state ───────────────────────────────────────────────────────────────
@@ -2111,8 +2546,6 @@ function _applyStateData(data) {
   } else if (!appState.seen_open_days || typeof appState.seen_open_days !== 'object') {
     appState.seen_open_days = {};
   }
-  const recLink = document.getElementById('rec-link');
-  if (recLink) recLink.href = appState.rec_url;
   const autoWatchToggle = document.getElementById('auto-watch-toggle');
   if (autoWatchToggle) {
     autoWatchToggle.checked = appState.auto_watch_weekends_enabled !== false;
@@ -2137,6 +2570,7 @@ async function refreshState() {
     if (!r.ok) { toast('Failed to load (' + r.status + ')'); return; }
     _applyStateData(await r.json());
     renderVersionInfo();
+    renderCancelEvents();
     renderBookingFailures();
     renderGrid();
     renderScanStatus();
@@ -2449,9 +2883,65 @@ function setMode(m) {
   document.getElementById('btn-book').className  = 'mode-btn' + (m === 'book'  ? ' active-book'  : '');
 }
 
+function closeReservationPopover() {
+  const popover = document.getElementById('reservation-popover');
+  if (popover) popover.classList.remove('show');
+}
+
+function openReservationPopover(slot, date, anchor) {
+  const popover = document.getElementById('reservation-popover');
+  if (!popover) return;
+  const accounts = reservationAccounts(slot);
+  const account = accounts[0] || {};
+  const canCancel = slot.mine && accounts.length === 1 && account.index;
+  popover.innerHTML = `
+    <div class="reservation-popover-title">Reservation</div>
+    <div class="reservation-popover-row">${escHtml(date)} ${escHtml(slot.time)} Court ${escHtml(slot.court)}</div>
+    <div class="reservation-popover-row">Reserved by: ${escHtml(cancelAccountLabel({ account }))}</div>
+    ${accounts.length > 1 ? '<div class="reservation-popover-row">Multiple accounts are attached. Sync first, then cancel one exact booking.</div>' : ''}
+    ${!account.booking_id ? '<div class="reservation-popover-row">rec.us will be synced before canceling.</div>' : ''}
+    <div class="reservation-popover-actions">
+      <button class="btn" type="button" onclick="closeReservationPopover()">Keep the reservation</button>
+      <button class="btn btn-danger" type="button" ${canCancel ? '' : 'disabled'} onclick="openCancelModalFromPopover()">Yes, proceed with cancel</button>
+    </div>`;
+  _pendingCancelSlot = canCancel ? { date, time: slot.time, court: slot.court, account } : null;
+  const rect = anchor.getBoundingClientRect();
+  popover.classList.add('show');
+  const popRect = popover.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - popRect.width - 12, Math.max(12, rect.left));
+  const top = Math.min(window.innerHeight - popRect.height - 12, Math.max(12, rect.bottom + 8));
+  popover.style.left = left + 'px';
+  popover.style.top = top + 'px';
+}
+
+function openCancelModalFromPopover() {
+  if (!_pendingCancelSlot) return;
+  closeReservationPopover();
+  const modal = document.getElementById('cancel-modal');
+  const details = document.getElementById('cancel-details');
+  if (details) {
+    details.innerHTML =
+      `<div>${escHtml(_pendingCancelSlot.date)} ${escHtml(_pendingCancelSlot.time)}</div>` +
+      `<div>Court ${escHtml(_pendingCancelSlot.court)}</div>` +
+      `<div>Account: ${escHtml(cancelAccountLabel(_pendingCancelSlot))}</div>`;
+  }
+  if (modal) modal.classList.add('show');
+}
+
+function closeCancelModal() {
+  const modal = document.getElementById('cancel-modal');
+  if (modal) modal.classList.remove('show');
+}
+
 function onCellClick(e) {
   e.preventDefault();
   const { date, time, court } = e.currentTarget.dataset;
+  const slot = findSlot(date, time, court);
+  if (!e.shiftKey && clickMode !== 'mine' && slot && slot.mine) {
+    openReservationPopover(slot, date, e.currentTarget);
+    return;
+  }
+  closeReservationPopover();
   if (e.shiftKey || clickMode === 'mine') toggleMine(date, time, court);
   else if (clickMode === 'friend') toggleFriend(date, time, court);
   else if (clickMode === 'book') toggleAutoBook(date, time);
@@ -2631,6 +3121,8 @@ async function forceScan() {
   }
   _manualScanPending = true;
   _localScanRequestedAt = new Date().toISOString();
+  const scanRequestedAt = _localScanRequestedAt;
+  startForceScanTimer();
   renderScanStatus();
   renderScanButton();
   updateNextScanDisplay();
@@ -2638,34 +3130,166 @@ async function forceScan() {
   try {
     const r = await apiFetch('/force-scan', { method: 'POST' });
     _manualScanPending = false;
-    _localScanRequestedAt = null;
+    _localScanRequestedAt = scanRequestedAt;
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
+      stopForceScanTimer();
       toast('Error: ' + (data.error || r.status));
       addProgressLog('Ad-hoc scan failed', 'POST /force-scan returned status ' + r.status + '.');
+      upsertForceScanStatus(
+        'failed',
+        data.error || ('POST /force-scan returned status ' + r.status),
+        data.error ? 'Error: ' + data.error : 'HTTP status: ' + r.status
+      );
       renderScanStatus();
       renderScanButton();
       updateNextScanDisplay();
+      _localScanRequestedAt = null;
       return;
     }
     const data = await r.json();
+    stopForceScanTimer();
     addProgressLog('Ad-hoc scan completed', 'Scan finished. last_scanned: ' + data.last_scanned + '.');
     _applyStateData(data);
     renderVersionInfo();
+    upsertForceScanStatus(
+      'success',
+      'Scan returned ' + (Array.isArray(data.grid) ? data.grid.length : 0) + ' day(s).',
+      formatForceScanLog(data)
+    );
     renderBookingFailures();
     renderGrid();
     renderScanStatus();
     renderScanButton();
     toast('Scan complete');
     updateNextScanDisplay();
-  } catch (e) {
-    _manualScanPending = false;
     _localScanRequestedAt = null;
+  } catch (e) {
+    stopForceScanTimer();
+    _manualScanPending = false;
+    _localScanRequestedAt = scanRequestedAt;
     toast('Error: ' + e.message);
     addProgressLog('Ad-hoc scan failed', e.message || 'Unknown error.');
+    upsertForceScanStatus('failed', e.message || 'Unknown scan error.', 'Request failed before a scan result was returned.');
     renderScanStatus();
     renderScanButton();
     updateNextScanDisplay();
+    _localScanRequestedAt = null;
+  }
+}
+
+async function forceBook() {
+  const btn = document.getElementById('btn-force-book');
+  if (btn && btn.disabled) return;
+  if (!Array.isArray(appState.auto_book_slots) || appState.auto_book_slots.length === 0) {
+    toast('No $ slots configured');
+    return;
+  }
+  const target = firstAutoBookTarget();
+  if (btn) btn.disabled = true;
+  const originalText = btn ? btn.textContent : '';
+  if (btn) btn.textContent = 'Booking...';
+  startForceBookTimer(target);
+  addProgressLog('Force booking started', 'POST /force-book is running for $ slots.');
+  try {
+    const r = await apiFetch('/force-book', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const error = data.error || ('POST /force-book returned status ' + r.status + '.');
+      upsertForceBookingStatus('failed', error, target, 0, formatForceBookLog(data));
+      toast('Force book failed: ' + error);
+      addProgressLog('Force booking failed', error);
+      return;
+    }
+    addProgressLog(
+      'Force booking completed',
+      'Booked ' + ((data.booked_slots || []).length) + ' slot(s); checked ' + Object.keys(data.targets || {}).length + ' date(s).'
+    );
+    const booked = Array.isArray(data.booked_slots) ? data.booked_slots : [];
+    upsertForceBookingStatus(
+      booked.length ? 'success' : 'failed',
+      booked.length ? 'Booked ' + booked.length + ' slot(s).' : 'No open $ slots were booked.',
+      target,
+      booked.length,
+      formatForceBookLog(data)
+    );
+    toast(booked.length ? 'Booked ' + booked.length + ' slot(s)' : 'No open $ slots booked');
+    await refreshState();
+  } catch (e) {
+    const error = e.message || 'Unknown error.';
+    upsertForceBookingStatus('failed', error, target, 0);
+    toast('Force book error: ' + error);
+    addProgressLog('Force booking failed', error);
+  } finally {
+    stopForceBookTimer();
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText || 'Book Now';
+    }
+  }
+}
+
+async function confirmCancelReservation() {
+  if (!_pendingCancelSlot) return;
+  const slot = _pendingCancelSlot;
+  const btn = document.getElementById('btn-confirm-cancel');
+  if (btn && btn.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Canceling...';
+  }
+  closeCancelModal();
+  startCancelTimer(slot);
+  addProgressLog('Cancel reservation started', 'POST /cancel-reservation is running for ' + cancelSlotLabel(slot) + '.');
+  try {
+    const account = slot.account || {};
+    const r = await apiFetch('/cancel-reservation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        date: slot.date,
+        time: slot.time,
+        court: slot.court,
+        account_index: account.index,
+        booking_id: account.booking_id,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    stopCancelTimer();
+    if (!r.ok) {
+      const error = data.error || ('POST /cancel-reservation returned status ' + r.status);
+      upsertCancelStatus('failed', error, slot, [
+        fmtLogTimestamp(new Date()) + ' Cancel failed',
+        'HTTP status: ' + r.status,
+        error,
+      ]);
+      toast('Cancel failed: ' + error);
+      addProgressLog('Cancel reservation failed', error);
+      return;
+    }
+    upsertCancelStatus('success', 'Canceled successfully.', slot, [
+      fmtLogTimestamp(new Date()) + ' Canceled successfully',
+      fmtLogTimestamp(new Date()) + ' Reservations synced',
+      fmtLogTimestamp(new Date()) + ' Timetable refreshed',
+    ]);
+    toast('Reservation canceled');
+    addProgressLog('Cancel reservation completed', cancelSlotLabel(slot) + ' canceled.');
+    await refreshState();
+  } catch (e) {
+    stopCancelTimer();
+    const error = e.message || 'Unknown cancellation error.';
+    upsertCancelStatus('failed', error, slot, [
+      fmtLogTimestamp(new Date()) + ' Request failed before a cancellation result was returned.',
+      error,
+    ]);
+    toast('Cancel error: ' + error);
+    addProgressLog('Cancel reservation failed', error);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Yes, proceed with cancel';
+    }
+    _pendingCancelSlot = null;
   }
 }
 

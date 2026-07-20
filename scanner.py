@@ -37,7 +37,7 @@ def _api_fetch_availability(
     return asyncio.run(fetch_availability_map(target_dates))
 
 
-_DAY_CAP = 6
+_DAY_CAP = 10
 _RATE_CAP = 6      # max app-initiated bookings per rate window
 _RATE_WINDOW_HOURS = 1  # daytime rolling window
 
@@ -193,6 +193,8 @@ def _api_scan(
             print(f"  Skipping {date_str} {time_text}: day cap reached ({sessions_on_day}/{_DAY_CAP}).")
             if slot_log is not None:
                 slot_log["result"] = "skipped_day_cap"
+                slot_log["day_count"] = sessions_on_day
+                slot_log["day_cap"] = _DAY_CAP
             continue
         target_count = min(target_count, _DAY_CAP - sessions_on_day)
 

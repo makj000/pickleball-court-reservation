@@ -244,7 +244,7 @@ def _normalize_state(state: dict) -> dict:
         state.get("my_reservations"),
         expand_legacy=False,
         default_court=COURT_PREFERENCE[0],
-        preserve_fields=("account_index", "account_email"),
+        preserve_fields=("account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id"),
     )
     normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
     normalized["my_reservations_source"] = state.get("my_reservations_source")
