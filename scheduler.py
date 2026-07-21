@@ -229,6 +229,8 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
 
     state["scan_started_at"] = started_at
     state["scan_started_kind"] = "ad_hoc"
+    if force:
+        state["auto_book_failures"] = []
     save_state(state)
 
     print(

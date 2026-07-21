@@ -727,6 +727,42 @@ def test_queue_release_probe_dedupes_within_window(monkeypatch):
     assert queued is True
 
 
+def test_forced_full_refresh_clears_auto_book_failures(monkeypatch):
+    import copy
+    import scheduler as scheduler_mod
+
+    state = {
+        "availability": {},
+        "watched_slots": [],
+        "auto_book_slots": [],
+        "auto_book_failures": [
+            {"date": "2026-07-25", "time": "9:00 AM", "error": "old failure"}
+        ],
+    }
+    saved_states = []
+
+    def fake_save_state(value):
+        snapshot = copy.deepcopy(value)
+        state.clear()
+        state.update(snapshot)
+        saved_states.append(snapshot)
+
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scheduler_mod, "_auto_watch_upcoming_weekends", lambda st: False)
+    monkeypatch.setattr(scheduler_mod, "_full_scan_targets", lambda: {"2026-07-25": ["9:00 AM"]})
+    monkeypatch.setattr(scheduler_mod, "_api_scan", lambda **kwargs: ({"2026-07-25": {"9:00 AM": {"6": False, "4": False, "5": False}}}, []))
+    monkeypatch.setattr(scheduler_mod, "_alert_lines_for_open_targets", lambda st, avail: [])
+    monkeypatch.setattr(scheduler_mod, "sync_rec_my_reservations", lambda st: None)
+    monkeypatch.setattr(scheduler_mod, "_apply_booked_slots", lambda st, slots: None)
+    monkeypatch.setattr(scheduler_mod, "_notify_booked_slots", lambda slots: None)
+
+    scheduler_mod._run_full_refresh_worker(force=True)
+
+    assert saved_states[0]["auto_book_failures"] == []
+    assert state["auto_book_failures"] == []
+
+
 def test_one_off_probe_blind_books_exact_target(monkeypatch):
     import copy
     import scheduler as scheduler_mod
