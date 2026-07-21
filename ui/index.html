@@ -1397,6 +1397,7 @@ let _logResizeState = null;
 let _manualScanPending = false;
 let _localScanRequestedAt = null;
 let _localScanEvents = [];
+let _operationLogsDismissed = false;
 let _forceScanTimer = null;
 let _forceScanStartedAt = null;
 let _localBookingEvents = [];
@@ -1410,7 +1411,7 @@ let _cancelStartedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.4.3';
+const UI_VERSION = '1.4.5';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -1446,6 +1447,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeReservationPopover();
   closeCancelModal();
+  dismissOperationLogs();
   const authModal = document.getElementById('auth-modal');
   if (!authModal.classList.contains('show')) return;
   closeAuthModal();
@@ -2212,6 +2214,7 @@ function syncTelegramCallsPanelHeight() {
 function renderBookingFailures() {
   const container = document.getElementById('booking-failures');
   if (!container) return;
+  if (_operationLogsDismissed) { container.innerHTML = ''; return; }
   const failures = _localBookingEvents.concat(appState.auto_book_failures || []);
   if (!failures.length) { container.innerHTML = ''; return; }
   container.innerHTML = failures.map(f => {
@@ -2244,6 +2247,7 @@ function renderBookingFailures() {
 function renderScanEvents() {
   const container = document.getElementById('scan-events');
   if (!container) return;
+  if (_operationLogsDismissed) { container.innerHTML = ''; return; }
   if (!_localScanEvents.length) { container.innerHTML = ''; return; }
   container.innerHTML = _localScanEvents.map(event => {
     const status = event.status || 'active';
@@ -2274,6 +2278,7 @@ function scanEventStatusLabel(status) {
 }
 
 function upsertForceScanStatus(status, message, logText = '') {
+  _operationLogsDismissed = false;
   const id = 'force-scan-current';
   _localScanEvents = _localScanEvents.filter(event => event.id !== id);
   _localScanEvents.unshift({
@@ -2286,6 +2291,24 @@ function upsertForceScanStatus(status, message, logText = '') {
     log: logText,
   });
   renderScanEvents();
+}
+
+function clearLocalOperationLogsForScan() {
+  _operationLogsDismissed = false;
+  _localScanEvents = [];
+  _localBookingEvents = [];
+  _localCancelEvents = [];
+  if (Array.isArray(appState.auto_book_failures)) appState.auto_book_failures = [];
+  renderScanEvents();
+  renderBookingFailures();
+  renderCancelEvents();
+}
+
+function dismissOperationLogs() {
+  _operationLogsDismissed = true;
+  renderScanEvents();
+  renderBookingFailures();
+  renderCancelEvents();
 }
 
 function stopForceScanTimer() {
@@ -2350,6 +2373,7 @@ function formatForceScanLog(data) {
 function renderCancelEvents() {
   const container = document.getElementById('cancel-events');
   if (!container) return;
+  if (_operationLogsDismissed) { container.innerHTML = ''; return; }
   if (!_localCancelEvents.length) { container.innerHTML = ''; return; }
   container.innerHTML = _localCancelEvents.map(event => {
     const status = event.status || 'active';
@@ -2393,6 +2417,7 @@ function formatCancelLog(slot, extraLines = []) {
 }
 
 function upsertCancelStatus(status, message, slot, extraLines = []) {
+  _operationLogsDismissed = false;
   const id = 'cancel-current';
   _localCancelEvents = _localCancelEvents.filter(event => event.id !== id);
   _localCancelEvents.unshift({
@@ -2427,6 +2452,7 @@ function startCancelTimer(slot) {
 }
 
 function addPersistentBookingFailure(error, date, time, status = 'failed') {
+  _operationLogsDismissed = false;
   _localBookingEvents.unshift({
     failed_at: new Date().toISOString(),
     date: date || null,
@@ -2438,6 +2464,7 @@ function addPersistentBookingFailure(error, date, time, status = 'failed') {
 }
 
 function upsertForceBookingStatus(status, message, target, bookedCount, logText = '') {
+  _operationLogsDismissed = false;
   const id = 'force-book-current';
   _localBookingEvents = _localBookingEvents.filter(f => f.id !== id);
   _localBookingEvents.unshift({
@@ -3119,6 +3146,7 @@ async function forceScan() {
     toast('A scan is already running');
     return;
   }
+  clearLocalOperationLogsForScan();
   _manualScanPending = true;
   _localScanRequestedAt = new Date().toISOString();
   const scanRequestedAt = _localScanRequestedAt;
