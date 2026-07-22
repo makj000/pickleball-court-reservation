@@ -43,6 +43,7 @@ def _calendar_event_body(slot: dict) -> dict:
     start, end = _slot_start_end(slot)
     source_id = _calendar_event_id(slot)
     return {
+        "action": "create",
         "secret": os.environ.get(APPS_SCRIPT_SECRET_ENV, ""),
         "source_id": source_id,
         "date": slot["date"],
@@ -58,6 +59,21 @@ def _calendar_event_body(slot: dict) -> dict:
     }
 
 
+def _calendar_delete_body(slot: dict) -> dict:
+    start, end = _slot_start_end(slot)
+    return {
+        "action": "delete",
+        "secret": os.environ.get(APPS_SCRIPT_SECRET_ENV, ""),
+        "source_id": _calendar_event_id(slot),
+        "date": slot["date"],
+        "time": slot["time"],
+        "court": str(slot["court"]),
+        "start_iso": start.isoformat(),
+        "end_iso": end.isoformat(),
+        "time_zone": "America/Los_Angeles",
+    }
+
+
 def enqueue_calendar_event(slot: dict) -> None:
     if not _calendar_configured():
         return
@@ -69,12 +85,22 @@ def enqueue_calendar_event(slot: dict) -> None:
         print(f"Google Calendar enqueue failed for {slot}: {exc}")
 
 
-def create_calendar_event(slot: dict) -> bool:
+def enqueue_calendar_event_delete(slot: dict) -> None:
     if not _calendar_configured():
-        print("Google Apps Script Calendar webhook is not configured; skipping event creation.")
-        return False
+        return
+    try:
+        queued = _enqueue_work("calendar_event", {"slot": slot, "action": "delete"})
+        if not queued:
+            print(f"Google Calendar work queue is not configured; delete was not queued for {slot}.")
+    except Exception as exc:
+        print(f"Google Calendar delete enqueue failed for {slot}: {exc}")
 
-    payload = json.dumps(_calendar_event_body(slot)).encode("utf-8")
+
+def _send_calendar_request(body: dict) -> dict:
+    if not _calendar_configured():
+        return {"ok": False, "skipped": True, "error": "Google Apps Script Calendar webhook is not configured."}
+
+    payload = json.dumps(body).encode("utf-8")
     req = Request(
         os.environ[APPS_SCRIPT_URL_ENV],
         data=payload,
@@ -90,14 +116,37 @@ def create_calendar_event(slot: dict) -> bool:
         raise RuntimeError(f"Invalid Apps Script response: {response_body[:200]}") from exc
     if not result.get("ok"):
         raise RuntimeError(f"Apps Script Calendar error: {result}")
+    return result
 
+
+def create_calendar_event(slot: dict) -> bool:
+    if not _calendar_configured():
+        print("Google Apps Script Calendar webhook is not configured; skipping event creation.")
+        return False
+
+    result = _send_calendar_request(_calendar_event_body(slot))
     duplicate = "duplicate " if result.get("duplicate") else ""
     print(f"Google Calendar {duplicate}event handled for {slot}.")
     return True
 
 
-def handle_calendar_event_work(slot: dict) -> None:
+def delete_calendar_event(slot: dict) -> bool:
+    if not _calendar_configured():
+        print("Google Apps Script Calendar webhook is not configured; skipping event deletion.")
+        return False
+
+    result = _send_calendar_request(_calendar_delete_body(slot))
+    deleted = bool(result.get("deleted"))
+    missing = "missing " if not deleted else ""
+    print(f"Google Calendar {missing}event delete handled for {slot}.")
+    return deleted
+
+
+def handle_calendar_event_work(slot: dict, action: str = "create") -> None:
     try:
-        create_calendar_event(slot)
+        if action == "delete":
+            delete_calendar_event(slot)
+        else:
+            create_calendar_event(slot)
     except Exception as exc:
-        print(f"Google Calendar event creation failed for {slot}: {exc}")
+        print(f"Google Calendar event {action} failed for {slot}: {exc}")

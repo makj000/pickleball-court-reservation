@@ -21,7 +21,7 @@ from message_format import with_weekday_dates
 from notify import ordinal, _ordered_open_courts
 from scheduler import _should_run_scheduled_tick
 from scanner import _auto_book_priority_key
-from calendar_sync import _calendar_event_body, _calendar_event_id
+from calendar_sync import _calendar_delete_body, _calendar_event_body, _calendar_event_id
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -1090,6 +1090,7 @@ def test_handle_cancel_reservation_calls_rec_cancel_and_syncs(monkeypatch):
     saved = []
     cancel_calls = []
     sync_calls = []
+    calendar_deletes = []
 
     def fake_sync(st):
         sync_calls.append(len(sync_calls) + 1)
@@ -1114,6 +1115,7 @@ def test_handle_cancel_reservation_calls_rec_cancel_and_syncs(monkeypatch):
     )
     monkeypatch.setattr(routes_mod, "_get_cached_jwt", lambda st, account_index: "jwt-2")
     monkeypatch.setattr(routes_mod, "cancel_booking_api", fake_cancel)
+    monkeypatch.setattr(routes_mod, "enqueue_calendar_event_delete", lambda slot: calendar_deletes.append(slot.copy()))
 
     response = routes_mod.handle_cancel_reservation({
         "body": json.dumps({
@@ -1131,6 +1133,16 @@ def test_handle_cancel_reservation_calls_rec_cancel_and_syncs(monkeypatch):
     assert sync_calls == [1, 2]
     assert body["ok"] is True
     assert body["slot"]["booking_id"] == "booking-2"
+    assert calendar_deletes == [{
+        "date": "2026-07-25",
+        "time": "9:00 AM",
+        "court": "6",
+        "account_index": 2,
+        "account_email": "two@example.com",
+        "booking_id": "booking-2",
+        "reservation_id": "reservation-2",
+        "facility_rental_id": "facility-2",
+    }]
     assert saved[-1]["my_reservations"] == []
 
 
@@ -1161,10 +1173,20 @@ def test_calendar_event_id_is_stable():
 def test_calendar_event_body_uses_one_hour_pt_slot():
     slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
     body = _calendar_event_body(slot)
+    assert body["action"] == "create"
     assert body["summary"] == "Pickleball Court 6"
     assert body["start_iso"] == "2026-06-01T09:00:00-07:00"
     assert body["end_iso"] == "2026-06-01T10:00:00-07:00"
     assert body["time_zone"] == "America/Los_Angeles"
+
+
+def test_calendar_delete_body_targets_same_source_id():
+    slot = {"date": "2026-06-01", "time": "9:00 AM", "court": "6"}
+    body = _calendar_delete_body(slot)
+    assert body["action"] == "delete"
+    assert body["source_id"] == _calendar_event_id(slot)
+    assert body["start_iso"] == "2026-06-01T09:00:00-07:00"
+    assert body["end_iso"] == "2026-06-01T10:00:00-07:00"
 
 
 def test_calendar_event_body_invites_configured_attendees(monkeypatch):

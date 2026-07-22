@@ -15,6 +15,10 @@ function doPost(e) {
     const existing = sourceId
       ? calendar.getEvents(start, end, {search: sourceId})
       : [];
+    if (body.action === 'delete') {
+      existing.forEach(event => event.deleteEvent());
+      return jsonResponse({ok: true, deleted: existing.length > 0, count: existing.length});
+    }
     if (existing.length > 0) {
       return jsonResponse({ok: true, duplicate: true, event_id: existing[0].getId()});
     }

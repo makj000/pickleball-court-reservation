@@ -112,6 +112,7 @@
     }
     .legend-swatch.open { background: #ffffff; border-color: #d1d5db; }
     .legend-swatch.booked { background: #d1d5db; border-color: #9ca3af; }
+    .legend-swatch.mine { background: #3b82f6; border-color: #2563eb; }
     .legend-swatch.unknown { background: transparent; border-color: transparent; }
     .mode-hint {
       font-size: 0.69rem;
@@ -431,6 +432,17 @@
       pointer-events: none;
       z-index: 2;
     }
+    .cell-friend-check-label {
+      position: absolute;
+      top: 1px;
+      left: 2px;
+      font-size: 0.58rem;
+      font-weight: 800;
+      color: #ffffff;
+      line-height: 1;
+      pointer-events: none;
+      z-index: 2;
+    }
     .cell-account-label {
       position: absolute;
       left: 2px;
@@ -530,15 +542,6 @@
       top: 1px; right: 2px;
       font-size: 0.5rem; font-weight: 700;
       color: #a855f7;
-      line-height: 1;
-      pointer-events: none;
-    }
-
-    .weekend-default-label {
-      position: absolute;
-      bottom: 1px; left: 2px;
-      font-size: 0.5rem; font-weight: 700;
-      color: #6b7280;
       line-height: 1;
       pointer-events: none;
     }
@@ -967,6 +970,8 @@
     <div class="header-controls-row legend-row" aria-label="Timetable color legend">
       <span class="legend-item"><span class="legend-swatch open"></span>White: open</span>
       <span class="legend-item"><span class="legend-swatch booked"></span>Gray: booked or unavailable</span>
+      <span class="legend-item"><span class="legend-swatch mine"></span>Blue + ✓: my reservation</span>
+      <span class="legend-item"><span class="legend-swatch mine"></span>Blue + ✓ + F: friend reservation</span>
       <span class="legend-item"><span class="legend-swatch unknown"></span>Blank: not scanned yet</span>
     </div>
     <div id="upcoming-scans-table"></div>
@@ -1411,7 +1416,7 @@ let _cancelStartedAt = null;
 // ── Browser notification dedup ────────────────────────────────────────────────
 const _notifiedKeys = new Set();
 const _apiLogs = [];
-const UI_VERSION = '1.4.5';
+const UI_VERSION = '1.4.7';
 
 function renderVersionInfo() {
   const uiEl = document.getElementById('ui-version');
@@ -2731,10 +2736,6 @@ function renderGrid() {
     const slotMap = new Map(day.slots.map(slot => [slot.time + '|' + slot.court, slot]));
     for (let timeIndex = 0; timeIndex < appState.slot_times.length; timeIndex++) {
       const time = appState.slot_times[timeIndex];
-      const timeAlreadyBooked = appState.court_nums.some(c => {
-        const s = slotMap.get(time + '|' + c);
-        return s && s.mine;
-      });
       for (let courtIndex = 0; courtIndex < appState.court_nums.length; courtIndex++) {
         const court = appState.court_nums[courtIndex];
         const slot = slotMap.get(time + '|' + court) || {
@@ -2770,11 +2771,6 @@ function renderGrid() {
           lbl.className = 'cell-book-label';
           const count = slot.auto_book_count || 1;
           lbl.textContent = count > 1 ? '$' + count : '$';
-          cell.appendChild(lbl);
-        } else if (isWeekend && WEEKEND_SCAN_TIMES.includes(slot.time) && !timeAlreadyBooked) {
-          const lbl = document.createElement('span');
-          lbl.className = 'weekend-default-label';
-          lbl.textContent = '$';
           cell.appendChild(lbl);
         }
         cell.addEventListener('click', onCellClick);
@@ -2881,10 +2877,16 @@ function createMineLabel(slot) {
 }
 
 function createFriendLabel() {
+  const wrap = document.createDocumentFragment();
+  const check = document.createElement('span');
+  check.className = 'cell-friend-check-label';
+  check.textContent = '✓';
+  wrap.appendChild(check);
   const label = document.createElement('span');
   label.className = 'cell-friend-label';
   label.textContent = 'F';
-  return label;
+  wrap.appendChild(label);
+  return wrap;
 }
 
 function createWatchLabel(showUnknownDots) {

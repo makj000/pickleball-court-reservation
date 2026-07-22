@@ -1382,7 +1382,7 @@ def _run_queue_work(message: dict) -> None:
         _run_release_probe_session()
     elif kind == "calendar_event":
         from calendar_sync import handle_calendar_event_work
-        handle_calendar_event_work(message.get("slot") or {})
+        handle_calendar_event_work(message.get("slot") or {}, str(message.get("action") or "create"))
     elif kind == "weekend_late_relay":
         _run_weekend_late_relay(
             str(message.get("date") or ""),

@@ -18,6 +18,7 @@ from scheduler import (
 )
 from scanner import _api_scan
 from booking import _apply_booked_slots, _notify_booked_slots
+from calendar_sync import enqueue_calendar_event_delete
 
 
 def handle_state(event) -> dict:
@@ -176,6 +177,7 @@ def handle_cancel_reservation(event) -> dict:
 
     sync_rec_my_reservations(state)
     save_state(state)
+    enqueue_calendar_event_delete(reservation)
     return {
         "statusCode": 200,
         "headers": CORS_HEADERS,
