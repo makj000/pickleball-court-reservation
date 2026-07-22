@@ -593,6 +593,126 @@ def test_weekend_auto_book_honors_per_slot_count(monkeypatch):
     assert {c[0] for c in booked_calls} == {"jwt-1", "jwt-2"}
 
 
+def test_auto_book_count_includes_existing_slot_reservations(monkeypatch):
+    import copy
+    import scanner as scanner_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 21)
+
+    state = {
+        "my_reservations": [
+            {"date": "2026-08-01", "time": "6:00 PM", "court": "6", "account_index": 1},
+            {"date": "2026-08-01", "time": "6:00 PM", "court": "5", "account_index": 2},
+        ],
+        "app_booking_log": [],
+        "auto_book_failures": [],
+    }
+    saved_states = []
+    detailed_log = []
+
+    def fake_save_state(value):
+        saved_states.append(copy.deepcopy(value))
+
+    monkeypatch.setattr(scanner_mod, "date", FixedDate)
+    monkeypatch.setattr(scanner_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scanner_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scanner_mod, "_recent_booking_count", lambda state: 0)
+    monkeypatch.setattr(
+        scanner_mod,
+        "_api_fetch_availability",
+        lambda target_times_by_date=None: {
+            "2026-08-01": {
+                "6:00 PM": {"6": False, "4": True, "5": False},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        scanner_mod,
+        "_rec_booking_sessions",
+        lambda state: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+            {"account_index": 3, "jwt": "jwt-3", "participant_user_id": "user-3"},
+        ],
+    )
+    monkeypatch.setattr(scanner_mod, "book_slot_api", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not book")))
+    monkeypatch.setattr(scanner_mod, "send_telegram", lambda msg: None)
+
+    _, booked = scanner_mod._api_scan(
+        auto_book_slots=[{"date": "2026-08-01", "time": "6:00 PM", "count": 2}],
+        detailed_log=detailed_log,
+    )
+
+    assert booked == []
+    assert detailed_log[0]["result"] == "already_reserved"
+    assert detailed_log[0]["reserved_count"] == 2
+    assert detailed_log[0]["target_count"] == 2
+
+
+def test_auto_book_only_fills_remaining_slot_count(monkeypatch):
+    import copy
+    import scanner as scanner_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 21)
+
+    state = {
+        "my_reservations": [
+            {"date": "2026-08-01", "time": "6:00 PM", "court": "6", "account_index": 1},
+            {"date": "2026-08-01", "time": "6:00 PM", "court": "5", "account_index": 2},
+        ],
+        "app_booking_log": [],
+        "auto_book_failures": [],
+    }
+    saved_states = []
+    booked_calls = []
+
+    def fake_save_state(value):
+        saved_states.append(copy.deepcopy(value))
+
+    monkeypatch.setattr(scanner_mod, "date", FixedDate)
+    monkeypatch.setattr(scanner_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scanner_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scanner_mod, "_recent_booking_count", lambda state: 0)
+    monkeypatch.setattr(
+        scanner_mod,
+        "_api_fetch_availability",
+        lambda target_times_by_date=None: {
+            "2026-08-01": {
+                "6:00 PM": {"6": True, "4": True, "5": True},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        scanner_mod,
+        "_rec_booking_sessions",
+        lambda state: [
+            {"account_index": 1, "jwt": "jwt-1", "participant_user_id": "user-1"},
+            {"account_index": 2, "jwt": "jwt-2", "participant_user_id": "user-2"},
+            {"account_index": 3, "jwt": "jwt-3", "participant_user_id": "user-3"},
+        ],
+    )
+    monkeypatch.setattr(scanner_mod, "send_telegram", lambda msg: None)
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        booked_calls.append((jwt, court))
+        return True
+
+    monkeypatch.setattr(scanner_mod, "book_slot_api", fake_book_slot)
+
+    _, booked = scanner_mod._api_scan(
+        auto_book_slots=[{"date": "2026-08-01", "time": "6:00 PM", "count": 3}],
+    )
+
+    assert booked == [{"date": "2026-08-01", "time": "6:00 PM", "court": "4", "account_index": 3}]
+    assert booked_calls == [("jwt-3", "4")]
+
+
 def test_release_probe_window_does_not_call_api_scan(monkeypatch):
     import copy
     import scheduler as scheduler_mod
