@@ -184,11 +184,23 @@ def _api_scan(
                 "attempts": [],
             }
             detailed_log.append(slot_log)
-        target_count = (
+        target_total_count = (
             max(1, min(int(max_bookings_per_slot), len(sessions)))
             if max_bookings_per_slot is not None
             else max(1, min(auto_book_count.get((date_str, time_text), 1), len(sessions)))
         )
+        slot_reservations = [
+            r for r in (state_obj.get("my_reservations") or [])
+            if r.get("date") == date_str and r.get("time") == time_text
+        ]
+        reserved_in_slot = len(slot_reservations)
+        if reserved_in_slot >= target_total_count:
+            print(f"  Skipping {date_str} {time_text}: already reserved ({reserved_in_slot}/{target_total_count}).")
+            if slot_log is not None:
+                slot_log["result"] = "already_reserved"
+                slot_log["reserved_count"] = reserved_in_slot
+                slot_log["target_count"] = target_total_count
+            continue
         if sessions_on_day >= _DAY_CAP:
             print(f"  Skipping {date_str} {time_text}: day cap reached ({sessions_on_day}/{_DAY_CAP}).")
             if slot_log is not None:
@@ -196,7 +208,7 @@ def _api_scan(
                 slot_log["day_count"] = sessions_on_day
                 slot_log["day_cap"] = _DAY_CAP
             continue
-        target_count = min(target_count, _DAY_CAP - sessions_on_day)
+        target_count = min(target_total_count - reserved_in_slot, _DAY_CAP - sessions_on_day)
 
         # Rate limit: cap total app-initiated bookings within the current time window
         recent = _recent_booking_count(state_obj)
@@ -217,7 +229,12 @@ def _api_scan(
         except Exception:
             pass
         booked_in_slot: list[dict] = []
-        used_accounts: set[int] = set()
+        used_accounts: set[int] = {
+            int(r.get("account_index") or 0)
+            for r in slot_reservations
+            if r.get("account_index")
+        }
+        reserved_courts = {str(r.get("court")) for r in slot_reservations if r.get("court")}
         all_attempts: list[dict] = []
         for booking_num in range(target_count):
             recent = _recent_booking_count(state_obj)
@@ -240,11 +257,13 @@ def _api_scan(
                     if account_index in used_accounts:
                         continue
                     court_order = (
-                        _paired_court_order([b["court"] for b in booked_in_slot])
-                        if target_count > 1
+                        _paired_court_order(list(reserved_courts) + [b["court"] for b in booked_in_slot])
+                        if target_total_count > 1
                         else COURT_PREFERENCE
                     )
                     for court in court_order:
+                        if court in reserved_courts:
+                            continue
                         if court_avail.get(court) is not True:
                             continue
                         transaction_log: dict = {}
