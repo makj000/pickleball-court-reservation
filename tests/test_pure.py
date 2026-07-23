@@ -21,6 +21,7 @@ from message_format import with_weekday_dates
 from notify import ordinal, _alert_lines_for_open_targets, _ordered_open_courts
 from scheduler import _should_run_scheduled_tick
 from scanner import _auto_book_priority_key
+from booking import _apply_booked_slots
 from calendar_sync import _calendar_delete_body, _calendar_event_body, _calendar_event_id
 
 
@@ -379,6 +380,46 @@ def test_alert_lines_only_reports_remaining_auto_book_courts():
     assert _alert_lines_for_open_targets(state, scanned) == [
         "2026-07-25 5:00 PM: open Court 4 (auto-book)"
     ]
+
+
+def test_apply_booked_slots_clears_completed_auto_book_count():
+    state = {
+        "auto_book_slots": [{"date": "2026-07-25", "time": "5:00 PM", "count": 2}],
+        "my_reservations": [
+            {"date": "2026-07-25", "time": "5:00 PM", "court": "6"},
+        ],
+    }
+
+    _apply_booked_slots(state, [{"date": "2026-07-25", "time": "5:00 PM", "court": "4"}])
+
+    assert state["auto_book_slots"] == []
+
+
+def test_apply_booked_slots_keeps_incomplete_auto_book_count():
+    state = {
+        "auto_book_slots": [{"date": "2026-07-25", "time": "5:00 PM", "count": 3}],
+        "my_reservations": [
+            {"date": "2026-07-25", "time": "5:00 PM", "court": "6"},
+        ],
+    }
+
+    _apply_booked_slots(state, [{"date": "2026-07-25", "time": "5:00 PM", "court": "4"}])
+
+    assert state["auto_book_slots"] == [{"date": "2026-07-25", "time": "5:00 PM", "count": 3}]
+
+
+def test_apply_booked_slots_clears_already_satisfied_auto_book_count_without_new_booking():
+    state = {
+        "auto_book_slots": [{"date": "2026-07-25", "time": "5:00 PM", "count": 2}],
+        "my_reservations": [
+            {"date": "2026-07-25", "time": "5:00 PM", "court": "6"},
+            {"date": "2026-07-25", "time": "5:00 PM", "court": "5"},
+        ],
+    }
+
+    _apply_booked_slots(state, [])
+
+    assert state["auto_book_slots"] == []
 
 
 def test_auto_book_priority_prefers_release_day_and_9am():
