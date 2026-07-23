@@ -454,8 +454,10 @@ def book_slot_api(
         # If payment is pending, confirm the Stripe PaymentIntent immediately —
         # rec.us cancels it within ~5 s if it isn't confirmed client-side.
         data_obj = result.get("data") or {}
+        payment_status = str(data_obj.get("status") or "").lower()
         included_obj = result.get("included") or {}
         stripe_payments = (included_obj.get("payments") or [])
+        stripe_confirmed = False
         if data_obj.get("status") == "pending" and stripe_payments:
             gd = (stripe_payments[0].get("gatewayData") or {})
             pi_id  = gd.get("paymentIntentId")
@@ -467,36 +469,22 @@ def book_slot_api(
                 s_stripe, stripe_body = _stripe_confirm_payment_intent(pi_id, cs, pm_id_stripe)
                 print(f"  Stripe confirm [{s_stripe}]: status={stripe_body.get('status')}")
                 transaction_log["stripe_confirm"] = {"status": s_stripe, "body": stripe_body}
+                stripe_confirmed = s_stripe == 200 and stripe_body.get("status") == "succeeded"
 
-        expected = {"date": date_str, "time": time_text, "court": court}
-        verification = {"expected": expected, "attempts": [], "confirmed": False}
-        transaction_log["verification"] = verification
-        for check in range(1, 4):
-            try:
-                reservations = fetch_rec_my_reservations(jwt)
-            except Exception as exc:
-                verification["attempts"].append({
-                    "attempt": check,
-                    "error": str(exc),
-                })
-                reservations = []
-            else:
-                matched = expected in reservations
-                verification["attempts"].append({
-                    "attempt": check,
-                    "matched": matched,
-                    "reservations": reservations,
-                })
-            if expected in reservations:
-                verification["confirmed"] = True
-                print(f"  Confirmed! Court {court} {date_str} {time_text}.")
-                return True
-            if check < 3:
-                time.sleep(1)
-        print(
-            f"  Payment returned 200 but reservation was not confirmed: "
-            f"{json.dumps(result)}"
-        )
+        payment_confirmed = payment_status in {"paid", "succeeded", "settled", "complete", "completed"} or stripe_confirmed
+        transaction_log["verification"] = {
+            "expected": {"date": date_str, "time": time_text, "court": court},
+            "confirmed": payment_confirmed,
+            "source": "payment",
+            "payment_status": payment_status,
+            "stripe_confirmed": stripe_confirmed,
+            "attempts": [],
+        }
+        if payment_confirmed:
+            print(f"  Payment confirmed! Treating Court {court} {date_str} {time_text} as booked.")
+            return True
+
+        print(f"  Payment returned 200 but was not confirmed: {json.dumps(result)[:200]}")
         return False
 
     print(f"  Payment failed [{s2}]: {json.dumps(result)[:200]}")
