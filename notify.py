@@ -96,11 +96,19 @@ def _alert_lines_for_open_targets(
         (slot["date"], slot["time"], slot["court"])
         for slot in state.get("watched_slots", [])
     }
-    auto_book_set = {
-        (slot.get("date"), slot.get("time"))
-        for slot in (state.get("auto_book_slots") or [])
-        if slot.get("date") and slot.get("time")
-    }
+    auto_book_count = {}
+    for slot in state.get("auto_book_slots") or []:
+        if not slot.get("date") or not slot.get("time"):
+            continue
+        try:
+            count = max(1, min(3, int(slot.get("count") or 1)))
+        except (TypeError, ValueError):
+            count = 1
+        auto_book_count[(slot.get("date"), slot.get("time"))] = count
+    reserved_count = {}
+    for slot in state.get("my_reservations", []) or []:
+        key = (slot.get("date"), slot.get("time"))
+        reserved_count[key] = reserved_count.get(key, 0) + 1
 
     lines: list[str] = []
     for date_str in sorted(scanned_availability):
@@ -119,7 +127,14 @@ def _alert_lines_for_open_targets(
                 court for court in open_courts
                 if (date_str, time_text, court) in watched_set
             ]
-            auto_book_open = (date_str, time_text) in auto_book_set
+            slot_key = (date_str, time_text)
+            auto_book_target_count = auto_book_count.get(slot_key)
+            auto_book_remaining = (
+                max(0, auto_book_target_count - reserved_count.get(slot_key, 0))
+                if auto_book_target_count is not None
+                else 0
+            )
+            auto_book_open = auto_book_remaining > 0
             if not watched_open and not auto_book_open:
                 continue
 
@@ -128,8 +143,12 @@ def _alert_lines_for_open_targets(
                 tags.append("watched " + ", ".join(f"Court {court}" for court in watched_open))
             if auto_book_open:
                 tags.append("auto-book")
+            alert_courts = []
+            for court in watched_open + open_courts[:auto_book_remaining]:
+                if court not in alert_courts:
+                    alert_courts.append(court)
             lines.append(
-                f"{date_str} {time_text}: open {', '.join(f'Court {court}' for court in open_courts)}"
+                f"{date_str} {time_text}: open {', '.join(f'Court {court}' for court in alert_courts)}"
                 + (f" ({'; '.join(tags)})" if tags else "")
             )
     return lines
