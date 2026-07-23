@@ -936,14 +936,10 @@ def test_one_off_probe_blind_books_exact_target(monkeypatch):
     assert len(state["app_booking_log"]) == 2
 
 
-def test_book_slot_api_confirms_reservation_after_payment(monkeypatch):
+def test_book_slot_api_trusts_paid_payment_status(monkeypatch):
     import rec_api as rec_api_mod
 
     api_calls = []
-    reservation_checks = iter([
-        [],
-        [{"date": "2026-06-21", "time": "9:00 AM", "court": "5"}],
-    ])
 
     def fake_rec_api(url, method="GET", body=None, jwt=""):
         api_calls.append((url, method, body))
@@ -961,9 +957,8 @@ def test_book_slot_api_confirms_reservation_after_payment(monkeypatch):
     monkeypatch.setattr(
         rec_api_mod,
         "fetch_rec_my_reservations",
-        lambda jwt=None: next(reservation_checks),
+        lambda jwt=None: (_ for _ in ()).throw(AssertionError("should not check reservations immediately")),
     )
-    monkeypatch.setattr(rec_api_mod.time, "sleep", lambda seconds: None)
 
     transaction_log = {}
     assert rec_api_mod.book_slot_api(
@@ -977,13 +972,58 @@ def test_book_slot_api_confirms_reservation_after_payment(monkeypatch):
     assert transaction_log["reservation"]["response"]["status"] == 201
     assert transaction_log["payment"]["response"]["body"] == {"data": {"status": "paid"}}
     assert transaction_log["verification"]["confirmed"] is True
-    assert len(transaction_log["verification"]["attempts"]) == 2
+    assert transaction_log["verification"]["source"] == "payment"
+    assert transaction_log["verification"]["attempts"] == []
+
+
+def test_book_slot_api_trusts_successful_stripe_confirm(monkeypatch):
+    import rec_api as rec_api_mod
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        if url.endswith("/reservations"):
+            return 201, {
+                "data": {
+                    "id": "order-id",
+                    "total": 400,
+                    "maxCreditAdjustmentAllowed": 0,
+                }
+            }
+        return 200, {
+            "data": {"status": "pending"},
+            "included": {
+                "payments": [{
+                    "gatewayData": {
+                        "paymentIntentId": "pi_test",
+                        "clientSecret": "secret",
+                        "paymentMethods": [{"id": "pm_test"}],
+                    },
+                }],
+            },
+        }
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+    monkeypatch.setattr(rec_api_mod, "_stripe_confirm_payment_intent", lambda pi, cs, pm: (200, {"status": "succeeded"}))
+    monkeypatch.setattr(
+        rec_api_mod,
+        "fetch_rec_my_reservations",
+        lambda jwt=None: (_ for _ in ()).throw(AssertionError("should not check reservations immediately")),
+    )
+
+    transaction_log = {}
+    assert rec_api_mod.book_slot_api(
+        "jwt",
+        date(2026, 6, 21),
+        "9:00 AM",
+        "5",
+        transaction_log=transaction_log,
+    ) is True
+    assert transaction_log["stripe_confirm"]["body"]["status"] == "succeeded"
+    assert transaction_log["verification"]["confirmed"] is True
+    assert transaction_log["verification"]["stripe_confirmed"] is True
 
 
 def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     import rec_api as rec_api_mod
-
-    checks = []
 
     def fake_rec_api(url, method="GET", body=None, jwt=""):
         if url.endswith("/reservations"):
@@ -1000,9 +1040,8 @@ def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     monkeypatch.setattr(
         rec_api_mod,
         "fetch_rec_my_reservations",
-        lambda jwt=None: checks.append(jwt) or [],
+        lambda jwt=None: (_ for _ in ()).throw(AssertionError("should not check reservations immediately")),
     )
-    monkeypatch.setattr(rec_api_mod.time, "sleep", lambda seconds: None)
 
     transaction_log = {}
     assert rec_api_mod.book_slot_api(
@@ -1012,9 +1051,9 @@ def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
         "5",
         transaction_log=transaction_log,
     ) is False
-    assert checks == ["jwt", "jwt", "jwt"]
     assert transaction_log["verification"]["confirmed"] is False
-    assert len(transaction_log["verification"]["attempts"]) == 3
+    assert transaction_log["verification"]["payment_status"] == "declined"
+    assert transaction_log["verification"]["attempts"] == []
 
 
 def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatch):
