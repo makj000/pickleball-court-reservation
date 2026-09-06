@@ -1139,7 +1139,7 @@ def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatc
     import routes as routes_mod
 
     state = {
-        "auto_book_slots": [{"date": "2026-07-25", "time": "9:00 AM", "count": 1}],
+        "auto_book_slots": [{"date": "2026-08-25", "time": "9:00 AM", "count": 1}],
         "availability": {},
         "my_reservations": [],
     }
@@ -1158,10 +1158,10 @@ def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatc
     def fake_api_scan(target_times_by_date=None, auto_book_slots=None, detailed_log=None):
         scan_calls.append((target_times_by_date, auto_book_slots))
         if detailed_log is not None:
-            detailed_log.append({"date": "2026-07-25", "time": "9:00 AM", "result": "booked"})
+            detailed_log.append({"date": "2026-08-25", "time": "9:00 AM", "result": "booked"})
         return (
-            {"2026-07-25": {"9:00 AM": {"6": False, "4": True, "5": False}}},
-            [{"date": "2026-07-25", "time": "9:00 AM", "court": "6"}],
+            {"2026-08-25": {"9:00 AM": {"6": False, "4": True, "5": False}}},
+            [{"date": "2026-08-25", "time": "9:00 AM", "court": "6"}],
         )
 
     monkeypatch.setattr(routes_mod, "_api_scan", fake_api_scan)
@@ -1175,15 +1175,15 @@ def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatc
     assert response["statusCode"] == 200
     assert scan_calls == [
         (
-            {"2026-07-25": ["9:00 AM"]},
-            [{"date": "2026-07-25", "time": "9:00 AM", "count": 1}],
+            {"2026-08-25": ["9:00 AM"]},
+            [{"date": "2026-08-25", "time": "9:00 AM", "count": 1}],
         )
     ]
-    assert applied == [{"date": "2026-07-25", "time": "9:00 AM", "court": "6"}]
+    assert applied == [{"date": "2026-08-25", "time": "9:00 AM", "court": "6"}]
     assert notified == applied
     assert body["booked_slots"] == applied
-    assert body["attempt_log"] == [{"date": "2026-07-25", "time": "9:00 AM", "result": "booked"}]
-    assert saved[-1]["availability"]["2026-07-25"]["9:00 AM"] == {"6": False, "4": True, "5": False}
+    assert body["attempt_log"] == [{"date": "2026-08-25", "time": "9:00 AM", "result": "booked"}]
+    assert saved[-1]["availability"]["2026-08-25"]["9:00 AM"] == {"6": False, "4": True, "5": False}
 
 
 def test_handle_cancel_reservation_calls_rec_cancel_and_syncs(monkeypatch):
@@ -1643,3 +1643,117 @@ def test_should_run_scheduled_tick_sub_15m():
     state = {"scan_interval_hours": 0.1}
     # Always true for sub-15min intervals
     assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 10, 7, tzinfo=timezone.utc)) is True
+
+
+def test_booking_history_records_synced_reservations():
+    import state as state_mod
+
+    state = {
+        "my_reservations": [
+            {"date": "2026-08-15", "time": "9:00 AM", "court": "6", "account_index": 1},
+            {"date": "2026-08-15", "time": "9:00 AM", "court": "6", "account_index": 1},
+        ],
+    }
+
+    assert state_mod.record_booking_history_from_reservations(state) is True
+    assert state["booking_history"] == [
+        {
+            "date": "2026-08-15",
+            "weekday": "Saturday",
+            "time": "9:00 AM",
+            "court": "6",
+            "source": "rec_us_sync",
+            "first_seen_at": state["booking_history"][0]["first_seen_at"],
+            "last_seen_at": state["booking_history"][0]["last_seen_at"],
+            "account_index": "1",
+        }
+    ]
+
+
+def test_watch_agent_adds_next_saturday_once(monkeypatch):
+    import watch_agent as watch_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 8, 14, 7, 20, 0, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {"watched_slots": [], "ai_watched_dates": []}
+    saved = []
+    messages = []
+    history = [
+        {"date": "2026-08-01", "time": "9:00 AM", "court": "6"},
+        {"date": "2026-08-08", "time": "9:00 AM", "court": "4"},
+    ]
+    context = {
+        "history_summary": watch_agent_mod._history_summary(history, date(2026, 8, 14)),
+    }
+
+    monkeypatch.setattr(watch_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(watch_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(watch_agent_mod, "save_state", lambda value: saved.append(value.copy()))
+    monkeypatch.setattr(watch_agent_mod, "send_telegram", messages.append)
+
+    decision = [{
+        "date": "2026-08-15",
+        "times": ["9:00 AM"],
+        "reason": "Matches Saturday morning history",
+        "confidence": 0.8,
+    }]
+
+    assert watch_agent_mod._apply_watch_decision(context, decision, "Watching Saturday 9 AM.") == {
+        "ok": True,
+        "added": 3,
+    }
+    assert {(s["date"], s["time"], s["court"]) for s in state["watched_slots"]} == {
+        ("2026-08-15", "9:00 AM", "6"),
+        ("2026-08-15", "9:00 AM", "4"),
+        ("2026-08-15", "9:00 AM", "5"),
+    }
+    assert state["ai_watched_dates"] == ["2026-08-15"]
+    assert messages == ["Watching Saturday 9 AM."]
+
+    assert watch_agent_mod._apply_watch_decision(context, decision, "Duplicate") == {
+        "ok": True,
+        "added": 0,
+    }
+    assert len(state["watched_slots"]) == 3
+
+
+def test_watch_agent_rejects_unsupported_or_invalid_model_output(monkeypatch):
+    import watch_agent as watch_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 8, 14, 7, 20, 0, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {"watched_slots": [], "ai_watched_dates": []}
+    context = {
+        "history_summary": watch_agent_mod._history_summary([
+            {"date": "2026-08-01", "time": "9:00 AM", "court": "6"},
+            {"date": "2026-08-08", "time": "9:00 AM", "court": "4"},
+        ], date(2026, 8, 14)),
+    }
+
+    monkeypatch.setattr(watch_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(watch_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(watch_agent_mod, "save_state", lambda value: None)
+    monkeypatch.setattr(watch_agent_mod, "send_telegram", lambda text: None)
+
+    decision = [
+        {"date": "2026-09-20", "times": ["9:00 AM"], "reason": "too far", "confidence": 0.9},
+        {"date": "2026-08-15", "times": ["7:00 AM"], "reason": "bad time", "confidence": 0.9},
+        {"date": "2026-08-16", "times": ["9:00 AM"], "reason": "unsupported weekday", "confidence": 0.9},
+        {"date": "2026-08-15", "times": ["9:00 AM"], "reason": "bad confidence", "confidence": "bad"},
+    ]
+
+    assert watch_agent_mod._apply_watch_decision(context, decision, "Invalid") == {
+        "ok": True,
+        "added": 0,
+    }
+    assert state["watched_slots"] == []
