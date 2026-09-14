@@ -420,7 +420,7 @@ def book_slot_api(
 
     od = order.get("data", order)
     order_id: str = od["id"]
-    total: int = od.get("total", 0)
+    total: int = od.get("totalAmountRemaining", od.get("total", 0))
     max_credit: int = od.get("maxCreditAdjustmentAllowed", 0)
     credit_to_apply = min(max_credit, total)
     remaining = total - credit_to_apply

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 from config import (
@@ -42,7 +43,7 @@ def _paired_court_order(booked_courts: list[str], candidates: list[str] | None =
     candidates = candidates or COURT_PREFERENCE
     remaining = [court for court in candidates if court not in booked_courts]
     if not booked_courts:
-        preferred = ["6", "5", "4"]
+        preferred = COURT_PREFERENCE
     elif booked_courts[-1] == "6":
         preferred = ["5", "4"]
     elif booked_courts[-1] == "4":
@@ -600,6 +601,7 @@ def _run_release_probe_session() -> None:
     )
     burst_done = False
     blind_booking_order = _paired_court_order([])
+    used_release_accounts: set[int] = set()
 
     state = load_state()
     try:
@@ -651,130 +653,199 @@ def _run_release_probe_session() -> None:
             if r.get("date") == target_date and r.get("time") == target_time
         )
 
-    def _blind_book_release_target(target_time: str = "9:00 AM") -> list[dict]:
+    def _blind_book_release_targets(target_times: list[str]) -> list[dict]:
         ts = _utc_now_iso()
         target_date = new_day.isoformat()
-        target_count = _target_booking_count(target_date, target_time)
-        initial_reserved = _reserved_count(target_date, target_time)
-        booking_attempts: list[dict] = []
-        if initial_reserved >= target_count:
-            probe_log.append({
-                "ts": ts,
-                "phase": "burst",
-                "result": "already_reserved",
-                "slot": f"{target_date} {target_time}",
-                "targets": [
-                    {
-                        "date": target_date,
-                        "times": [target_time],
-                        "courts": {
-                            target_time: {court: None for court in blind_booking_order}
-                        },
-                    }
-                ],
-            })
-            print(f"  [burst] {target_date} {target_time} already reserved — skipping blind booking")
+        target_times = [t for t in target_times if t in release_times]
+        if not target_times:
             return []
 
         try:
-            send_telegram(f"🎯 Trying to book {target_date} {target_time} (courts: {', '.join(blind_booking_order)})")
+            send_telegram(
+                f"🎯 Trying to book {target_date} "
+                f"({', '.join(target_times)}; courts: {', '.join(blind_booking_order)})"
+            )
         except Exception:
             pass
 
-        booked: list[dict] = []
-        used_accounts: set[int] = set()
-        for booking_num in range(target_count):
-            if initial_reserved + len(booked) >= target_count:
-                break
-            booked_one = False
-            for round_num in range(2):
-                if booked_one:
-                    break
-                if round_num > 0:
-                    print(f"  [burst] All courts failed for booking {booking_num + 1}/{target_count}, retrying immediately…")
-                for session in sessions:
-                    account_index = int(session.get("account_index") or 1)
-                    if account_index in used_accounts:
-                        continue
-                    court_order = (
-                        _paired_court_order([b["court"] for b in booked], blind_booking_order)
-                        if target_count > 1
-                        else blind_booking_order
-                    )
-                    for court in court_order:
-                        if any(b["court"] == court for b in booked):
-                            continue
-                        transaction_log: dict = {}
-                        attempt_log = {
-                            "round": round_num + 1,
-                            "booking_num": booking_num + 1,
-                            "account_index": account_index,
-                            "court": court,
-                            "result": "trying",
-                            "transaction": transaction_log,
+        slot_state: dict[str, dict] = {}
+        all_booked: list[dict] = []
+
+        for target_time in target_times:
+            target_count = _target_booking_count(target_date, target_time)
+            initial_reserved = _reserved_count(target_date, target_time)
+            slot_state[target_time] = {
+                "target_count": target_count,
+                "initial_reserved": initial_reserved,
+                "booked": [],
+                "attempts": [],
+            }
+            if initial_reserved >= target_count:
+                probe_log.append({
+                    "ts": ts,
+                    "phase": "burst",
+                    "result": "already_reserved",
+                    "slot": f"{target_date} {target_time}",
+                    "targets": [
+                        {
+                            "date": target_date,
+                            "times": [target_time],
+                            "courts": {
+                                target_time: {court: None for court in blind_booking_order}
+                            },
                         }
-                        booking_attempts.append(attempt_log)
-                        try:
-                            participant_user_id = str(session.get("participant_user_id") or "")
-                            if participant_user_id:
-                                ok = book_slot_api(
-                                    str(session["jwt"]),
-                                    new_day,
-                                    target_time,
-                                    court,
-                                    transaction_log=transaction_log,
-                                    participant_user_id=participant_user_id,
-                                )
-                            else:
-                                ok = book_slot_api(
-                                    str(session["jwt"]),
-                                    new_day,
-                                    target_time,
-                                    court,
-                                    transaction_log=transaction_log,
-                                )
-                        except Exception as exc:
-                            attempt_log["result"] = "error"
-                            attempt_log["error"] = str(exc)
-                            print(f"  Blind booking error {target_date} {target_time} Court {court} (round {round_num + 1}): {exc}")
-                            ok = False
-                        if ok:
-                            attempt_log["result"] = "booked"
-                            booked_item = {"date": target_date, "time": target_time, "court": court}
+                    ],
+                })
+                print(f"  [burst] {target_date} {target_time} already reserved — skipping blind booking")
+
+        def needs_booking(target_time: str) -> bool:
+            info = slot_state[target_time]
+            return info["initial_reserved"] + len(info["booked"]) < info["target_count"]
+
+        def attempt_booking(
+            target_time: str,
+            court: str,
+            session: dict,
+            round_num: int,
+            booking_num: int,
+        ) -> tuple[str, dict, bool]:
+            transaction_log: dict = {}
+            account_index = int(session.get("account_index") or 1)
+            attempt_log = {
+                "round": round_num,
+                "booking_num": booking_num,
+                "account_index": account_index,
+                "court": court,
+                "result": "trying",
+                "transaction": transaction_log,
+            }
+            try:
+                ok = book_slot_api(
+                    str(session["jwt"]),
+                    new_day,
+                    target_time,
+                    court,
+                    transaction_log=transaction_log,
+                    participant_user_id=str(session.get("participant_user_id") or ""),
+                )
+            except Exception as exc:
+                attempt_log["result"] = "error"
+                attempt_log["error"] = str(exc)
+                print(f"  Blind booking error {target_date} {target_time} Court {court} (round {round_num}): {exc}")
+                ok = False
+            if ok:
+                attempt_log["result"] = "booked"
+            elif attempt_log["result"] == "trying":
+                attempt_log["result"] = "failed"
+            return target_time, attempt_log, ok
+
+        for round_num in range(1, 3):
+            if not any(needs_booking(t) for t in target_times):
+                break
+            if round_num > 1:
+                print("  [burst] Unfinished release targets retrying immediately.")
+            for court in blind_booking_order:
+                attempted_times: set[str] = set()
+                while True:
+                    pending_times = [
+                        t for t in target_times
+                        if needs_booking(t) and t not in attempted_times
+                    ]
+                    available_sessions = [
+                        session for session in sessions
+                        if int(session.get("account_index") or 1) not in used_release_accounts
+                    ]
+                    if not pending_times or not available_sessions:
+                        break
+                    jobs = [
+                        (target_time, court, session, round_num, len(slot_state[target_time]["booked"]) + 1)
+                        for target_time, session in zip(pending_times, available_sessions)
+                    ]
+                    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                        futures = [
+                            pool.submit(attempt_booking, target_time, court, session, round_num, booking_num)
+                            for target_time, court, session, round_num, booking_num in jobs
+                        ]
+                        for future in as_completed(futures):
+                            target_time, attempt_log, ok = future.result()
+                            attempted_times.add(target_time)
+                            info = slot_state[target_time]
+                            info["attempts"].append(attempt_log)
+                            if not ok or not needs_booking(target_time):
+                                continue
+                            account_index = int(attempt_log["account_index"])
+                            booked_item = {"date": target_date, "time": target_time, "court": str(attempt_log["court"])}
                             if len(sessions) > 1:
                                 booked_item["account_index"] = account_index
-                            booked.append(booked_item)
-                            used_accounts.add(account_index)
-                            booked_one = True
-                            break
-                        attempt_log.setdefault("result", "failed")
-                    if booked_one:
-                        break
+                            info["booked"].append(booked_item)
+                            all_booked.append(booked_item)
+                            used_release_accounts.add(account_index)
 
         state_after = load_state()
-        if booked:
+        if all_booked:
             booking_log = list(state_after.get("app_booking_log") or [])
-            for booked_slot in booked:
+            for booked_slot in all_booked:
                 booking_entry = {
                     "booked_at": _utc_now_iso(),
                     "date": target_date,
-                    "time": target_time,
+                    "time": booked_slot["time"],
                     "court": booked_slot["court"],
                 }
                 if "account_index" in booked_slot:
                     booking_entry["account_index"] = booked_slot["account_index"]
-                if booking_attempts:
-                    booking_entry["attempts"] = booking_attempts
+                attempts = slot_state[booked_slot["time"]]["attempts"]
+                if attempts:
+                    booking_entry["attempts"] = attempts
                 booking_log.insert(0, booking_entry)
             state_after["app_booking_log"] = booking_log
-            _apply_booked_slots(state_after, booked)
+            _apply_booked_slots(state_after, all_booked)
             save_state(state_after)
-            _notify_booked_slots(booked)
+            _notify_booked_slots(all_booked)
+
+        for target_time, info in slot_state.items():
+            if info["initial_reserved"] >= info["target_count"]:
+                continue
+            booked = info["booked"]
+            booking_attempts = info["attempts"]
+            if booked:
+                probe_log.append({
+                    "ts": ts,
+                    "phase": "burst",
+                    "result": "booked",
+                    "booked": [f"{b['date']} {b['time']} Court {b['court']}" for b in booked],
+                    "booking_attempts": booking_attempts,
+                    "targets": [
+                        {
+                            "date": target_date,
+                            "times": [target_time],
+                            "courts": {
+                                target_time: {court: None for court in blind_booking_order}
+                            },
+                        }
+                    ],
+                })
+                continue
+
+            failure_msg = f"❌ Failed to book {target_date} {target_time} after {len(booking_attempts)} attempts"
+            try:
+                send_telegram(failure_msg)
+            except Exception:
+                pass
+            failures = list(state_after.get("auto_book_failures") or [])
+            failure = {
+                "failed_at": _utc_now_iso(),
+                "date": target_date,
+                "time": target_time,
+                "error": f"Failed after {len(booking_attempts)} attempts",
+                "attempts": booking_attempts,
+            }
+            failures.insert(0, failure)
+            state_after["auto_book_failures"] = failures
+            save_state(state_after)
             probe_log.append({
                 "ts": ts,
                 "phase": "burst",
-                "result": "booked",
-                "booked": [f"{b['date']} {b['time']} Court {b['court']}" for b in booked],
+                "result": "failed",
                 "booking_attempts": booking_attempts,
                 "targets": [
                     {
@@ -786,41 +857,11 @@ def _run_release_probe_session() -> None:
                     }
                 ],
             })
-            return booked
+            print(f"  [burst] blind booking failed for {target_date} {target_time}")
+        return all_booked
 
-        failure_msg = f"❌ Failed to book {target_date} {target_time} after {len(blind_booking_order) * 2} attempts (2 rounds)"
-        try:
-            send_telegram(failure_msg)
-        except Exception:
-            pass
-        failures = list(state_after.get("auto_book_failures") or [])
-        failure = {
-            "failed_at": _utc_now_iso(),
-            "date": target_date,
-            "time": target_time,
-            "error": f"Failed after {len(blind_booking_order) * 2} attempts (2 rounds)",
-            "attempts": booking_attempts,
-        }
-        failures.insert(0, failure)
-        state_after["auto_book_failures"] = failures
-        save_state(state_after)
-        probe_log.append({
-            "ts": ts,
-            "phase": "burst",
-            "result": "failed",
-            "booking_attempts": booking_attempts,
-            "targets": [
-                {
-                    "date": target_date,
-                    "times": [target_time],
-                    "courts": {
-                        target_time: {court: None for court in blind_booking_order}
-                    },
-                }
-            ],
-        })
-        print(f"  [burst] blind booking failed for {target_date} {target_time}")
-        return []
+    def _blind_book_release_target(target_time: str = "9:00 AM") -> list[dict]:
+        return _blind_book_release_targets([target_time])
 
     def _one_probe(phase: str, targets_override: dict | None = None) -> list[dict]:
         ts = _utc_now_iso()
@@ -899,8 +940,7 @@ def _run_release_probe_session() -> None:
             delay_seconds = max(0.0, (eight_am - now_pt).total_seconds())
             if delay_seconds > 0:
                 _time.sleep(delay_seconds)
-            for target_time in release_times:
-                _blind_book_release_target(target_time)
+            _blind_book_release_targets(list(release_times))
             # Keep direct booking attempts through 8:02 AM; availability probes can lag
             # or fail while the reservation endpoint is already accepting requests.
             while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
@@ -910,10 +950,11 @@ def _run_release_probe_session() -> None:
                 ):
                     break
                 t0 = _time.monotonic()
-                for target_time in release_times:
-                    if _burst_slot_already_reserved(new_day.isoformat(), target_time):
-                        continue
-                    _blind_book_release_target(target_time)
+                retry_times = [
+                    target_time for target_time in release_times
+                    if not _burst_slot_already_reserved(new_day.isoformat(), target_time)
+                ]
+                _blind_book_release_targets(retry_times)
                 elapsed = _time.monotonic() - t0
                 _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
             # Queue late relays (~8:15 AM) only for slots still not reserved.

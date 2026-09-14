@@ -95,8 +95,8 @@ An AI agent (Claude claude-sonnet-4-6) that wraps the 8 AM release probe session
                     ▼
               _run_release_probe_session()   ← existing scheduler.py
                     │  pre  (7:58–8:00): probes every 15s
-                    │  burst (8:00–8:00:30): back-to-back probes for 9:00 AM
-                    │  post  (8:00:30–8:02): probes every 15s
+                    │  burst (8:00–8:02): blind-books release targets directly
+                    │    using multiple accounts across 8:00 AM and 9:00 AM
                     │  books from auto_book_slots on first open court
                     └── writes release_probe_log to state
 
@@ -122,7 +122,18 @@ An AI agent (Claude claude-sonnet-4-6) that wraps the 8 AM release probe session
 **Prep phase:** Should I queue a booking for the date 14 days from today?
   - Skip if it's a weekday
   - Skip if there's already a reservation on that weekend (Sat or Sun) for both slots
-  - Otherwise add both 9:00 AM (priority) and 8:00 AM to auto_book_slots and send a preview
+  - Otherwise add both 8:00 AM and 9:00 AM to auto_book_slots and send a preview; treat both times as equally important
+
+### Release burst booking strategy
+
+- Use all configured rec.us accounts to race the release targets. The first wave should assign different accounts to `8:00 AM Court 6` and `9:00 AM Court 6` so neither time waits behind the other.
+  使用所有已配置的 rec.us 账号抢发布时间段。第一波应该把不同账号分别分配给 `8:00 AM Court 6` 和 `9:00 AM Court 6`，这样两个时段都不会排在另一个时段后面等待。
+
+- Fall back across both release times in court preference order: `8:00 Court 6`, `9:00 Court 6`, `8:00 Court 4`, `9:00 Court 4`, `8:00 Court 5`, `9:00 Court 5`.
+  对两个发布时间段按球场偏好交错兜底：`8:00 Court 6`、`9:00 Court 6`、`8:00 Court 4`、`9:00 Court 4`、`8:00 Court 5`、`9:00 Court 5`。
+
+- Once an account successfully books a release slot, do not reuse that account for another release slot in the same session.
+  某个账号一旦成功订到一个发布时段，在同一次发布 session 中不要再把该账号用于另一个发布时段。
 
 **Report phase:** What happened during the 7:58–8:02 AM probe session?
   - How many probes ran, when did the slot open, was it booked?
@@ -149,7 +160,9 @@ Tracks all app-initiated bookings in `state["app_booking_log"]` (each entry: `{b
 If `_recent_booking_count(state) >= 4` before a booking attempt, the loop `break`s immediately and sends a Telegram alert. State is saved to S3 after every successful booking so the counter persists across Lambda invocations.
 
 ### Payment
-Bookings use rec.us credit first (`creditAdjustment: min(max_credit, total)`); any remainder is charged to the credit card on file. There is no credit-only guard — partial credit + card is allowed.
+Bookings use rec.us credit first against the payable remaining amount (`totalAmountRemaining` when rec.us provides it, otherwise `total`); any remainder is charged to the credit card on file. There is no credit-only guard — partial credit + card is allowed.
+
+预订会优先使用 rec.us credit，并且基于实际还需支付的金额付款（如果 rec.us 提供 `totalAmountRemaining` 就用它，否则回退用 `total`）；剩余金额会从已绑定信用卡扣款。没有 credit-only 保护——允许部分 credit 加信用卡付款。
 
 ## Supporting pieces
 

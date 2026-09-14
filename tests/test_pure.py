@@ -1100,6 +1100,44 @@ def test_book_slot_api_trusts_successful_stripe_confirm(monkeypatch):
     assert transaction_log["verification"]["stripe_confirmed"] is True
 
 
+def test_book_slot_api_pays_remaining_amount_when_total_includes_existing_items(monkeypatch):
+    import rec_api as rec_api_mod
+
+    api_calls = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        api_calls.append((url, method, body))
+        if url.endswith("/reservations"):
+            return 201, {
+                "data": {
+                    "id": "order-id",
+                    "total": 800,
+                    "totalAmountRemaining": 400,
+                    "maxCreditAdjustmentAllowed": 800,
+                }
+            }
+        return 200, {"data": {"status": "succeeded"}}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+
+    assert rec_api_mod.book_slot_api(
+        "jwt",
+        date(2026, 9, 26),
+        "9:00 AM",
+        "6",
+        participant_user_id="user-1",
+    ) is True
+
+    payment_body = api_calls[1][2]
+    assert payment_body == {
+        "data": {
+            "payments": [
+                {"paymentMethodType": "organization-credit", "amountCents": 400},
+            ]
+        }
+    }
+
+
 def test_book_slot_api_rejects_unconfirmed_payment(monkeypatch):
     import rec_api as rec_api_mod
 
@@ -1377,7 +1415,7 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
     monkeypatch.setattr(scheduler_mod, "_api_scan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probe scan should not run")))
 
     def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
-        book_calls.append((slot_date.isoformat(), time_text, court))
+        book_calls.append((jwt, participant_user_id, slot_date.isoformat(), time_text, court))
         transaction_log["payment"] = {"response": {"status": 200}}
         transaction_log["verification"] = {"confirmed": True}
         state["my_reservations"].append({
@@ -1395,11 +1433,19 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
 
     scheduler_mod._run_release_probe_session()
 
-    assert book_calls == [
-        ("2026-06-13", "8:00 AM", "6"),
-        ("2026-06-13", "9:00 AM", "6"),
-    ]
+    assert set(book_calls) == {
+        ("jwt-1", "user-1", "2026-06-13", "8:00 AM", "6"),
+        ("jwt-2", "user-2", "2026-06-13", "9:00 AM", "6"),
+    }
     assert saved_states[-1]["last_release_probe_session"] is not None
+    booked_entries = [
+        entry for entry in saved_states[-1]["release_probe_log"]
+        if entry.get("phase") == "burst" and entry.get("result") == "booked"
+    ]
+    assert sorted(entry["booked"][0] for entry in booked_entries) == [
+        "2026-06-13 8:00 AM Court 6",
+        "2026-06-13 9:00 AM Court 6",
+    ]
     assert any(
         entry.get("phase") == "burst"
         and entry.get("booked") == [
@@ -1478,19 +1524,19 @@ def test_release_probe_session_blind_books_entire_two_minute_window(monkeypatch)
     assert len(book_calls) == 24
     assert book_calls[:6] == [
         ("2026-06-13", "8:00 AM", "6"),
-        ("2026-06-13", "8:00 AM", "5"),
+        ("2026-06-13", "9:00 AM", "6"),
         ("2026-06-13", "8:00 AM", "4"),
-        ("2026-06-13", "8:00 AM", "6"),
+        ("2026-06-13", "9:00 AM", "4"),
         ("2026-06-13", "8:00 AM", "5"),
-        ("2026-06-13", "8:00 AM", "4"),
+        ("2026-06-13", "9:00 AM", "5"),
     ]
     assert book_calls[6:12] == [
+        ("2026-06-13", "8:00 AM", "6"),
         ("2026-06-13", "9:00 AM", "6"),
-        ("2026-06-13", "9:00 AM", "5"),
+        ("2026-06-13", "8:00 AM", "4"),
         ("2026-06-13", "9:00 AM", "4"),
-        ("2026-06-13", "9:00 AM", "6"),
+        ("2026-06-13", "8:00 AM", "5"),
         ("2026-06-13", "9:00 AM", "5"),
-        ("2026-06-13", "9:00 AM", "4"),
     ]
     burst_failures = [
         entry for entry in saved_states[-1]["release_probe_log"]
