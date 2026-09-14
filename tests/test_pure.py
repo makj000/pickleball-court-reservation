@@ -1190,6 +1190,7 @@ def test_handle_force_book_scans_auto_book_slots_and_applies_bookings(monkeypatc
     monkeypatch.setattr(routes_mod, "date", type("FixedDate", (date,), {
         "today": classmethod(lambda cls: cls(2026, 7, 19)),
     }))
+    monkeypatch.setattr(routes_mod, "_auto_book_time_map", lambda slots: {"2026-08-25": ["9:00 AM"]})
     monkeypatch.setattr(routes_mod, "load_state", lambda: state)
     monkeypatch.setattr(routes_mod, "save_state", lambda value: saved.append(value.copy()))
 
