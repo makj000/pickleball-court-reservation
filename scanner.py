@@ -80,9 +80,9 @@ def _paired_court_order(booked_courts: list[str], candidates: list[str] | None =
     candidates = candidates or COURT_PREFERENCE
     remaining = [court for court in candidates if court not in booked_courts]
     if not booked_courts:
-        preferred = ["6", "5", "4"]
+        preferred = COURT_PREFERENCE
     elif booked_courts[-1] == "6":
-        preferred = ["5", "4"]
+        preferred = ["4", "5"]
     elif booked_courts[-1] == "4":
         preferred = ["5", "6"]
     else:

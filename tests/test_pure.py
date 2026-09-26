@@ -51,6 +51,20 @@ def test_build_next_dates_default_start():
     assert result == [date.today()]
 
 
+def test_scanner_paired_court_order_prefers_4_before_5_after_6():
+    import scanner as scanner_mod
+
+    assert scanner_mod._paired_court_order([]) == ["6", "4", "5"]
+    assert scanner_mod._paired_court_order(["6"]) == ["4", "5"]
+
+
+def test_scheduler_paired_court_order_prefers_4_before_5_after_6():
+    import scheduler as scheduler_mod
+
+    assert scheduler_mod._paired_court_order([]) == ["6", "4", "5"]
+    assert scheduler_mod._paired_court_order(["6"]) == ["4", "5"]
+
+
 # ── state ─────────────────────────────────────────────────────────────────────
 
 def test_normalize_court_number_valid():
