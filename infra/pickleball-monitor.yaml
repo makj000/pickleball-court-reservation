@@ -67,6 +67,22 @@ Resources:
           Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
           Input: '{"_booking_agent":true,"phase":"report"}'
 
+  WatchAgentRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: pickleball-watch-agent
+      ScheduleExpression: cron(20 14 * * ? *)
+      State: ENABLED
+      Tags:
+        - Key: Project
+          Value: pickleball-court-reservation
+      Targets:
+        - Id: lambda
+          Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
+          Input: '{"_watch_agent":true}'
+
   ReleaseProbeQueueRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -88,6 +104,16 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt BookingAgentReportRule.Arn
+
+  WatchAgentInvokePermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref FunctionName
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WatchAgentRule.Arn
 
   ReleaseProbeQueueInvokePermission:
     Type: AWS::Lambda::Permission
@@ -133,5 +159,7 @@ Outputs:
     Value: !GetAtt WorkQueue.Arn
   BookingAgentReportRuleArn:
     Value: !GetAtt BookingAgentReportRule.Arn
+  WatchAgentRuleArn:
+    Value: !GetAtt WatchAgentRule.Arn
   ReleaseProbeQueueRuleArn:
     Value: !GetAtt ReleaseProbeQueueRule.Arn

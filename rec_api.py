@@ -12,7 +12,10 @@ from config import (
     SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
     _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
 )
-from state import _normalize_court_number, _normalize_slot_records, _utc_now_iso
+from state import (
+    _normalize_court_number, _normalize_slot_records, _utc_now_iso,
+    record_booking_history_from_reservations,
+)
 
 
 def _configured_rec_accounts() -> list[dict[str, str | int]]:
@@ -319,6 +322,7 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     )
     state["my_reservations_synced_at"] = _utc_now_iso()
     state["my_reservations_source"] = "rec.us"
+    record_booking_history_from_reservations(state)
     return True
 
 

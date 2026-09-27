@@ -39,6 +39,9 @@ def _empty_state() -> dict:
         "auto_watch_weekends_8am_enabled": False,
         "auto_book_slots":     [],
         "app_booking_log":     [],
+        "booking_history":     [],
+        "ai_watch_decisions":  [],
+        "ai_watched_dates":    [],
         "auto_book_failures":  [],
         "seen_open_days":      {},
         "cached_jwt":              None,
@@ -306,6 +309,12 @@ def _normalize_state(state: dict) -> dict:
         e for e in (state.get("app_booking_log") or [])
         if isinstance(e, dict) and e.get("booked_at", "") >= cutoff
     ]
+    normalized["booking_history"] = _normalize_booking_history(state.get("booking_history"))
+    normalized["ai_watch_decisions"] = _normalize_ai_watch_decisions(state.get("ai_watch_decisions"))
+    normalized["ai_watched_dates"] = sorted({
+        d for d in (state.get("ai_watched_dates") or [])
+        if isinstance(d, str) and d >= today_str
+    })
     normalized["release_probe_log"] = [
         e for e in (state.get("release_probe_log") or [])
         if isinstance(e, dict)
@@ -316,6 +325,116 @@ def _normalize_state(state: dict) -> dict:
         if isinstance(e, dict) and e.get("failed_at", "") >= cutoff_48h
     ][:20]
     return normalized
+
+
+def _normalize_booking_history(history) -> list[dict]:
+    normalized: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for entry in history or []:
+        if not isinstance(entry, dict):
+            continue
+        slot_date = entry.get("date")
+        slot_time = entry.get("time")
+        court = _normalize_court_number(entry.get("court"))
+        if not slot_date or slot_time not in SLOT_TIMES or not court:
+            continue
+        account = str(entry.get("account_index") or "")
+        key = (slot_date, slot_time, court, account)
+        if key in seen:
+            continue
+        seen.add(key)
+        record = {
+            "date": slot_date,
+            "weekday": entry.get("weekday") or _weekday_name(slot_date),
+            "time": slot_time,
+            "court": court,
+            "source": entry.get("source") or "rec_us_sync",
+            "first_seen_at": entry.get("first_seen_at") or entry.get("last_seen_at") or _utc_now_iso(),
+            "last_seen_at": entry.get("last_seen_at") or entry.get("first_seen_at") or _utc_now_iso(),
+        }
+        if account:
+            record["account_index"] = account
+        normalized.append(record)
+    return sorted(normalized, key=lambda e: (e["date"], e["time"], e["court"]))[-1000:]
+
+
+def _normalize_ai_watch_decisions(decisions) -> list[dict]:
+    normalized: list[dict] = []
+    for entry in decisions or []:
+        if not isinstance(entry, dict):
+            continue
+        decided_at = entry.get("decided_at")
+        if not decided_at:
+            continue
+        slots = []
+        for slot in entry.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            slot_date = slot.get("date") or entry.get("target_date")
+            slot_time = slot.get("time")
+            if slot_date and slot_time in SLOT_TIMES:
+                slots.append({"date": slot_date, "time": slot_time})
+        normalized.append({
+            "decided_at": decided_at,
+            "target_date": entry.get("target_date"),
+            "slots": slots,
+            "reason": entry.get("reason"),
+            "confidence": entry.get("confidence"),
+            "message": entry.get("message"),
+        })
+    return normalized[-100:]
+
+
+def _weekday_name(date_str: str) -> str:
+    try:
+        return date.fromisoformat(date_str).strftime("%A")
+    except ValueError:
+        return ""
+
+
+def record_booking_history_from_reservations(state: dict) -> bool:
+    existing: dict[tuple[str, str, str, str], dict] = {}
+    for entry in _normalize_booking_history(state.get("booking_history")):
+        key = (
+            entry["date"],
+            entry["time"],
+            entry["court"],
+            str(entry.get("account_index") or ""),
+        )
+        existing[key] = entry
+
+    changed = False
+    now = _utc_now_iso()
+    for slot in state.get("my_reservations") or []:
+        if not isinstance(slot, dict):
+            continue
+        slot_date = slot.get("date")
+        slot_time = slot.get("time")
+        court = _normalize_court_number(slot.get("court"))
+        if not slot_date or slot_time not in SLOT_TIMES or not court:
+            continue
+        account = str(slot.get("account_index") or "")
+        key = (slot_date, slot_time, court, account)
+        if key in existing:
+            existing[key]["last_seen_at"] = now
+            changed = True
+        else:
+            record = {
+                "date": slot_date,
+                "weekday": _weekday_name(slot_date),
+                "time": slot_time,
+                "court": court,
+                "source": "rec_us_sync",
+                "first_seen_at": now,
+                "last_seen_at": now,
+            }
+            if account:
+                record["account_index"] = account
+            existing[key] = record
+            changed = True
+
+    state["booking_history"] = sorted(existing.values(), key=lambda e: (e["date"], e["time"], e["court"]))[-1000:]
+    return changed
 
 
 def _history_targets_from_map(targets_by_date: dict[str, list[str]]) -> list[dict]:
