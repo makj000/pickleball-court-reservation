@@ -7,8 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from config import (
     AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, COURT_PREFERENCE, PT,
     SCANS_DISABLED_MESSAGE, SCANS_ENABLED, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
-    _RELEASE_BURST_UNTIL_S, _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
-    _RELEASE_PRE_INTERVAL_S,
+    _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
 )
 from state import (
     _active_scan_started_at, _attach_history_results, _auto_watch_on_new_day_openings,
@@ -534,42 +533,6 @@ def _run_queued_scheduled_probe(token: str) -> None:
         save_state(state)
 
 
-def _format_probe_session_summary(probe_log: list[dict], tz) -> str:
-    """Format a detailed Telegram summary of the 8am probe session."""
-    lines = [f"8am probe session: {len(probe_log)} probes"]
-    for entry in probe_log:
-        ts = entry.get("ts", "")
-        try:
-            from datetime import timezone as _tz
-            dt = datetime.fromisoformat(ts).astimezone(tz)
-            time_str = dt.strftime("%H:%M:%S")
-        except Exception:
-            time_str = ts[11:19] if len(ts) >= 19 else ts
-        phase = entry.get("phase", "?")
-        result = entry.get("result", "?")
-        prefix = f"  {time_str} [{phase}] {result}"
-        if entry.get("booked"):
-            lines.append(f"{prefix} — {', '.join(entry['booked'])}")
-        elif entry.get("open"):
-            lines.append(f"{prefix} — open: {', '.join(entry['open'])}")
-        elif result == "error":
-            lines.append(f"{prefix}: {str(entry.get('error', ''))[:80]}")
-        elif result == "already_reserved":
-            lines.append(f"{prefix}: {entry.get('slot', '')}")
-        else:
-            lines.append(prefix)
-        for attempt in entry.get("booking_attempts") or []:
-            court = attempt.get("court", "?")
-            a_result = attempt.get("result", "?")
-            a_num = attempt.get("attempt", "")
-            err = attempt.get("error", "")
-            detail = f"    → Court {court} attempt {a_num}: {a_result}"
-            if err:
-                detail += f" ({err[:60]})"
-            lines.append(detail)
-    return "\n".join(lines)
-
-
 def _run_release_probe_session() -> None:
     """Own the 7:58–8:02 AM slot-release window.
 
@@ -593,13 +556,9 @@ def _run_release_probe_session() -> None:
 
     new_day = now_pt.date() + timedelta(days=14)
     release_times = _weekend_release_booking_times(new_day)
-    new_day_targets: dict[str, list[str]] = {}
-    if release_times:
-        new_day_targets[new_day.isoformat()] = list(release_times)
-    burst_target: tuple[str, str] | None = (
-        (new_day.isoformat(), "9:00 AM") if new_day.weekday() >= 5 else None
-    )
-    burst_done = False
+    if not release_times:
+        print("Skipping release probe session: no release targets for this weekend.")
+        return
     blind_booking_order = _paired_court_order([])
     used_release_accounts: set[int] = set()
 
@@ -619,8 +578,6 @@ def _run_release_probe_session() -> None:
                 _cache_jwt(state, jwt)
         save_state(state)
         print(f"Release probe session: logged in, JWT expires {state.get('cached_jwt_expires_at', '?')}")
-        if burst_target:
-            print(f"  Burst target: {burst_target[0]} {burst_target[1]}")
     except Exception as exc:
         try:
             send_telegram(f"❌ Release probe login failed: {exc}")
@@ -863,146 +820,41 @@ def _run_release_probe_session() -> None:
     def _blind_book_release_target(target_time: str = "9:00 AM") -> list[dict]:
         return _blind_book_release_targets([target_time])
 
-    def _one_probe(phase: str, targets_override: dict | None = None) -> list[dict]:
-        ts = _utc_now_iso()
-        st = load_state()
-        auto_book_slots = st.get("auto_book_slots") or []
-        targets = targets_override if targets_override is not None else new_day_targets
-        history_targets = _history_targets_from_map(targets)
-        booking_attempts: list[dict] = []
-        if not targets:
-            probe_log.append({
-                "ts": ts,
-                "phase": phase,
-                "result": "no_targets",
-                "booking_attempts": booking_attempts,
-                "targets": [],
-            })
-            print(f"  [{phase}] no targets")
-            return []
-        try:
-            new_avail, booked = _api_scan(
-                target_times_by_date=targets,
-                auto_book_slots=auto_book_slots,
-                detailed_log=booking_attempts,
-            )
-            st = load_state()
-            avail = st.get("availability", {})
-            for d, tm in new_avail.items():
-                day = avail.get(d, {})
-                for t, courts in tm.items():
-                    day[t] = _normalize_time_availability(courts)
-                avail[d] = day
-            st["availability"] = avail
-            open_slots = [
-                f"{d} {t}"
-                for d, tm in new_avail.items()
-                for t, courts in tm.items()
-                if any(v is True for v in courts.values())
-            ]
-            entry: dict = {
-                "ts": ts,
-                "phase": phase,
-                "result": "booked" if booked else ("open" if open_slots else "empty"),
-                "booking_attempts": booking_attempts,
-                "targets": _attach_history_results(history_targets, new_avail),
-            }
-            if booked:
-                entry["booked"] = [f"{b['date']} {b['time']} Court {b['court']}" for b in booked]
-            if open_slots:
-                entry["open"] = open_slots
-            probe_log.append(entry)
-            print(
-                f"  [{phase}] {entry['result']}"
-                + (f" — {entry.get('booked') or entry.get('open')}" if entry["result"] != "empty" else "")
-            )
-            _apply_booked_slots(st, booked)
-            save_state(st)
-            _notify_booked_slots(booked)
-            return booked
-        except Exception as exc:
-            probe_log.append({
-                "ts": ts,
-                "phase": phase,
-                "result": "error",
-                "error": str(exc),
-                "booking_attempts": booking_attempts,
-                "targets": history_targets,
-            })
-            print(f"  [{phase}] error: {exc}")
-            return []
-
     def _burst_slot_already_reserved(burst_date: str, burst_time: str) -> bool:
         return _reserved_count(burst_date, burst_time) >= _target_booking_count(burst_date, burst_time)
 
     try:
-        if release_times:
-            delay_seconds = max(0.0, (eight_am - now_pt).total_seconds())
-            if delay_seconds > 0:
-                _time.sleep(delay_seconds)
-            _blind_book_release_targets(list(release_times))
-            # Keep direct booking attempts through 8:02 AM; availability probes can lag
-            # or fail while the reservation endpoint is already accepting requests.
-            while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
-                if all(
-                    _burst_slot_already_reserved(new_day.isoformat(), target_time)
-                    for target_time in release_times
-                ):
-                    break
-                t0 = _time.monotonic()
-                retry_times = [
-                    target_time for target_time in release_times
-                    if not _burst_slot_already_reserved(new_day.isoformat(), target_time)
-                ]
-                _blind_book_release_targets(retry_times)
-                elapsed = _time.monotonic() - t0
-                _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
-            # Queue late relays (~8:15 AM) only for slots still not reserved.
-            for target_time in release_times:
-                if _burst_slot_already_reserved(new_day.isoformat(), target_time):
-                    continue
-                late_relay_queued = bool(_enqueue_work(
-                    "weekend_late_relay",
-                    {"date": new_day.isoformat(), "time": target_time},
-                    delay_seconds=780,  # fires ~13 min later → ~8:15 AM
-                ))
-                if late_relay_queued:
-                    print(f"Queued weekend_late_relay for {new_day.isoformat()} {target_time} (~8:15 AM).")
-            return
-
-        while True:
-            now = datetime.now(tz=PT)
-            secs = (now - eight_am).total_seconds()
-
-            if secs >= _RELEASE_END_S:
+        delay_seconds = max(0.0, (eight_am - now_pt).total_seconds())
+        if delay_seconds > 0:
+            _time.sleep(delay_seconds)
+        _blind_book_release_targets(list(release_times))
+        # Keep direct booking attempts through 8:02 AM; availability probes can lag
+        # or fail while the reservation endpoint is already accepting requests.
+        while (datetime.now(tz=PT) - eight_am).total_seconds() < _RELEASE_END_S:
+            if all(
+                _burst_slot_already_reserved(new_day.isoformat(), target_time)
+                for target_time in release_times
+            ):
                 break
-
-            in_burst_window = 0 <= secs < _RELEASE_BURST_UNTIL_S
-
-            if in_burst_window and burst_target and not burst_done:
-                burst_date, burst_time = burst_target
-                if _burst_slot_already_reserved(burst_date, burst_time):
-                    burst_done = True
-                    probe_log.append({
-                        "ts": _utc_now_iso(), "phase": "burst",
-                        "result": "already_reserved",
-                        "slot": f"{burst_date} {burst_time}",
-                        "targets": _history_targets_from_map({burst_date: [burst_time]}),
-                    })
-                    print(f"  [burst] {burst_date} {burst_time} already reserved — stopping burst")
-                else:
-                    booked = _one_probe("burst", targets_override={burst_date: [burst_time]})
-                    if any(b.get("date") == burst_date and b.get("time") == burst_time for b in booked):
-                        burst_done = True
-                    continue
-
-            phase = "pre" if secs < 0 else "post"
-            interval = _RELEASE_PRE_INTERVAL_S if secs < 0 else _RELEASE_POST_INTERVAL_S
             t0 = _time.monotonic()
-            _one_probe(phase)
+            retry_times = [
+                target_time for target_time in release_times
+                if not _burst_slot_already_reserved(new_day.isoformat(), target_time)
+            ]
+            _blind_book_release_targets(retry_times)
             elapsed = _time.monotonic() - t0
-            _time.sleep(max(0.0, interval - elapsed))
-
+            _time.sleep(max(0.0, _RELEASE_POST_INTERVAL_S - elapsed))
+        # Queue late relays (~8:15 AM) only for slots still not reserved.
+        for target_time in release_times:
+            if _burst_slot_already_reserved(new_day.isoformat(), target_time):
+                continue
+            late_relay_queued = bool(_enqueue_work(
+                "weekend_late_relay",
+                {"date": new_day.isoformat(), "time": target_time},
+                delay_seconds=780,  # fires ~13 min later → ~8:15 AM
+            ))
+            if late_relay_queued:
+                print(f"Queued weekend_late_relay for {new_day.isoformat()} {target_time} (~8:15 AM).")
     finally:
         state = load_state()
         if state.get("scan_started_at") == started_at:
@@ -1013,10 +865,6 @@ def _run_release_probe_session() -> None:
         state["last_release_probe_session"] = started_at
         save_state(state)
         print(f"8am session done: {len(probe_log)} probes")
-        try:
-            send_telegram(_format_probe_session_summary(probe_log, PT))
-        except Exception as exc:
-            print(f"Failed to send probe session summary: {exc}")
 
 
 def _run_weekend_payment_check(target_date: str, target_time: str) -> None:
