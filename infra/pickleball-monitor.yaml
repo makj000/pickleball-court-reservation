@@ -67,6 +67,25 @@ Resources:
           Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
           Input: '{"_booking_agent":true,"phase":"report"}'
 
+  BookingAgentPrepRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Named distinctly from the old (now-orphaned, disabled) "booking-agent-prep"
+      # rule that predates this template — that rule is no longer used and should
+      # be deleted manually to avoid a duplicate/conflicting schedule.
+      Name: pickleball-booking-agent-prep
+      ScheduleExpression: cron(30 14 * * ? *)
+      State: ENABLED
+      Tags:
+        - Key: Project
+          Value: pickleball-court-reservation
+      Targets:
+        - Id: lambda
+          Arn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
+          Input: '{"_booking_agent":true,"phase":"prep"}'
+
   WatchAgentRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -104,6 +123,16 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt BookingAgentReportRule.Arn
+
+  BookingAgentPrepInvokePermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref FunctionName
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BookingAgentPrepRule.Arn
 
   WatchAgentInvokePermission:
     Type: AWS::Lambda::Permission
@@ -159,6 +188,8 @@ Outputs:
     Value: !GetAtt WorkQueue.Arn
   BookingAgentReportRuleArn:
     Value: !GetAtt BookingAgentReportRule.Arn
+  BookingAgentPrepRuleArn:
+    Value: !GetAtt BookingAgentPrepRule.Arn
   WatchAgentRuleArn:
     Value: !GetAtt WatchAgentRule.Arn
   ReleaseProbeQueueRuleArn:
