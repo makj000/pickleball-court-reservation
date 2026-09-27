@@ -66,16 +66,6 @@ def _recent_booking_count(state: dict) -> int:
     )
 
 
-def _weekend_followup_time(date_str: str, time_text: str) -> str | None:
-    try:
-        slot_date = date.fromisoformat(date_str)
-    except ValueError:
-        return None
-    if slot_date.weekday() == 6 and time_text == "9:00 AM":
-        return "8:00 AM"
-    return None
-
-
 def _paired_court_order(booked_courts: list[str], candidates: list[str] | None = None) -> list[str]:
     candidates = candidates or COURT_PREFERENCE
     remaining = [court for court in candidates if court not in booked_courts]
@@ -349,19 +339,7 @@ def _api_scan(
                 slot_log["result"] = "booked"
                 slot_log["court"] = booked_court
                 slot_log["booked"] = booked_in_slot.copy()
-        if booked_in_slot:
-            followup_time = _weekend_followup_time(date_str, time_text)
-            if followup_time:
-                followup_avail = new_avail.get(date_str, {}).get(followup_time, {})
-                followup_key = (date_str, followup_time)
-                queued_slots = {(d, t) for d, t, _ in to_book[i:]}
-                if (
-                    followup_key not in processed_slots
-                    and followup_key not in queued_slots
-                    and _preferred_open_court(followup_avail) is not None
-                ):
-                    to_book.insert(i, (date_str, followup_time, followup_avail))
-        else:
+        if not booked_in_slot:
             failures = list(state_obj.get("auto_book_failures") or [])
             failure = {"failed_at": _utc_now_iso(), "date": date_str, "time": time_text, "error": "Failed after 5 attempts", "attempts": all_attempts}
             failures.insert(0, failure)
