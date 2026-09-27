@@ -10,7 +10,7 @@ from config import (
     BOT_HISTORY_PREFIX, BOT_MAX_HISTORY_TURNS, COURT_PREFERENCE, PT, SCAN_HISTORY_MAX,
     SCAN_LOCK_TTL_SECONDS, SLOT_TIMES, SQS_DELAY_MAX_SECONDS, SQS_STALE_GRACE_SECONDS,
     STATE_BUCKET, STATE_KEY, TARGET_COURTS, TELEGRAM_USAGE_KEY, TELEGRAM_USAGE_MAX,
-    WORK_QUEUE_URL, _time_text_to_hhmm,
+    WEEKEND_TARGET_TIMES, WORK_QUEUE_URL, _time_text_to_hhmm,
 )
 
 
@@ -42,6 +42,7 @@ def _empty_state() -> dict:
         "booking_history":     [],
         "ai_watch_decisions":  [],
         "ai_watched_dates":    [],
+        "weekend_target_prefilled_dates": [],
         "auto_book_failures":  [],
         "seen_open_days":      {},
         "cached_jwt":              None,
@@ -313,6 +314,10 @@ def _normalize_state(state: dict) -> dict:
     normalized["ai_watch_decisions"] = _normalize_ai_watch_decisions(state.get("ai_watch_decisions"))
     normalized["ai_watched_dates"] = sorted({
         d for d in (state.get("ai_watched_dates") or [])
+        if isinstance(d, str) and d >= today_str
+    })
+    normalized["weekend_target_prefilled_dates"] = sorted({
+        d for d in (state.get("weekend_target_prefilled_dates") or [])
         if isinstance(d, str) and d >= today_str
     })
     normalized["release_probe_log"] = [
@@ -675,6 +680,64 @@ def _record_newly_open_dates(state: dict, new_avail: dict, ts: str | None = None
 
 def _new_day_iso(today: date | None = None) -> str:
     return ((today or date.today()) + timedelta(days=14)).isoformat()
+
+
+def _weekend_target_checked_times(state: dict, date_str: str) -> tuple[str, ...]:
+    """Times in WEEKEND_TARGET_TIMES currently checked ($ auto-book) for date_str."""
+    checked = {
+        ab.get("time") for ab in (state.get("auto_book_slots") or [])
+        if ab.get("date") == date_str
+    }
+    return tuple(t for t in WEEKEND_TARGET_TIMES if t in checked)
+
+
+def _weekend_target_watched_times(state: dict, date_str: str) -> tuple[str, ...]:
+    """Times in WEEKEND_TARGET_TIMES currently watched (\U0001f441️, any court) for date_str."""
+    watched = {
+        s.get("time") for s in (state.get("watched_slots") or [])
+        if s.get("date") == date_str
+    }
+    return tuple(t for t in WEEKEND_TARGET_TIMES if t in watched)
+
+
+def _is_weekend_target_prefilled(state: dict, date_str: str) -> bool:
+    return date_str in set(state.get("weekend_target_prefilled_dates") or [])
+
+
+def _mark_weekend_target_prefilled(state: dict, date_str: str) -> None:
+    dates = set(state.get("weekend_target_prefilled_dates") or [])
+    dates.add(date_str)
+    state["weekend_target_prefilled_dates"] = sorted(dates)
+
+
+def _set_weekend_target_defaults(
+    state: dict, date_str: str, *, auto_book_times: list[str], watch_times: list[str],
+) -> None:
+    """Write default auto-book/watch state for date_str and mark it prefilled.
+
+    Only ever called for a date that has not been touched yet (checked via
+    _is_weekend_target_prefilled) so it never overwrites a user's own edits.
+    """
+    if auto_book_times:
+        existing = {(ab["date"], ab["time"]) for ab in (state.get("auto_book_slots") or [])}
+        additions = [
+            {"date": date_str, "time": t}
+            for t in auto_book_times
+            if (date_str, t) not in existing
+        ]
+        state["auto_book_slots"] = (state.get("auto_book_slots") or []) + additions
+    if watch_times:
+        new_slots = [
+            {"date": date_str, "time": t, "court": court}
+            for t in watch_times
+            for court in COURT_PREFERENCE
+        ]
+        state["watched_slots"] = _normalize_slot_records(
+            (state.get("watched_slots") or []) + new_slots,
+            expand_legacy=False,
+        )
+        state["watched_slots_updated_at"] = _utc_now_iso()
+    _mark_weekend_target_prefilled(state, date_str)
 
 
 def _enqueue_work(kind: str, payload: dict | None = None, *, delay_seconds: int = 0) -> bool:

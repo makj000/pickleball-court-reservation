@@ -18,6 +18,14 @@ PT = ZoneInfo("America/Los_Angeles")
 APP_VERSION = "2.4.1"
 SCAN_HISTORY_MAX = 300
 
+# How many days ahead the grid/scan windows cover. Must reach at least 22 days
+# so the weekend-target preview (21-22 days out) is visible and editable.
+LOOKAHEAD_DAYS = 23
+
+# Weekend release times eligible for the weekend-target auto-book/watch feature,
+# in SLOT_TIMES order.
+WEEKEND_TARGET_TIMES = ("8:00 AM", "9:00 AM", "10:00 AM")
+
 # ── Credentials ───────────────────────────────────────────────────────────────
 EMAIL    = os.environ.get("REC_US_LOGIN") or os.environ.get("EMAIL", "")
 PASSWORD = os.environ.get("REC_US_PASSWORD") or os.environ.get("PASSWORD", "")

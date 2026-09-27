@@ -4,7 +4,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 
 from config import (
-    COURT_PREFERENCE, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
+    COURT_PREFERENCE, LOOKAHEAD_DAYS, PT, SCANS_DISABLED_MESSAGE, SCANS_ENABLED,
     SLOT_TIMES,
 )
 from state import _preferred_open_court, _utc_now_iso, load_state, save_state
@@ -32,7 +32,7 @@ def _api_fetch_availability(
     if target_times_by_date:
         target_dates = sorted(date.fromisoformat(d) for d in target_times_by_date)
     else:
-        target_dates = [date.today() + timedelta(days=offset) for offset in range(16)]
+        target_dates = [date.today() + timedelta(days=offset) for offset in range(LOOKAHEAD_DAYS)]
 
     return asyncio.run(fetch_availability_map(target_dates))
 

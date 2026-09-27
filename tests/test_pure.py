@@ -214,6 +214,35 @@ def test_normalize_state_preserves_release_probe_fields():
     ]
 
 
+def test_weekend_target_checked_times_reads_auto_book_slots_only_for_that_date():
+    import state as state_mod
+
+    state = {
+        "auto_book_slots": [
+            {"date": "2026-06-13", "time": "9:00 AM"},
+            {"date": "2026-06-13", "time": "10:00 AM"},
+            {"date": "2026-06-20", "time": "8:00 AM"},  # different date, must not leak in
+        ],
+    }
+    assert state_mod._weekend_target_checked_times(state, "2026-06-13") == ("9:00 AM", "10:00 AM")
+    assert state_mod._weekend_target_checked_times(state, "2026-06-20") == ("8:00 AM",)
+    assert state_mod._weekend_target_checked_times(state, "2026-06-27") == ()
+
+
+def test_set_weekend_target_defaults_writes_auto_book_and_watch_all_courts():
+    import state as state_mod
+
+    state = {"auto_book_slots": [], "watched_slots": [], "weekend_target_prefilled_dates": []}
+    state_mod._set_weekend_target_defaults(
+        state, "2026-06-13", auto_book_times=["8:00 AM", "9:00 AM"], watch_times=["10:00 AM"],
+    )
+    assert sorted((s["time"] for s in state["auto_book_slots"]), key=str) == ["8:00 AM", "9:00 AM"]
+    assert {s["court"] for s in state["watched_slots"]} == {"6", "4", "5"}
+    assert all(s["time"] == "10:00 AM" for s in state["watched_slots"])
+    assert state_mod._is_weekend_target_prefilled(state, "2026-06-13") is True
+    assert state_mod._is_weekend_target_prefilled(state, "2026-06-20") is False
+
+
 def test_normalize_state_keeps_friend_reservations_and_removes_overlap_with_mine():
     import state as state_mod
 
@@ -824,7 +853,10 @@ def test_release_probe_window_does_not_call_api_scan(monkeypatch):
 
     state = {
         "my_reservations": [],
-        "auto_book_slots": [{"date": "2026-06-13", "time": "9:00 AM"}],
+        "auto_book_slots": [
+            {"date": "2026-06-13", "time": "8:00 AM"},
+            {"date": "2026-06-13", "time": "9:00 AM"},
+        ],
         "release_probe_log": [],
         "app_booking_log": [],
     }
@@ -868,8 +900,8 @@ def test_release_probe_window_does_not_call_api_scan(monkeypatch):
 
     assert api_scan_calls == []
     assert book_calls
-    # Both accounts are pre-authenticated and tried as fallbacks for this single
-    # (count=1) target since book_slot_api fails every attempt in this test.
+    # Both 8:00 AM and 9:00 AM are checked, so both pre-authenticated accounts
+    # get paired one-per-time and tried in parallel.
     assert {call[0] for call in book_calls} == {"jwt-1", "jwt-2"}
 
 
@@ -1396,7 +1428,10 @@ def test_release_probe_session_blind_books_weekend_target_and_persists_log(monke
         "cached_jwt": "jwt",
         "cached_jwt_expires_at": "2026-05-30T16:30:00.000Z",
         "my_reservations": [],
-        "auto_book_slots": [],
+        "auto_book_slots": [
+            {"date": "2026-06-13", "time": "8:00 AM"},
+            {"date": "2026-06-13", "time": "9:00 AM"},
+        ],
         "release_probe_log": [],
         "app_booking_log": [],
     }
@@ -1496,7 +1531,10 @@ def test_release_probe_session_blind_books_entire_two_minute_window(monkeypatch)
         "cached_jwt": "jwt",
         "cached_jwt_expires_at": "2026-05-30T16:30:00.000Z",
         "my_reservations": [],
-        "auto_book_slots": [],
+        "auto_book_slots": [
+            {"date": "2026-06-13", "time": "8:00 AM"},
+            {"date": "2026-06-13", "time": "9:00 AM"},
+        ],
         "release_probe_log": [],
         "app_booking_log": [],
         "auto_book_failures": [],
@@ -1627,6 +1665,39 @@ def test_release_probe_session_skips_weekday_before_login(monkeypatch):
         scheduler_mod,
         "send_telegram",
         lambda text: (_ for _ in ()).throw(AssertionError("message should not be sent")),
+    )
+
+    scheduler_mod._run_release_probe_session()
+
+
+def test_release_probe_session_skips_when_no_weekend_targets_checked(monkeypatch):
+    """Empty auto_book_slots for the target weekend must never fall back to a
+    hardcoded default — it means the user decided not to book that weekend."""
+    import scheduler as scheduler_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 5, 30, 7, 58, 0, tzinfo=PT)
+            return value.astimezone(tz) if tz is not None else value
+
+    state = {
+        "auto_book_slots": [{"date": "2026-06-20", "time": "9:00 AM"}],  # a different date
+        "release_probe_log": [],
+    }
+
+    monkeypatch.setattr(scheduler_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "_rec_booking_sessions",
+        lambda st: (_ for _ in ()).throw(AssertionError("should not log in")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod,
+        "book_slot_api",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not book anything")),
     )
 
     scheduler_mod._run_release_probe_session()

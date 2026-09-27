@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 from config import (
-    AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, COURT_PREFERENCE, PT,
+    AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, COURT_PREFERENCE, LOOKAHEAD_DAYS, PT,
     SCANS_DISABLED_MESSAGE, SCANS_ENABLED, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
     _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
 )
@@ -13,7 +13,7 @@ from state import (
     _active_scan_started_at, _attach_history_results, _auto_watch_on_new_day_openings,
     _auto_watch_upcoming_weekends, _enqueue_work, _history_targets_from_map, _new_day_iso,
     _normalize_time_availability, _parse_utc_iso, _record_newly_open_dates, _record_scan_history,
-    _utc_now_iso, load_state, save_state,
+    _utc_now_iso, _weekend_target_checked_times, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
 from rec_api import (
@@ -30,12 +30,16 @@ _INTERVAL_5MIN = round(5  / 60,   6)
 ALLOWED_SCAN_INTERVALS = (_INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0)
 
 
-def _weekend_release_booking_times(target_date: date) -> tuple[str, ...]:
-    if target_date.weekday() == 5:
-        return ("8:00 AM", "9:00 AM")
-    if target_date.weekday() == 6:
-        return ("8:00 AM", "9:00 AM")
-    return ()
+def _weekend_release_booking_times(target_date: date, state: dict) -> tuple[str, ...]:
+    """Times actually checked ($ auto-book) for target_date, if it's a weekend.
+
+    Sourced from auto_book_slots (edited via the weekend-target checklist) —
+    never a hardcoded default. An empty result means the user has decided not
+    to book that weekend; callers must not fall back to booking anything else.
+    """
+    if target_date.weekday() < 5:
+        return ()
+    return _weekend_target_checked_times(state, target_date.isoformat())
 
 
 def _paired_court_order(booked_courts: list[str], candidates: list[str] | None = None) -> list[str]:
@@ -119,7 +123,7 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
     special_new_day_scan = new_day_str not in seen_open_keys
     if special_new_day_scan:
         new_day = date.fromisoformat(new_day_str)
-        release_times = _weekend_release_booking_times(new_day)
+        release_times = _weekend_release_booking_times(new_day, state)
         new_day_times = list(release_times) if release_times else SLOT_TIMES[:]
         targets.setdefault(new_day_str, [])
         for t in new_day_times:
@@ -131,7 +135,7 @@ def _scheduled_scan_targets(state: dict) -> tuple[dict[str, list[str]], bool]:
 def _full_scan_targets() -> dict[str, list[str]]:
     targets: dict[str, list[str]] = {}
     today = date.today()
-    for i in range(16):
+    for i in range(LOOKAHEAD_DAYS):
         d_str = (today + timedelta(days=i)).isoformat()
         targets[d_str] = list(SLOT_TIMES)
     return targets
@@ -415,11 +419,11 @@ def _run_targeted_daily_scan() -> None:
 
     today = date.today()
     new_day = today + timedelta(days=14)
-    release_times = _weekend_release_booking_times(new_day)
+    release_times = _weekend_release_booking_times(new_day, state)
     new_day_times = list(release_times) if release_times else SLOT_TIMES[:]
     times_by_date: dict[str, list[str]] = {new_day.isoformat(): new_day_times}
 
-    for day_offset in range(16):
+    for day_offset in range(LOOKAHEAD_DAYS):
         target = today + timedelta(days=day_offset)
         if target.weekday() >= 5:
             times_by_date.setdefault(target.isoformat(), ["9:00 AM"])
@@ -555,14 +559,14 @@ def _run_release_probe_session() -> None:
     eight_am = now_pt.replace(hour=8, minute=0, second=0, microsecond=0)
 
     new_day = now_pt.date() + timedelta(days=14)
-    release_times = _weekend_release_booking_times(new_day)
+    state = load_state()
+    release_times = _weekend_release_booking_times(new_day, state)
     if not release_times:
         print("Skipping release probe session: no release targets for this weekend.")
         return
     blind_booking_order = _paired_court_order([])
     used_release_accounts: set[int] = set()
 
-    state = load_state()
     try:
         try:
             sessions = _rec_booking_sessions(state)

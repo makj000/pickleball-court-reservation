@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 from config import (
     APP_VERSION, AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, CORS_HEADERS,
-    COURT_PREFERENCE, SLOT_TIMES,
+    COURT_PREFERENCE, LOOKAHEAD_DAYS, SLOT_TIMES,
 )
 from state import (
     _auto_book_slot_is_too_close, _has_future_watched_slots, _load_telegram_usage,
@@ -51,7 +51,7 @@ def handle_state(event) -> dict:
     }
 
     grid = []
-    for i in range(16):
+    for i in range(LOOKAHEAD_DAYS):
         d = today + timedelta(days=i)
         d_str = d.isoformat()
         day_avail = state.get("availability", {}).get(d_str, {})
