@@ -1727,6 +1727,91 @@ def test_booking_agent_weekday_report_is_short_and_skips_model(monkeypatch):
     assert messages == []
 
 
+def test_saturday_of_returns_the_weekends_saturday():
+    import booking_agent as booking_agent_mod
+
+    saturday = date(2026, 6, 13)
+    sunday = date(2026, 6, 14)
+    assert booking_agent_mod._saturday_of(saturday) == saturday
+    assert booking_agent_mod._saturday_of(sunday) == saturday
+
+
+def test_weekend_is_holiday_adjacent_true_for_july_4th_weekend():
+    import booking_agent as booking_agent_mod
+
+    # 2026-07-04 is a Saturday.
+    assert booking_agent_mod._weekend_is_holiday_adjacent(date(2026, 7, 4)) is True
+
+
+def test_weekend_is_holiday_adjacent_false_for_ordinary_weekend():
+    import booking_agent as booking_agent_mod
+
+    assert booking_agent_mod._weekend_is_holiday_adjacent(date(2026, 6, 13)) is False
+
+
+def test_get_prep_context_flags_candidates_and_imminent_target(monkeypatch):
+    import booking_agent as booking_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 6, 13, 7, 30, 0, tzinfo=PT)  # a Saturday
+            return value.astimezone(tz) if tz is not None else value
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 6, 13)
+
+    state = {
+        "auto_book_slots": [{"date": "2026-06-28", "time": "9:00 AM"}],  # +15 days, a Sunday
+        "watched_slots": [],
+        "weekend_target_prefilled_dates": ["2026-07-04"],  # +21 days, already prefilled
+        "booking_history": [],
+    }
+
+    monkeypatch.setattr(booking_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
+
+    context = booking_agent_mod._get_prep_context()
+
+    by_date = {c["date"]: c for c in context["candidates"]}
+    assert by_date["2026-07-04"]["already_prefilled"] is True
+    assert by_date["2026-07-04"]["is_holiday_adjacent"] is True  # July 4th weekend
+    assert by_date["2026-07-05"]["already_prefilled"] is False
+
+    assert context["imminent_target"]["date"] == "2026-06-28"
+    assert context["imminent_target"]["checked_auto_book_times"] == ["9:00 AM"]
+    assert context["imminent_target"]["nothing_queued"] is False
+
+
+def test_set_weekend_targets_tool_writes_and_refuses_to_overwrite(monkeypatch):
+    import booking_agent as booking_agent_mod
+
+    state = {"auto_book_slots": [], "watched_slots": [], "weekend_target_prefilled_dates": []}
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(booking_agent_mod, "save_state", lambda s: state.update(s))
+
+    result = booking_agent_mod._set_weekend_targets_tool({
+        "date": "2026-06-13",
+        "auto_book_times": ["8:00 AM", "9:00 AM", "10:00 AM"],
+        "watch_times": [],
+    })
+    assert result["ok"] is True
+    assert len(state["auto_book_slots"]) == 3
+
+    # Second call for the same date must be a no-op, even with different args.
+    result2 = booking_agent_mod._set_weekend_targets_tool({
+        "date": "2026-06-13",
+        "auto_book_times": [],
+        "watch_times": ["8:00 AM", "9:00 AM", "10:00 AM"],
+    })
+    assert result2["ok"] is False
+    assert len(state["auto_book_slots"]) == 3  # unchanged
+
+
 def test_weekday_report_includes_booking_made_today():
     import booking_agent as booking_agent_mod
     from config import PT

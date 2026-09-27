@@ -1,9 +1,11 @@
-"""Booking agent: reporting for the 8am slot-release session.
+"""Booking agent: two phases.
 
-report (8:30am PT, EventBridge rule): read probe log + reservations, send results.
-
-The release probe session books the new day (today + 14) directly; no prep
-phase is needed to pick targets.
+prep   (daily, EventBridge rule): for the weekend newly entering the 3-week
+       preview window (21-22 days out), set default weekend-target checkbox
+       state if it hasn't been touched yet, and warn if tomorrow's live
+       release target (15 days out) has nothing checked to book.
+report (8:30am PT, EventBridge rule): read probe log + reservations, send
+       results for today's 8am release burst.
 """
 from __future__ import annotations
 
@@ -12,26 +14,22 @@ import os
 from datetime import date, datetime, timedelta
 
 import anthropic
+import holidays
 
-from config import PT, REPORT_EMAIL
+from config import PT, REPORT_EMAIL, WEEKEND_TARGET_TIMES
 from notify import send_report_email, send_telegram
-from state import load_state
+from state import (
+    _is_weekend_target_prefilled, _set_weekend_target_defaults,
+    _weekend_target_checked_times, _weekend_target_watched_times,
+    load_state, save_state,
+)
+from watch_agent import _history_summary
 
 MODEL = "claude-haiku-4-5"
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
+# ── Shared tools ────────────────────────────────────────────────────────────────
 
-TOOLS: list[dict] = [
-    {
-        "name": "get_context",
-        "description": (
-            "Return current state relevant to booking: today's date, the new day opening "
-            "14 days out, existing reservations, current auto_book_slots, watched_slots, "
-            "seen_open_days (when each date was first detected open), and the most recent "
-            "release probe log entries with detailed booking attempts."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
+_SHARED_TOOLS: list[dict] = [
     {
         "name": "send_message",
         "description": "Send a Telegram message to the user.",
@@ -49,9 +47,24 @@ TOOLS: list[dict] = [
 ]
 
 
-# ── Tool implementations ───────────────────────────────────────────────────────
+# ── report phase ──────────────────────────────────────────────────────────────
 
-def _get_context() -> dict:
+REPORT_TOOLS: list[dict] = [
+    {
+        "name": "get_context",
+        "description": (
+            "Return current state relevant to booking: today's date, the new day opening "
+            "14 days out, existing reservations, current auto_book_slots, watched_slots, "
+            "seen_open_days (when each date was first detected open), and the most recent "
+            "release probe log entries with detailed booking attempts."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    *_SHARED_TOOLS,
+]
+
+
+def _get_report_context() -> dict:
     state = load_state()
     today = date.today()
     new_day = today + timedelta(days=14)
@@ -100,9 +113,9 @@ def _weekday_report_text(state: dict, now_pt: datetime) -> str:
     return f"Booked: {'; '.join(booked_today)}."
 
 
-def _run_tool(name: str, args: dict) -> dict:
+def _run_report_tool(name: str, args: dict) -> dict:
     if name == "get_context":
-        return _get_context()
+        return _get_report_context()
     if name == "send_message":
         send_telegram(args["text"])
         return {"ok": True}
@@ -110,8 +123,6 @@ def _run_tool(name: str, args: dict) -> dict:
         return {"done": True}
     return {"error": f"unknown tool: {name}"}
 
-
-# ── System prompt ──────────────────────────────────────────────────────────────
 
 _REPORT_SYSTEM = """\
 You are a pickleball court booking agent running at 8:10 AM PT.
@@ -132,15 +143,174 @@ Your task:
 When mentioning a date, include the weekday, e.g. 2026-06-01 (Monday)."""
 
 
+# ── prep phase ────────────────────────────────────────────────────────────────
+
+PREP_TOOLS: list[dict] = [
+    {
+        "name": "get_context",
+        "description": (
+            "Return: weekend dates 21 and 22 days out that may need default weekend-target "
+            "checkboxes (with whether each is already prefilled and whether it's adjacent to "
+            "a US federal holiday), the weekend 15 days out (tomorrow's live release target, "
+            "if tomorrow is a release day) with its currently checked times, and a summary of "
+            "past booking history by weekday+time."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "set_weekend_targets",
+        "description": (
+            "Set default checklist state for a weekend date that has not been prefilled yet "
+            "(check already_prefilled in get_context first — this is a no-op if it's already "
+            "true, to never overwrite the user's own edits). auto_book_times go to $ auto-book, "
+            "watch_times go to \U0001f441️ watch-only. Times must be from "
+            "WEEKEND_TARGET_TIMES (8:00 AM, 9:00 AM, 10:00 AM)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "YYYY-MM-DD, must be a Saturday or Sunday"},
+                "auto_book_times": {"type": "array", "items": {"type": "string"}},
+                "watch_times": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["date", "auto_book_times", "watch_times"],
+        },
+    },
+    *_SHARED_TOOLS,
+]
+
+
+def _saturday_of(d: date) -> date:
+    """The Saturday of the Sat/Sun weekend containing d (d must be Sat or Sun)."""
+    return d - timedelta(days=(d.weekday() - 5) % 7)
+
+
+def _weekend_is_holiday_adjacent(saturday: date) -> bool:
+    us_holidays = holidays.US()
+    sunday = saturday + timedelta(days=1)
+    friday = saturday - timedelta(days=1)
+    monday = sunday + timedelta(days=1)
+    return any(d in us_holidays for d in (friday, saturday, sunday, monday))
+
+
+def _get_prep_context() -> dict:
+    state = load_state()
+    today = date.today()
+
+    candidates = []
+    for offset in (21, 22):
+        d = today + timedelta(days=offset)
+        if d.weekday() < 5:
+            continue
+        d_str = d.isoformat()
+        candidates.append({
+            "date": d_str,
+            "weekday_name": d.strftime("%A"),
+            "already_prefilled": _is_weekend_target_prefilled(state, d_str),
+            "is_holiday_adjacent": _weekend_is_holiday_adjacent(_saturday_of(d)),
+            "currently_checked_auto_book_times": list(_weekend_target_checked_times(state, d_str)),
+            "currently_watched_times": list(_weekend_target_watched_times(state, d_str)),
+        })
+
+    imminent_target = None
+    imminent_date = today + timedelta(days=15)
+    if imminent_date.weekday() >= 5:
+        imminent_date_str = imminent_date.isoformat()
+        checked = _weekend_target_checked_times(state, imminent_date_str)
+        imminent_target = {
+            "date": imminent_date_str,
+            "weekday_name": imminent_date.strftime("%A"),
+            "checked_auto_book_times": list(checked),
+            "nothing_queued": len(checked) == 0,
+        }
+
+    return {
+        "now_pt": datetime.now(tz=PT).strftime("%Y-%m-%d %H:%M %Z"),
+        "today": today.isoformat(),
+        "weekend_target_times": list(WEEKEND_TARGET_TIMES),
+        "candidates": candidates,
+        "imminent_target": imminent_target,
+        "history_summary": _history_summary(state.get("booking_history") or [], today),
+    }
+
+
+def _set_weekend_targets_tool(args: dict) -> dict:
+    date_str = str(args.get("date") or "")
+    try:
+        d = date.fromisoformat(date_str)
+    except ValueError:
+        return {"error": f"invalid date: {date_str}"}
+    if d.weekday() < 5:
+        return {"error": f"{date_str} is not a Saturday or Sunday"}
+
+    state = load_state()
+    if _is_weekend_target_prefilled(state, date_str):
+        return {"ok": False, "skipped": "already prefilled, not overwriting"}
+
+    auto_times = [t for t in (args.get("auto_book_times") or []) if t in WEEKEND_TARGET_TIMES]
+    watch_times = [t for t in (args.get("watch_times") or []) if t in WEEKEND_TARGET_TIMES]
+    _set_weekend_target_defaults(state, date_str, auto_book_times=auto_times, watch_times=watch_times)
+    save_state(state)
+    return {"ok": True, "date": date_str, "auto_book_times": auto_times, "watch_times": watch_times}
+
+
+def _run_prep_tool(name: str, args: dict) -> dict:
+    if name == "get_context":
+        return _get_prep_context()
+    if name == "set_weekend_targets":
+        return _set_weekend_targets_tool(args)
+    if name == "send_message":
+        send_telegram(args["text"])
+        return {"ok": True}
+    if name == "done":
+        return {"done": True}
+    return {"error": f"unknown tool: {name}"}
+
+
+_PREP_SYSTEM = """\
+You are a pickleball court weekend-target planning agent running once a day.
+
+Your job: for each weekend (Saturday/Sunday) that has newly entered the 3-week
+preview window and has not been prefilled yet, set default checkbox state for
+8:00 AM, 9:00 AM, and 10:00 AM — then tell the user what you set via Telegram.
+
+Process:
+1. Call get_context.
+2. For each entry in `candidates` where already_prefilled is false:
+   - Default rule: if is_holiday_adjacent is true, put ALL THREE times into
+     watch_times (not auto_book_times) — the user may be away for the
+     holiday, and can manually switch a time to auto-book if they do want
+     to play.
+   - Otherwise, put all three times into auto_book_times.
+   - Call set_weekend_targets with that decision. Never call it for a date
+     where already_prefilled is true — that would overwrite the user's own
+     edits.
+3. Check `imminent_target` (the weekend 15 days out — tomorrow's release
+   target, if tomorrow is a release day). If it exists and nothing_queued is
+   true, you MUST clearly warn about it — this is the last chance to notice
+   before it's too late to add anything back for that weekend's 8am release.
+4. Send exactly ONE Telegram message (send_message) summarizing:
+   - What you just set for each newly-visible weekend, or say there was
+     nothing new to preview if every candidate was already prefilled.
+   - The imminent-target warning from step 3, if applicable. If nothing is
+     queued, say so plainly so the user can confirm that's intentional.
+   Keep it short, plain text, a few lines. Mention the day of week with each
+   date, e.g. 2026-06-13 (Saturday).
+5. Call done.
+"""
+
+
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 
 def run_agent(phase: str) -> bool:
-    """Run the report phase. Called from monitor.handler."""
-    if phase != "report":
-        print(f"Booking agent ({phase}): phase removed — skipping.")
+    """Run a booking-agent phase. Called from monitor.handler."""
+    if phase not in ("prep", "report"):
+        print(f"Booking agent ({phase}): unknown phase — skipping.")
         return True
+
     now_pt = datetime.now(tz=PT)
-    if now_pt.weekday() < 5:
+
+    if phase == "report" and now_pt.weekday() < 5:
         report_text = _weekday_report_text(load_state(), now_pt)
         if report_text == "Nothing booked.":
             print(f"Booking agent ({phase}): weekday, nothing booked — skipping Telegram.")
@@ -161,8 +331,11 @@ def run_agent(phase: str) -> bool:
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
         return False
 
+    system = _PREP_SYSTEM if phase == "prep" else _REPORT_SYSTEM
+    tools = PREP_TOOLS if phase == "prep" else REPORT_TOOLS
+    run_tool = _run_prep_tool if phase == "prep" else _run_report_tool
+
     client = anthropic.Anthropic()
-    system = _REPORT_SYSTEM
     now_str = now_pt.strftime("%Y-%m-%d %H:%M %Z")
 
     messages: list[dict] = [
@@ -179,7 +352,7 @@ def run_agent(phase: str) -> bool:
                 model=MODEL,
                 max_tokens=1024,
                 system=system,
-                tools=TOOLS,
+                tools=tools,
                 messages=messages,
             )
         except Exception as exc:
@@ -204,7 +377,7 @@ def run_agent(phase: str) -> bool:
                 if text:
                     report_texts.append(text)
             try:
-                result = _run_tool(block.name, block.input)
+                result = run_tool(block.name, block.input)
                 is_error = False
             except Exception as exc:
                 result = {"error": f"{type(exc).__name__}: {exc}"}
@@ -224,17 +397,18 @@ def run_agent(phase: str) -> bool:
             print(f"Booking agent ({phase}) done after {iteration + 1} iteration(s).")
             break
 
-    email_body = "\n\n".join(report_texts).strip()
-    if not email_body:
-        email_body = final_text
-    if email_body and REPORT_EMAIL:
-        try:
-            send_report_email(
-                f"Pickleball {datetime.now(tz=PT).strftime('%Y-%m-%d')} 8:30 AM probe report",
-                email_body,
-            )
-        except Exception as exc:
-            print(f"Booking agent ({phase}) report email failed: {exc}")
+    if phase == "report":
+        email_body = "\n\n".join(report_texts).strip()
+        if not email_body:
+            email_body = final_text
+        if email_body and REPORT_EMAIL:
+            try:
+                send_report_email(
+                    f"Pickleball {datetime.now(tz=PT).strftime('%Y-%m-%d')} 8:30 AM probe report",
+                    email_body,
+                )
+            except Exception as exc:
+                print(f"Booking agent ({phase}) report email failed: {exc}")
 
     print(f"Booking agent ({phase}) done.")
     return True
