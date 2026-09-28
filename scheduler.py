@@ -23,10 +23,14 @@ from scanner import _api_scan, _api_fetch_availability
 from booking import _apply_booked_slots, _notify_booked_slots
 
 
-_INTERVAL_15S  = round(15 / 3600, 6)
-_INTERVAL_1MIN = round(1  / 60,   6)
-_INTERVAL_5MIN = round(5  / 60,   6)
-ALLOWED_SCAN_INTERVALS = (_INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0)
+_INTERVAL_15S   = round(15 / 3600, 6)
+_INTERVAL_1MIN  = round(1  / 60,   6)
+_INTERVAL_5MIN  = round(5  / 60,   6)
+_INTERVAL_DAILY = 24.0
+_DAILY_SCAN_HOUR_PT = 22  # 10 PM PT
+ALLOWED_SCAN_INTERVALS = (
+    _INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0, _INTERVAL_DAILY,
+)
 
 
 def _weekend_release_booking_times(target_date: date, state: dict) -> tuple[str, ...]:
@@ -155,6 +159,8 @@ def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
         return now.hour % 2 == 0
     if interval == 3.0:
         return now.hour % 3 == 0
+    if interval == _INTERVAL_DAILY:
+        return now.astimezone(PT).hour == _DAILY_SCAN_HOUR_PT
     return True
 
 

@@ -58,11 +58,6 @@ def handler(event, context):
         run_agent(event.get("phase", "report"))
         return
 
-    if event.get("_watch_agent"):
-        from watch_agent import run_agent
-        run_agent()
-        return
-
     if event.get("_one_off_probe"):
         if not AUTO_BOOKING_ENABLED:
             print(f"Skipping one-off probe: {AUTO_BOOKING_DISABLED_MESSAGE}")

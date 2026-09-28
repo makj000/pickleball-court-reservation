@@ -11,21 +11,69 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from datetime import date, datetime, timedelta
 
 import anthropic
 import holidays
 
-from config import PT, REPORT_EMAIL, WEEKEND_TARGET_TIMES
+from config import PT, REPORT_EMAIL, SLOT_TIMES, WEEKEND_TARGET_TIMES
 from notify import send_report_email, send_telegram
 from state import (
     _is_weekend_target_prefilled, _set_weekend_target_defaults,
     _weekend_target_checked_times, _weekend_target_watched_times,
     load_state, save_state,
 )
-from watch_agent import _history_summary
 
 MODEL = "claude-haiku-4-5"
+RECENT_HISTORY_LIMIT = 20
+
+
+def _next_date_for_weekday(today: date, weekday: int) -> str:
+    days = (weekday - today.weekday()) % 7
+    if days == 0:
+        days = 7
+    return (today + timedelta(days=days)).isoformat()
+
+
+def _history_summary(history: list[dict], today: date) -> dict:
+    weekday_time_counts: Counter[tuple[int, str]] = Counter()
+    recent_counts: Counter[tuple[int, str]] = Counter()
+    cutoff = today - timedelta(days=60)
+
+    for entry in history:
+        try:
+            slot_day = date.fromisoformat(str(entry.get("date")))
+        except ValueError:
+            continue
+        time_text = entry.get("time")
+        if time_text not in SLOT_TIMES:
+            continue
+        key = (slot_day.weekday(), time_text)
+        weekday_time_counts[key] += 1
+        if slot_day >= cutoff:
+            recent_counts[key] += 1
+
+    rows = []
+    for (weekday, time_text), count in weekday_time_counts.most_common(20):
+        target_date = _next_date_for_weekday(today, weekday)
+        rows.append({
+            "weekday": date(2026, 1, 5 + weekday).strftime("%A"),
+            "weekday_index": weekday,
+            "next_date": target_date,
+            "time": time_text,
+            "count": count,
+            "recent_count": recent_counts[(weekday, time_text)],
+        })
+
+    return {
+        "by_weekday_time": rows,
+        "recent_examples": sorted(
+            history,
+            key=lambda e: (e.get("date", ""), e.get("time", "")),
+            reverse=True,
+        )[:RECENT_HISTORY_LIMIT],
+    }
 
 # ── Shared tools ────────────────────────────────────────────────────────────────
 
@@ -280,11 +328,22 @@ Process:
    - Default rule: if is_holiday_adjacent is true, put ALL THREE times into
      watch_times (not auto_book_times) — the user may be away for the
      holiday, and can manually switch a time to auto-book if they do want
-     to play.
-   - Otherwise, put all three times into auto_book_times.
-   - Call set_weekend_targets with that decision. Never call it for a date
-     where already_prefilled is true — that would overwrite the user's own
-     edits.
+     to play. Otherwise, start from all three times in auto_book_times.
+   - Then cross-check `history_summary` for this weekend's weekday (Saturday
+     or Sunday). For each of the three times, look at its row in
+     by_weekday_time (matched by weekday + time) and its presence in
+     recent_examples:
+     - If there is a clear, consistent pattern of NOT playing that specific
+       time (near-zero recent_count while the other two times for the same
+       weekday are consistently booked), move just that time from
+       auto_book_times to watch_times instead, and say why in your message.
+     - A time with no history at all (e.g. a newly added time slot) is NOT
+       the same as a negative signal — leave it at the default (book unless
+       holiday). Only move a time to watch_times when the history actively
+       argues against it, never for lack of data.
+   - Call set_weekend_targets with the resulting decision. Never call it for
+     a date where already_prefilled is true — that would overwrite the
+     user's own edits.
 3. Check `imminent_target` (the weekend 15 days out — tomorrow's release
    target, if tomorrow is a release day). If it exists and nothing_queued is
    true, you MUST clearly warn about it — this is the last chance to notice

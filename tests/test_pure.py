@@ -1895,6 +1895,17 @@ def test_should_run_scheduled_tick_sub_15m():
     assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 10, 7, tzinfo=timezone.utc)) is True
 
 
+def test_should_run_scheduled_tick_daily_fires_only_at_10pm_pt():
+    from config import PT
+
+    state = {"scan_interval_hours": 24.0}
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 22, 0, tzinfo=PT)) is True
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 22, 15, tzinfo=PT)) is False
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 9, 0, tzinfo=PT)) is False
+    # Same instant expressed in UTC must still resolve to 10 PM PT.
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 22, 0, tzinfo=PT).astimezone(timezone.utc)) is True
+
+
 def test_booking_history_records_synced_reservations():
     import state as state_mod
 
@@ -1919,91 +1930,3 @@ def test_booking_history_records_synced_reservations():
         }
     ]
 
-
-def test_watch_agent_adds_next_saturday_once(monkeypatch):
-    import watch_agent as watch_agent_mod
-    from config import PT
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            value = datetime(2026, 8, 14, 7, 20, 0, tzinfo=PT)
-            return value.astimezone(tz) if tz is not None else value
-
-    state = {"watched_slots": [], "ai_watched_dates": []}
-    saved = []
-    messages = []
-    history = [
-        {"date": "2026-08-01", "time": "9:00 AM", "court": "6"},
-        {"date": "2026-08-08", "time": "9:00 AM", "court": "4"},
-    ]
-    context = {
-        "history_summary": watch_agent_mod._history_summary(history, date(2026, 8, 14)),
-    }
-
-    monkeypatch.setattr(watch_agent_mod, "datetime", FixedDateTime)
-    monkeypatch.setattr(watch_agent_mod, "load_state", lambda: state)
-    monkeypatch.setattr(watch_agent_mod, "save_state", lambda value: saved.append(value.copy()))
-    monkeypatch.setattr(watch_agent_mod, "send_telegram", messages.append)
-
-    decision = [{
-        "date": "2026-08-15",
-        "times": ["9:00 AM"],
-        "reason": "Matches Saturday morning history",
-        "confidence": 0.8,
-    }]
-
-    assert watch_agent_mod._apply_watch_decision(context, decision, "Watching Saturday 9 AM.") == {
-        "ok": True,
-        "added": 3,
-    }
-    assert {(s["date"], s["time"], s["court"]) for s in state["watched_slots"]} == {
-        ("2026-08-15", "9:00 AM", "6"),
-        ("2026-08-15", "9:00 AM", "4"),
-        ("2026-08-15", "9:00 AM", "5"),
-    }
-    assert state["ai_watched_dates"] == ["2026-08-15"]
-    assert messages == ["Watching Saturday 9 AM."]
-
-    assert watch_agent_mod._apply_watch_decision(context, decision, "Duplicate") == {
-        "ok": True,
-        "added": 0,
-    }
-    assert len(state["watched_slots"]) == 3
-
-
-def test_watch_agent_rejects_unsupported_or_invalid_model_output(monkeypatch):
-    import watch_agent as watch_agent_mod
-    from config import PT
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            value = datetime(2026, 8, 14, 7, 20, 0, tzinfo=PT)
-            return value.astimezone(tz) if tz is not None else value
-
-    state = {"watched_slots": [], "ai_watched_dates": []}
-    context = {
-        "history_summary": watch_agent_mod._history_summary([
-            {"date": "2026-08-01", "time": "9:00 AM", "court": "6"},
-            {"date": "2026-08-08", "time": "9:00 AM", "court": "4"},
-        ], date(2026, 8, 14)),
-    }
-
-    monkeypatch.setattr(watch_agent_mod, "datetime", FixedDateTime)
-    monkeypatch.setattr(watch_agent_mod, "load_state", lambda: state)
-    monkeypatch.setattr(watch_agent_mod, "save_state", lambda value: None)
-    monkeypatch.setattr(watch_agent_mod, "send_telegram", lambda text: None)
-
-    decision = [
-        {"date": "2026-09-20", "times": ["9:00 AM"], "reason": "too far", "confidence": 0.9},
-        {"date": "2026-08-15", "times": ["7:00 AM"], "reason": "bad time", "confidence": 0.9},
-        {"date": "2026-08-16", "times": ["9:00 AM"], "reason": "unsupported weekday", "confidence": 0.9},
-        {"date": "2026-08-15", "times": ["9:00 AM"], "reason": "bad confidence", "confidence": "bad"},
-    ]
-
-    assert watch_agent_mod._apply_watch_decision(context, decision, "Invalid") == {
-        "ok": True,
-        "added": 0,
-    }
-    assert state["watched_slots"] == []

@@ -37,8 +37,6 @@ def _empty_state() -> dict:
         "auto_book_slots":     [],
         "app_booking_log":     [],
         "booking_history":     [],
-        "ai_watch_decisions":  [],
-        "ai_watched_dates":    [],
         "weekend_target_prefilled_dates": [],
         "auto_book_failures":  [],
         "seen_open_days":      {},
@@ -301,11 +299,6 @@ def _normalize_state(state: dict) -> dict:
         if isinstance(e, dict) and e.get("booked_at", "") >= cutoff
     ]
     normalized["booking_history"] = _normalize_booking_history(state.get("booking_history"))
-    normalized["ai_watch_decisions"] = _normalize_ai_watch_decisions(state.get("ai_watch_decisions"))
-    normalized["ai_watched_dates"] = sorted({
-        d for d in (state.get("ai_watched_dates") or [])
-        if isinstance(d, str) and d >= today_str
-    })
     normalized["weekend_target_prefilled_dates"] = sorted({
         d for d in (state.get("weekend_target_prefilled_dates") or [])
         if isinstance(d, str) and d >= today_str
@@ -351,33 +344,6 @@ def _normalize_booking_history(history) -> list[dict]:
             record["account_index"] = account
         normalized.append(record)
     return sorted(normalized, key=lambda e: (e["date"], e["time"], e["court"]))[-1000:]
-
-
-def _normalize_ai_watch_decisions(decisions) -> list[dict]:
-    normalized: list[dict] = []
-    for entry in decisions or []:
-        if not isinstance(entry, dict):
-            continue
-        decided_at = entry.get("decided_at")
-        if not decided_at:
-            continue
-        slots = []
-        for slot in entry.get("slots") or []:
-            if not isinstance(slot, dict):
-                continue
-            slot_date = slot.get("date") or entry.get("target_date")
-            slot_time = slot.get("time")
-            if slot_date and slot_time in SLOT_TIMES:
-                slots.append({"date": slot_date, "time": slot_time})
-        normalized.append({
-            "decided_at": decided_at,
-            "target_date": entry.get("target_date"),
-            "slots": slots,
-            "reason": entry.get("reason"),
-            "confidence": entry.get("confidence"),
-            "message": entry.get("message"),
-        })
-    return normalized[-100:]
 
 
 def _weekday_name(date_str: str) -> str:

@@ -68,76 +68,43 @@ Queued from the 7:45 AM EventBridge tick; fires ~7:58 AM via SQS (780s delay).
 - Individual probe results during the 8 AM burst phase (only the end summary is sent)
 - Scheduled scan runs that find nothing open
 
+## Weekend-target checklist (auto_book_slots / watched_slots)
+
+The single source of truth for what gets auto-booked ($) vs. only watched (👁) for any given weekend date + time is `auto_book_slots` / `watched_slots`, editable directly in the big timetable in the UI (scroll down — it now renders `LOOKAHEAD_DAYS` = 23 days out). `_weekend_release_booking_times()` reads this at release time; an empty checklist for a date means "don't book that weekend," never a hardcoded fallback.
+判断某个周末的某个时段是该自动预订（$）还是只关注（👁），唯一的依据是 `auto_book_slots` / `watched_slots`，可以直接在前端大表格里编辑（往下滚动——现在会渲染到 `LOOKAHEAD_DAYS` = 23 天后）。抢票时 `_weekend_release_booking_times()` 读取的就是这份数据；某个日期的 checklist 为空，就意味着"这个周末不订"，绝不会退回到任何写死的默认值。
+
+Eligible times: `WEEKEND_TARGET_TIMES` = 8:00 AM, 9:00 AM, 10:00 AM (config.py). At release time, `_blind_book_release_targets` races one rec.us account per checked time in parallel — 2 accounts/2 times or 3 accounts/3 times, whatever's actually checked.
+可选时段：`WEEKEND_TARGET_TIMES` = 8:00 AM、9:00 AM、10:00 AM（config.py）。抢票时 `_blind_book_release_targets` 会为每个被勾选的时段并行分配一个 rec.us 账号——实际勾选了几个时段就用几个账号（2或3个）。
+
 ## Booking Agent (booking_agent.py)
 
-An AI agent (Claude claude-sonnet-4-6) that wraps the 8 AM release probe session with intelligent decision-making and Telegram reporting. Triggered by two dedicated EventBridge rules daily.
+Claude (claude-haiku-4-5) runs two phases, both dispatched from `run_agent(phase)`. Each phase's Telegram message is the only automatic notification for its concern — there is no separate "watch agent" anymore (retired; its history-pattern judgment was folded into the prep phase below).
+Claude（claude-haiku-4-5）运行两个阶段，都通过 `run_agent(phase)` 分发。每个阶段的 Telegram 消息就是该职责唯一的自动通知——不再有单独的"watch agent"了（已退役；它基于历史规律的判断逻辑已经并入下面的 prep 阶段）。
 
-### Architecture
+### prep phase — weekend-target planner
+EventBridge rule `pickleball-booking-agent-prep`, `cron(30 14 ? * FRI,SAT,SUN *)` (7:30 AM PT, **Fri/Sat/Sun only** — Mon-Thu runs are a mathematically guaranteed no-op: today+21 shares today's weekday, today+22 and today+15 are both tomorrow's weekday, so none of the three offsets can land on a weekend unless today is Fri/Sat/Sun). `run_agent("prep")` also has its own cheap pre-check that skips the model call entirely if there's truly nothing to do, as a second layer independent of the schedule.
 
-```
-7:30 AM PT ──► EventBridge (booking-agent-prep)
-                    │
-                    ▼
-              booking_agent.run_agent("prep")
-                    │  Claude reasons: which date needs booking?
-                    │  Is there already a reservation this weekend?
-                    │
-                    ├── get_context()       ← reads state from S3
-                    ├── set_auto_book()     ← writes target to auto_book_slots
-                    └── send_message()      ← Telegram preview
+Job: for the weekend newly entering the 21-22-day preview window, and not yet touched (`weekend_target_prefilled_dates`), decide default checklist state:
+- Holiday-adjacent (`holidays` package, checks Fri/Sat/Sun/Mon around the weekend) → all three times default to 👁 watch, never auto-book.
+- Otherwise → all three times default to $ auto-book.
+- Then cross-checks `booking_history` (via `_history_summary`, moved here from the old watch_agent.py): a time with a clear, consistent pattern of *not* being played gets moved to watch instead — but a time with no history at all (e.g. a newly added slot) is left at the default, never penalized for lack of data.
 
-7:45 AM PT ──► EventBridge (existing rule)
-                    │
-                    └── queues release_probe_session via SQS (780s delay)
+Also checks the weekend 15 days out (tomorrow's live release target, if tomorrow is a release day) and warns in the same Telegram message if nothing is checked to book there — the last chance to notice before it's too late.
 
-~7:58 AM PT ◄── SQS trigger
-                    │
-                    ▼
-              _run_release_probe_session()   ← existing scheduler.py
-                    │  pre  (7:58–8:00): probes every 15s
-                    │  burst (8:00–8:02): blind-books release targets directly
-                    │    using multiple accounts across 8:00 AM and 9:00 AM
-                    │  books from auto_book_slots on first open court
-                    └── writes release_probe_log to state
+Never overwrites a date already in `weekend_target_prefilled_dates` — the checklist reflects the user's own edits from then on.
 
-8:10 AM PT ──► EventBridge (booking-agent-report)
-                    │
-                    ▼
-              booking_agent.run_agent("report")
-                    │  Claude reads probe log + reservations
-                    │
-                    ├── get_context()       ← reads state, probe log, reservations
-                    └── send_message()      ← Telegram report
-```
+### 7:45 AM PT — release probe queued
+Existing `pickleball-release-probe-queue` rule queues `_run_release_probe_session()` via SQS (~780s delay, fires ~7:58 AM):
+- pre (7:58–8:00): probes every 15s
+- burst (8:00–8:02): `_blind_book_release_targets` races one account per checked time in parallel (see checklist section above)
+- writes `release_probe_log` to state
 
-### Agent tools
-| Tool | Phase | Effect |
-|------|-------|--------|
-| `get_context` | both | Returns today/new_day/reservations/auto_book_slots/probe_log |
-| `set_auto_book` | prep | Writes target {date, time} pairs to `auto_book_slots` in state |
-| `send_message` | both | Sends Telegram message to configured chat |
-| `done` | both | Signals end of agent loop |
+### report phase — 8:10 AM PT
+EventBridge rule `booking-agent-report`, daily. Reads `release_probe_log` + `my_reservations`, sends a Telegram report on what happened during the 7:58–8:02 AM burst.
 
-### What Claude decides
-**Prep phase:** Should I queue a booking for the date 14 days from today?
-  - Skip if it's a weekday
-  - Skip if there's already a reservation on that weekend (Sat or Sun) for both slots
-  - Otherwise add both 8:00 AM and 9:00 AM to auto_book_slots and send a preview; treat both times as equally important
-
-### Release burst booking strategy
-
-- Use all configured rec.us accounts to race the release targets. The first wave should assign different accounts to `8:00 AM Court 6` and `9:00 AM Court 6` so neither time waits behind the other.
-  使用所有已配置的 rec.us 账号抢发布时间段。第一波应该把不同账号分别分配给 `8:00 AM Court 6` 和 `9:00 AM Court 6`，这样两个时段都不会排在另一个时段后面等待。
-
-- Fall back across both release times in court preference order: `8:00 Court 6`, `9:00 Court 6`, `8:00 Court 4`, `9:00 Court 4`, `8:00 Court 5`, `9:00 Court 5`.
-  对两个发布时间段按球场偏好交错兜底：`8:00 Court 6`、`9:00 Court 6`、`8:00 Court 4`、`9:00 Court 4`、`8:00 Court 5`、`9:00 Court 5`。
-
-- Once an account successfully books a release slot, do not reuse that account for another release slot in the same session.
-  某个账号一旦成功订到一个发布时段，在同一次发布 session 中不要再把该账号用于另一个发布时段。
-
-**Report phase:** What happened during the 7:58–8:02 AM probe session?
-  - How many probes ran, when did the slot open, was it booked?
-  - If nothing booked: was there no target, or did the slot never open?
+### Recurring scan (`_run_targeted_daily_scan`)
+Runs once daily via `scan_interval_hours = 24.0` (10 PM PT, `_DAILY_SCAN_HOUR_PT` in scheduler.py) instead of every 3 hours — weekdays don't need frequent checking since nothing gets booked on them; the checklist plus the dedicated 7:58 AM release burst already cover what matters. Configurable in the UI frequency dropdown.
+现在通过 `scan_interval_hours = 24.0` 每天只跑一次（太平洋时间晚上10点，对应 scheduler.py 里的 `_DAILY_SCAN_HOUR_PT`），而不是每3小时一次——工作日不需要频繁检查，因为工作日不会订场，checklist 加上专门的7:58 AM 抢票已经覆盖了真正重要的部分。可以在前端的频率下拉菜单里配置。
 
 ### EventBridge rules (created by deploy.sh)
 - `booking-agent-prep`: `cron(30 14 * * ? *)` = 7:30 AM PDT (14:30 UTC)
