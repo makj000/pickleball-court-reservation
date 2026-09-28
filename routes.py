@@ -103,8 +103,6 @@ def handle_state(event) -> dict:
             "my_reservations_synced_at": state.get("my_reservations_synced_at"),
             "my_reservations_source": state.get("my_reservations_source"),
             "friend_reservations_updated_at": state.get("friend_reservations_updated_at"),
-            "auto_watch_weekends_enabled": bool(state.get("auto_watch_weekends_enabled", True)),
-            "auto_watch_weekends_8am_enabled": bool(state.get("auto_watch_weekends_8am_enabled", False)),
             "seen_open_days": state.get("seen_open_days") or {},
             "auto_book_failures": state.get("auto_book_failures") or [],
             "telegram_call_history": _load_telegram_usage(),
@@ -384,50 +382,6 @@ def handle_force_book(event) -> dict:
             "booked_slots": booked_slots,
             "attempt_log": detailed_log,
         }),
-    }
-
-
-def handle_auto_watch_weekends(event) -> dict:
-    from state import _auto_watch_upcoming_weekends
-    body = get_body(event)
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return {
-            "statusCode": 400,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"ok": False, "error": "enabled must be true or false"}),
-        }
-    state = load_state()
-    state["auto_watch_weekends_enabled"] = enabled
-    if enabled:
-        _auto_watch_upcoming_weekends(state)
-    save_state(state)
-    return {
-        "statusCode": 200,
-        "headers": CORS_HEADERS,
-        "body": json.dumps({"ok": True, "auto_watch_weekends_enabled": enabled}),
-    }
-
-
-def handle_auto_watch_weekends_8am(event) -> dict:
-    from state import _auto_watch_upcoming_weekends
-    body = get_body(event)
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return {
-            "statusCode": 400,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"ok": False, "error": "enabled must be true or false"}),
-        }
-    state = load_state()
-    state["auto_watch_weekends_8am_enabled"] = enabled
-    if enabled:
-        _auto_watch_upcoming_weekends(state)
-    save_state(state)
-    return {
-        "statusCode": 200,
-        "headers": CORS_HEADERS,
-        "body": json.dumps({"ok": True, "auto_watch_weekends_8am_enabled": enabled}),
     }
 
 

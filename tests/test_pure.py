@@ -993,7 +993,6 @@ def test_forced_full_refresh_clears_auto_book_failures(monkeypatch):
 
     monkeypatch.setattr(scheduler_mod, "load_state", lambda: state)
     monkeypatch.setattr(scheduler_mod, "save_state", fake_save_state)
-    monkeypatch.setattr(scheduler_mod, "_auto_watch_upcoming_weekends", lambda st: False)
     monkeypatch.setattr(scheduler_mod, "_full_scan_targets", lambda: {"2026-07-25": ["9:00 AM"]})
     monkeypatch.setattr(scheduler_mod, "_api_scan", lambda **kwargs: ({"2026-07-25": {"9:00 AM": {"6": False, "4": False, "5": False}}}, []))
     monkeypatch.setattr(scheduler_mod, "_alert_lines_for_open_targets", lambda st, avail: [])

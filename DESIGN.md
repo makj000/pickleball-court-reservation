@@ -30,7 +30,6 @@
               │  │   PUT  /auto-book      PUT  /scan-interval     │      │
               │  │   GET  /my-reservations                        │      │
               │  │   PUT  /my-reservations (manual refresh)       │      │
-              │  │   PUT  /auto-watch-weekends                    │      │
               │  │   PUT  /focus-newest-weekend                   │      │
               │  │   POST /telegram  (Telegram webhook)           │      │
               │  └──────────┬────────────────────────────────────┘      │

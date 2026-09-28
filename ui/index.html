@@ -953,17 +953,6 @@
     <button class="btn" onclick="toggleLogPanel()" id="btn-log-toggle" title="Show API log" style="font-size:0.72rem;padding:4px 10px;">API Log</button>
     <button class="btn" onclick="openAuthModal()" title="Credentials" style="font-size:1rem;padding:4px 10px;">🔑</button>
   </div>
-  <div class="header-controls-row">
-    Auto-watch weekend:
-    <label id="auto-watch-8am-label">
-      <input type="checkbox" id="auto-watch-8am-toggle">
-      8 AM
-    </label>
-    <label id="auto-watch-label">
-      <input type="checkbox" id="auto-watch-toggle" checked>
-      9 AM
-    </label>
-  </div>
 </header>
 
 <div id="content-shell" class="dock-right">
@@ -1400,12 +1389,11 @@ function isFocusedScanSlot(dateStr, timeStr) {
   if (dateStr === newDay && !isWeekend) return true;
   if (!isWeekend) return false;
   if (timeStr === '9:00 AM') return true;
-  if (timeStr === '8:00 AM' && appState.auto_watch_weekends_8am_enabled) return true;
   return false;
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
-let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], release_probe_log: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], auto_watch_weekends_enabled: true, auto_watch_weekends_8am_enabled: false, seen_open_days: {}, friend_reservations: [], friend_reservations_updated_at: null };
+let appState  = { grid: [], slot_times: [], court_nums: ['6', '4', '5'], court_preference: ['6', '4', '5'], app_version: null, watched_slots_updated_at: null, scan_started_at: null, scan_started_kind: null, last_scanned: null, last_scan_started_at: null, last_scan_kind: null, recent_scan_history: [], release_probe_log: [], scan_interval_hours: 1, queued_scheduled_probe_at: null, rec_url: '', auto_book_slots: [], auto_book_failures: [], telegram_call_history: [], seen_open_days: {}, friend_reservations: [], friend_reservations_updated_at: null };
 let clickMode = 'book';
 let toastTimer = null;
 let _logIdSeq = 0;
@@ -2589,22 +2577,6 @@ function _applyStateData(data) {
   } else if (!appState.seen_open_days || typeof appState.seen_open_days !== 'object') {
     appState.seen_open_days = {};
   }
-  const autoWatchToggle = document.getElementById('auto-watch-toggle');
-  if (autoWatchToggle) {
-    autoWatchToggle.checked = appState.auto_watch_weekends_enabled !== false;
-    if (!autoWatchToggle.dataset.wired) {
-      autoWatchToggle.addEventListener('change', e => setAutoWatchWeekends(e.target.checked));
-      autoWatchToggle.dataset.wired = '1';
-    }
-  }
-  const autoWatch8amToggle = document.getElementById('auto-watch-8am-toggle');
-  if (autoWatch8amToggle) {
-    autoWatch8amToggle.checked = !!appState.auto_watch_weekends_8am_enabled;
-    if (!autoWatch8amToggle.dataset.wired) {
-      autoWatch8amToggle.addEventListener('change', e => setAutoWatchWeekends8am(e.target.checked));
-      autoWatch8amToggle.dataset.wired = '1';
-    }
-  }
 }
 
 async function refreshState() {
@@ -3331,64 +3303,6 @@ async function confirmCancelReservation() {
       btn.textContent = 'Yes, proceed with cancel';
     }
     _pendingCancelSlot = null;
-  }
-}
-
-async function setAutoWatchWeekends(enabled) {
-  const toggle = document.getElementById('auto-watch-toggle');
-  const prev = appState.auto_watch_weekends_enabled !== false;
-  if (toggle) toggle.disabled = true;
-  try {
-    const r = await apiFetch('/auto-watch-weekends', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !!enabled }),
-    });
-    if (!r.ok) {
-      if (toggle) toggle.checked = prev;
-      toast('Failed to save (' + r.status + ')');
-      return;
-    }
-    const data = await r.json();
-    appState.auto_watch_weekends_enabled = !!data.auto_watch_weekends_enabled;
-    toast(appState.auto_watch_weekends_enabled
-      ? 'Auto-watch weekend 9 AM enabled'
-      : 'Auto-watch weekend 9 AM disabled');
-    refreshState();
-  } catch (e) {
-    if (toggle) toggle.checked = prev;
-    toast('Error: ' + e.message);
-  } finally {
-    if (toggle) toggle.disabled = false;
-  }
-}
-
-async function setAutoWatchWeekends8am(enabled) {
-  const toggle = document.getElementById('auto-watch-8am-toggle');
-  const prev = !!appState.auto_watch_weekends_8am_enabled;
-  if (toggle) toggle.disabled = true;
-  try {
-    const r = await apiFetch('/auto-watch-weekends-8am', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !!enabled }),
-    });
-    if (!r.ok) {
-      if (toggle) toggle.checked = prev;
-      toast('Failed to save (' + r.status + ')');
-      return;
-    }
-    const data = await r.json();
-    appState.auto_watch_weekends_8am_enabled = !!data.auto_watch_weekends_8am_enabled;
-    toast(appState.auto_watch_weekends_8am_enabled
-      ? 'Auto-watch weekend 8 AM enabled'
-      : 'Auto-watch weekend 8 AM disabled');
-    refreshState();
-  } catch (e) {
-    if (toggle) toggle.checked = prev;
-    toast('Error: ' + e.message);
-  } finally {
-    if (toggle) toggle.disabled = false;
   }
 }
 

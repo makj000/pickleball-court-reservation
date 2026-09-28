@@ -18,7 +18,6 @@ from rec_api import _firebase_login
 from scanner import _api_fetch_availability, _api_scan
 from booking import _apply_booked_slots, _notify_booked_slots
 from scheduler import _run_full_refresh_worker
-from state import _auto_watch_upcoming_weekends
 
 ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", os.environ.get("API_PASSWORD", ""))
@@ -31,7 +30,6 @@ Capabilities (via tools):
 - Trigger an ad-hoc scan.
 - Add or remove watched slots (date + time + court 4/5/6).
 - Add or remove auto-book slots (date + time). The monitor will book them when an open court appears on the next scan.
-- Toggle weekend 9 AM auto-watch.
 - Book a slot immediately (book_slot) — probes live availability then books the best open court.
 
 Conventions:
@@ -53,7 +51,7 @@ Keep replies short. Use plain text."""
 BOT_TOOLS: list[dict] = [
     {
         "name": "get_state",
-        "description": "Return current monitor state: availability, watched_slots, auto_book_slots, auto_watch_weekends_enabled, last_scanned.",
+        "description": "Return current monitor state: availability, watched_slots, auto_book_slots, last_scanned.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -152,15 +150,6 @@ BOT_TOOLS: list[dict] = [
         },
     },
     {
-        "name": "set_auto_watch_weekends",
-        "description": "Enable or disable the weekend 9 AM auto-watch behavior.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"enabled": {"type": "boolean"}},
-            "required": ["enabled"],
-        },
-    },
-    {
         "name": "book_slot",
         "description": (
             "Immediately probe availability and book a specific slot (date + time). "
@@ -201,7 +190,6 @@ def _bot_compact_state() -> dict:
         "scan_in_progress": bool(state.get("scan_started_at")),
         "watched_slots": watched,
         "auto_book_slots": state.get("auto_book_slots", []),
-        "auto_watch_weekends_enabled": state.get("auto_watch_weekends_enabled", True),
         "open_slots": sorted(open_slots, key=lambda x: (x["date"], x["time"], x["court"])),
     }
 
@@ -256,13 +244,6 @@ def _bot_run_tool(name: str, args: dict):
         ]
         save_state(state)
         return {"ok": True, "auto_book": len(state["auto_book_slots"])}
-    if name == "set_auto_watch_weekends":
-        state = load_state()
-        state["auto_watch_weekends_enabled"] = bool(args.get("enabled"))
-        if args.get("enabled"):
-            _auto_watch_upcoming_weekends(state)
-        save_state(state)
-        return {"ok": True, "auto_watch_weekends_enabled": bool(args.get("enabled"))}
     if name == "book_slot":
         if not SCANS_ENABLED:
             return {"ok": False, "error": SCANS_DISABLED_MESSAGE}

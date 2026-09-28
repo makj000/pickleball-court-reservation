@@ -34,9 +34,6 @@ def _empty_state() -> dict:
         "queued_scheduled_probe_at": None,
         "queued_scheduled_probe_token": None,
         "queued_publish_probe_date": None,
-        "auto_watched_weekends": [],
-        "auto_watch_weekends_enabled": True,
-        "auto_watch_weekends_8am_enabled": False,
         "auto_book_slots":     [],
         "app_booking_log":     [],
         "booking_history":     [],
@@ -265,10 +262,6 @@ def _normalize_state(state: dict) -> dict:
     ]
     normalized["notified_slots"] = _normalize_notified_slots(state.get("notified_slots"))
     today_str = date.today().isoformat()
-    normalized["auto_watched_weekends"] = sorted(
-        d for d in (state.get("auto_watched_weekends") or [])
-        if isinstance(d, str) and d >= today_str
-    )
     raw_seen = state.get("seen_open_days") or {}
     if isinstance(raw_seen, list):
         raw_seen = {d: None for d in raw_seen}
@@ -276,9 +269,6 @@ def _normalize_state(state: dict) -> dict:
         d: ts for d, ts in raw_seen.items()
         if isinstance(d, str) and d >= today_str
     }
-    raw_enabled = state.get("auto_watch_weekends_enabled")
-    normalized["auto_watch_weekends_enabled"] = True if raw_enabled is None else bool(raw_enabled)
-    normalized["auto_watch_weekends_8am_enabled"] = bool(state.get("auto_watch_weekends_8am_enabled", False))
     auto_book_slots = []
     seen_ab: set[tuple[str, str]] = set()
     for slot in (state.get("auto_book_slots") or []):
@@ -550,112 +540,6 @@ def _has_future_watched_slots(state: dict) -> bool:
         slot.get("date", "") >= today_str
         for slot in state.get("watched_slots", [])
     )
-
-
-def _upcoming_weekends(n: int = 3) -> list[tuple[date, date]]:
-    today = date.today()
-    days_until_sat = (5 - today.weekday()) % 7
-    first_sat = today + timedelta(days=days_until_sat)
-    return [(first_sat + timedelta(weeks=i), first_sat + timedelta(weeks=i, days=1)) for i in range(n)]
-
-
-def _auto_watch_upcoming_weekends(state: dict) -> bool:
-    watch_9am = state.get("auto_watch_weekends_enabled", True)
-    watch_8am = state.get("auto_watch_weekends_8am_enabled", False)
-    if not watch_9am and not watch_8am:
-        return False
-    weekends = _upcoming_weekends(3)
-    auto_watched = set(state.get("auto_watched_weekends") or [])
-    new_dates = [
-        d.isoformat()
-        for sat, sun in weekends
-        for d in (sat, sun)
-        if d.isoformat() not in auto_watched
-    ]
-    if not new_dates:
-        return False
-
-    existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
-    times_to_watch = []
-    if watch_9am:
-        times_to_watch.append("9:00 AM")
-    if watch_8am:
-        times_to_watch.append("8:00 AM")
-    new_slots = [
-        {"date": d_str, "time": t, "court": court}
-        for d_str in new_dates
-        for t in times_to_watch
-        for court in COURT_PREFERENCE
-        if (d_str, t, court) not in existing
-    ]
-
-    today_str = date.today().isoformat()
-    state["auto_watched_weekends"] = sorted(
-        (auto_watched | set(new_dates)) - {d for d in auto_watched if d < today_str}
-    )
-    if new_slots:
-        state["watched_slots"] = _normalize_slot_records(
-            state.get("watched_slots", []) + new_slots,
-            expand_legacy=False,
-        )
-        state["watched_slots_updated_at"] = _utc_now_iso()
-        times_str = " & ".join(times_to_watch)
-        print(f"Auto-watched {len(new_slots)} {times_str} slot(s) for weekends {new_dates}.")
-    return True
-
-
-def _auto_watch_on_new_day_openings(state: dict, new_avail: dict) -> bool:
-    new_day_str = _new_day_iso()
-    day_avail = new_avail.get(new_day_str, {})
-    any_open = any(
-        v is True
-        for court_map in day_avail.values()
-        for v in (court_map.values() if isinstance(court_map, dict) else [])
-    )
-    if not any_open:
-        return False
-
-    raw_seen = state.get("seen_open_days") or {}
-    if isinstance(raw_seen, list):
-        raw_seen = {d: None for d in raw_seen}
-    if new_day_str in raw_seen:
-        return False
-
-    raw_seen[new_day_str] = _utc_now_iso()
-    state["seen_open_days"] = raw_seen
-
-    existing = {(s["date"], s["time"], s["court"]) for s in state.get("watched_slots", [])}
-    auto_watched = set(state.get("auto_watched_weekends") or [])
-    watch_9am = state.get("auto_watch_weekends_enabled", True)
-    watch_8am = state.get("auto_watch_weekends_8am_enabled", False)
-    times_to_watch = []
-    if watch_9am:
-        times_to_watch.append("9:00 AM")
-    if watch_8am:
-        times_to_watch.append("8:00 AM")
-    new_slots = []
-    new_day = date.fromisoformat(new_day_str)
-    for d in (new_day, new_day + timedelta(days=1)):
-        if d.weekday() < 5:
-            continue
-        d_str = d.isoformat()
-        for t in times_to_watch:
-            for court in COURT_PREFERENCE:
-                if (d_str, t, court) not in existing:
-                    new_slots.append({"date": d_str, "time": t, "court": court})
-        auto_watched.add(d_str)
-
-    if new_slots:
-        state["watched_slots"] = _normalize_slot_records(
-            state.get("watched_slots", []) + new_slots,
-            expand_legacy=False,
-        )
-        state["watched_slots_updated_at"] = _utc_now_iso()
-        state["auto_watched_weekends"] = sorted(auto_watched)
-        days_str = sorted({s["date"] for s in new_slots})
-        times_str = " & ".join(times_to_watch) if times_to_watch else "none"
-        print(f"New day {new_day_str} is open — auto-watched {times_str} for {days_str}.")
-    return True
 
 
 def _record_newly_open_dates(state: dict, new_avail: dict, ts: str | None = None) -> None:

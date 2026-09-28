@@ -10,10 +10,9 @@ from config import (
     _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
 )
 from state import (
-    _active_scan_started_at, _attach_history_results, _auto_watch_on_new_day_openings,
-    _auto_watch_upcoming_weekends, _enqueue_work, _history_targets_from_map, _new_day_iso,
-    _normalize_time_availability, _parse_utc_iso, _record_newly_open_dates, _record_scan_history,
-    _utc_now_iso, _weekend_target_checked_times, load_state, save_state,
+    _active_scan_started_at, _attach_history_results, _enqueue_work, _history_targets_from_map,
+    _new_day_iso, _normalize_time_availability, _parse_utc_iso, _record_newly_open_dates,
+    _record_scan_history, _utc_now_iso, _weekend_target_checked_times, load_state, save_state,
 )
 from notify import _alert_lines_for_open_targets, notify, send_telegram
 from rec_api import (
@@ -226,7 +225,6 @@ def _run_full_refresh_worker(*, force: bool = False) -> None:
         print(f"Another scan started at {active_scan.isoformat()}. Skipping.")
         return
 
-    _auto_watch_upcoming_weekends(state)
     scan_targets = _full_scan_targets()
     history_targets = _history_targets_from_map(scan_targets)
     started_at = _utc_now_iso()
@@ -315,9 +313,6 @@ def _run_scheduled_worker() -> None:
         print(f"Another scheduled scan started at {active_scan.isoformat()}. Skipping.")
         return
 
-    if _auto_watch_upcoming_weekends(state):
-        save_state(state)
-
     watched_times, special_new_day_scan = _scheduled_scan_targets(state)
 
     if not watched_times:
@@ -354,7 +349,6 @@ def _run_scheduled_worker() -> None:
                 day_availability[time_text] = _normalize_time_availability(court_availability)
             availability[date_str] = day_availability
         state["availability"] = availability
-        _auto_watch_on_new_day_openings(state, new_avail)
         _record_newly_open_dates(state, new_avail, started_at)
         state["last_scan_started_at"] = started_at
         state["last_scanned"] = _utc_now_iso()
@@ -414,9 +408,6 @@ def _run_targeted_daily_scan() -> None:
     if active_scan:
         print(f"Targeted daily scan: release probe session running since {active_scan.isoformat()}, skipping.")
         return
-    if _auto_watch_upcoming_weekends(state):
-        save_state(state)
-
     today = date.today()
     new_day = today + timedelta(days=14)
     release_times = _weekend_release_booking_times(new_day, state)

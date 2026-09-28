@@ -34,9 +34,9 @@ from scheduler import (
 )
 from telegram import handle_telegram
 from routes import (
-    handle_auto_book, handle_auto_watch_weekends, handle_auto_watch_weekends_8am,
-    handle_cancel_reservation, handle_force_book, handle_friend_reservations, handle_my_reservations,
-    handle_my_reservations_refresh, handle_scan_interval, handle_state, handle_watch,
+    handle_auto_book, handle_cancel_reservation, handle_force_book, handle_friend_reservations,
+    handle_my_reservations, handle_my_reservations_refresh, handle_scan_interval, handle_state,
+    handle_watch,
 )
 
 
@@ -133,12 +133,6 @@ def handler(event, context):
 
     if path == "/scan-interval" and method == "PUT":
         return handle_scan_interval(event)
-
-    if path == "/auto-watch-weekends" and method == "PUT":
-        return handle_auto_watch_weekends(event)
-
-    if path == "/auto-watch-weekends-8am" and method == "PUT":
-        return handle_auto_watch_weekends_8am(event)
 
     if path == "/auto-book" and method == "PUT":
         return handle_auto_book(event)
