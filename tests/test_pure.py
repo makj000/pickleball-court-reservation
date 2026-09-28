@@ -1726,6 +1726,40 @@ def test_booking_agent_weekday_report_is_short_and_skips_model(monkeypatch):
     assert messages == []
 
 
+def test_booking_agent_prep_skips_model_when_nothing_actionable(monkeypatch):
+    """Mon-Thu: candidates/imminent_target are provably always empty (see
+    ScheduleExpression comment in infra/pickleball-monitor.yaml), so the prep
+    phase must not spend a model call."""
+    import booking_agent as booking_agent_mod
+    from config import PT
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 6, 9, 7, 30, 0, tzinfo=PT)  # a Tuesday
+            return value.astimezone(tz) if tz is not None else value
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 6, 9)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(booking_agent_mod, "datetime", FixedDateTime)
+    monkeypatch.setattr(booking_agent_mod, "date", FixedDate)
+    monkeypatch.setattr(booking_agent_mod, "load_state", lambda: {
+        "auto_book_slots": [], "watched_slots": [], "weekend_target_prefilled_dates": [],
+        "booking_history": [],
+    })
+    monkeypatch.setattr(
+        booking_agent_mod.anthropic,
+        "Anthropic",
+        lambda: (_ for _ in ()).throw(AssertionError("model should not run")),
+    )
+
+    assert booking_agent_mod.run_agent("prep") is True
+
+
 def test_saturday_of_returns_the_weekends_saturday():
     import booking_agent as booking_agent_mod
 

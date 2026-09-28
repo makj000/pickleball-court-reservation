@@ -76,7 +76,12 @@ Resources:
       # rule that predates this template — that rule is no longer used and should
       # be deleted manually to avoid a duplicate/conflicting schedule.
       Name: pickleball-booking-agent-prep
-      ScheduleExpression: cron(30 14 * * ? *)
+      # The +21/+22/+15 day offsets this phase checks only ever land on a
+      # weekend when today is Fri/Sat/Sun (verified: today+21 shares today's
+      # weekday, today+22 is tomorrow's, today+15 is also tomorrow's — none
+      # of the three can be Sat/Sun on a Mon-Thu run). Mon-Thu runs are a
+      # guaranteed no-op, so don't schedule them at all.
+      ScheduleExpression: cron(30 14 ? * FRI,SAT,SUN *)
       State: ENABLED
       Tags:
         - Key: Project

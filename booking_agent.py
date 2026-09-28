@@ -331,6 +331,16 @@ def run_agent(phase: str) -> bool:
         print(f"Booking agent ({phase}): ANTHROPIC_API_KEY not set, skipping.")
         return False
 
+    if phase == "prep":
+        context = _get_prep_context()
+        needs_action = (
+            any(not c["already_prefilled"] for c in context["candidates"])
+            or context["imminent_target"] is not None
+        )
+        if not needs_action:
+            print(f"Booking agent (prep): nothing to prefill or warn about ({context['today']}) — skipping model call.")
+            return True
+
     system = _PREP_SYSTEM if phase == "prep" else _REPORT_SYSTEM
     tools = PREP_TOOLS if phase == "prep" else REPORT_TOOLS
     run_tool = _run_prep_tool if phase == "prep" else _run_report_tool
