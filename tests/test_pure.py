@@ -19,7 +19,7 @@ from state import (
 from http_utils import get_path, get_method, summarize_results
 from message_format import with_weekday_dates
 from notify import ordinal, _alert_lines_for_open_targets, _ordered_open_courts
-from scheduler import _should_run_scheduled_tick
+from scheduler import _effective_scan_interval_hours, _should_run_scheduled_tick
 from scanner import _auto_book_priority_key
 from booking import _apply_booked_slots
 from calendar_sync import _calendar_delete_body, _calendar_event_body, _calendar_event_id
@@ -1904,6 +1904,48 @@ def test_should_run_scheduled_tick_daily_fires_only_at_10pm_pt():
     assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 9, 0, tzinfo=PT)) is False
     # Same instant expressed in UTC must still resolve to 10 PM PT.
     assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 22, 0, tzinfo=PT).astimezone(timezone.utc)) is True
+
+
+def test_effective_scan_interval_speeds_up_when_checklist_nonempty():
+    empty_state = {"scan_interval_hours": 24.0, "watched_slots": [], "auto_book_slots": []}
+    assert _effective_scan_interval_hours(empty_state) == 24.0
+
+    watched_state = {
+        "scan_interval_hours": 24.0,
+        "watched_slots": [{"date": "2026-10-17", "time": "9:00 AM", "court": "6"}],
+        "auto_book_slots": [],
+    }
+    assert _effective_scan_interval_hours(watched_state) == 2.0
+
+    auto_book_state = {
+        "scan_interval_hours": 24.0,
+        "watched_slots": [],
+        "auto_book_slots": [{"date": "2026-10-17", "time": "9:00 AM"}],
+    }
+    assert _effective_scan_interval_hours(auto_book_state) == 2.0
+
+    # A manual setting already faster than the active ceiling is left alone.
+    fast_state = {
+        "scan_interval_hours": 1.0,
+        "watched_slots": [{"date": "2026-10-17", "time": "9:00 AM", "court": "6"}],
+        "auto_book_slots": [],
+    }
+    assert _effective_scan_interval_hours(fast_state) == 1.0
+
+
+def test_should_run_scheduled_tick_speeds_up_to_2h_when_watching():
+    from config import PT
+
+    state = {
+        "scan_interval_hours": 24.0,
+        "watched_slots": [{"date": "2026-10-17", "time": "9:00 AM", "court": "6"}],
+        "auto_book_slots": [],
+    }
+    # Would only fire at 10 PM PT if still daily; with something watched it
+    # must follow the every-2-hours cadence instead.
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 8, 0, tzinfo=PT)) is True
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 9, 0, tzinfo=PT)) is False
+    assert _should_run_scheduled_tick(state, datetime(2026, 5, 1, 10, 0, tzinfo=PT)) is True
 
 
 def test_booking_history_records_synced_reservations():

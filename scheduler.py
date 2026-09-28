@@ -28,6 +28,7 @@ _INTERVAL_1MIN  = round(1  / 60,   6)
 _INTERVAL_5MIN  = round(5  / 60,   6)
 _INTERVAL_DAILY = 24.0
 _DAILY_SCAN_HOUR_PT = 22  # 10 PM PT
+_ACTIVE_WATCH_INTERVAL_HOURS = 2.0  # ceiling used whenever the checklist isn't empty
 ALLOWED_SCAN_INTERVALS = (
     _INTERVAL_15S, _INTERVAL_1MIN, _INTERVAL_5MIN, 0.25, 0.5, 1.0, 2.0, 3.0, _INTERVAL_DAILY,
 )
@@ -106,6 +107,21 @@ def _watched_and_auto_book_targets(state: dict) -> dict[str, list[str]]:
     return targets
 
 
+def _effective_scan_interval_hours(state: dict) -> float:
+    """The interval actually used for scheduling.
+
+    Whenever the checklist (watched_slots/auto_book_slots) isn't empty,
+    there's something a cancellation could free up, so cap the interval at
+    _ACTIVE_WATCH_INTERVAL_HOURS regardless of the configured (default daily)
+    interval — never slower, but a faster manual setting is left alone.
+    With nothing to watch, use the configured interval as-is.
+    """
+    configured = float(state.get("scan_interval_hours") or _INTERVAL_DAILY)
+    if _watched_and_auto_book_targets(state):
+        return min(configured, _ACTIVE_WATCH_INTERVAL_HOURS)
+    return configured
+
+
 def _is_within_scan_window() -> bool:
     now = datetime.now(tz=PT)
     return 8 <= now.hour < 22
@@ -145,7 +161,7 @@ def _full_scan_targets() -> dict[str, list[str]]:
 
 
 def _should_run_scheduled_tick(state: dict, now: datetime) -> bool:
-    interval = float(state.get("scan_interval_hours") or 1.0)
+    interval = _effective_scan_interval_hours(state)
     minute = now.minute
     if interval <= 0.25:
         return True

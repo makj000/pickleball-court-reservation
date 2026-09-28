@@ -26,7 +26,7 @@ from rec_api import sync_rec_my_reservations
 from scanner import _api_scan
 from booking import _apply_booked_slots, _notify_booked_slots
 from scheduler import (
-    _auto_book_time_map, _handle_queue_event, _is_sqs_event,
+    _auto_book_time_map, _effective_scan_interval_hours, _handle_queue_event, _is_sqs_event,
     _queue_release_probe_session_if_needed, _queued_scheduled_probe_is_current,
     _queue_next_scheduled_probe, _clear_queued_scheduled_probe,
     _run_full_refresh_worker, _run_scheduled_worker, _run_targeted_daily_scan,
@@ -72,10 +72,9 @@ def handler(event, context):
 
     if event.get("source") == "aws.events":
         state = load_state()
-        interval = float(state.get("scan_interval_hours") or 1.0)
         _queue_release_probe_session_if_needed(state)
         state = load_state()
-        interval = float(state.get("scan_interval_hours") or 1.0)
+        interval = _effective_scan_interval_hours(state)
         from datetime import datetime, timezone
         if not _should_run_scheduled_tick(state, datetime.now(tz=timezone.utc)):
             print(f"Skipping tick: interval={interval} hr.")
