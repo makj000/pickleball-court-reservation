@@ -194,18 +194,24 @@
       gap: 0;
     }
     .grid-row > .grid { flex: 0 0 auto; }
-    #telegram-calls-table {
+    .right-column {
       flex: 0 0 420px;
       width: 420px;
       align-self: flex-start;
       display: flex;
       flex-direction: column;
       min-height: 0;
-      overflow: hidden;
       padding-left: 18px;
       border-left: 1px solid #e5e7eb;
       margin-left: 18px;
       box-sizing: border-box;
+    }
+    #telegram-calls-table {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
     }
     #telegram-calls-table:empty { display: none; }
     .tg-table-wrap {
@@ -856,8 +862,11 @@
     }
 
     /* ── Booking failure banner ── */
-    #booking-failures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-    #booking-failures:empty { display: none; }
+    #booking-failures {
+      display: flex; flex-direction: column; gap: 6px;
+      flex-shrink: 0; max-height: 240px; overflow-y: auto; margin-bottom: 10px;
+    }
+    #booking-failures:empty { display: none; margin-bottom: 0; }
     .booking-failure-banner {
       background: #fef2f2; border: 1px solid #fca5a5; border-left: 4px solid #dc2626;
       border-radius: 8px; padding: 8px 12px;
@@ -962,10 +971,12 @@
   <div class="grid-wrapper">
     <div id="scan-events"></div>
     <div id="cancel-events"></div>
-    <div id="booking-failures"></div>
     <div class="grid-row">
       <div class="grid" id="grid"></div>
-      <div id="telegram-calls-table"></div>
+      <div class="right-column">
+        <div id="booking-failures"></div>
+        <div id="telegram-calls-table"></div>
+      </div>
     </div>
     <div class="header-controls-row legend-row" aria-label="Timetable color legend">
       <span class="legend-item"><span class="legend-swatch open"></span>White: open</span>
