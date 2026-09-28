@@ -144,6 +144,7 @@
     /* ── Upcoming scans table ── */
     #upcoming-scans-table { margin-top: 20px; padding-bottom: 12px; }
     #release-probe-log { margin-top: 20px; padding-bottom: 20px; max-width: 1200px; }
+    .probe-log-scroll { max-height: 480px; overflow-y: auto; padding-right: 4px; }
     .probe-log-session {
       margin-top: 8px;
       border: 1px solid #dbe3ec;
@@ -1925,7 +1926,7 @@ function formatScanTargetLines(targets) {
 function renderReleaseProbeLog() {
   const container = document.getElementById('release-probe-log');
   if (!container) return;
-  const entries = (appState.release_probe_log || []).slice().reverse().slice(0, 100);
+  const entries = (appState.release_probe_log || []).slice().reverse();
   if (!entries.length) {
     container.innerHTML = '';
     return;
@@ -1939,8 +1940,11 @@ function renderReleaseProbeLog() {
     if (!sessions.has(sessionDate)) sessions.set(sessionDate, []);
     sessions.get(sessionDate).push(entry);
   }
+  // Keep only the 2 most recent session dates — this log can otherwise grow
+  // to span weeks of daily 8am sessions.
+  const recentSessions = new Map([...sessions.entries()].slice(0, 2));
 
-  const sessionHtml = [...sessions.entries()].map(([sessionDate, sessionEntries], sessionIndex) => {
+  const sessionHtml = [...recentSessions.entries()].map(([sessionDate, sessionEntries], sessionIndex) => {
     const entryHtml = sessionEntries.map(entry => {
       const result = String(entry.result || 'unknown');
       const resultClass = ['booked', 'failed', 'error'].includes(result) ? result : '';
@@ -1983,7 +1987,7 @@ function renderReleaseProbeLog() {
     </details>`;
   }).join('');
 
-  container.innerHTML = `<div class="section-label">8 AM Release Probe Details</div>${sessionHtml}`;
+  container.innerHTML = `<div class="section-label">8 AM Release Probe Details</div><div class="probe-log-scroll">${sessionHtml}</div>`;
 }
 
 function scanBadgeClass(kind, status = 'completed') {
@@ -2208,11 +2212,17 @@ function syncTelegramCallsPanelHeight() {
   const panel = document.getElementById('telegram-calls-table');
   const grid = document.getElementById('grid');
   if (!panel) return;
+  // booking-failures sits above this panel in the same column and can change
+  // height independently, so re-render it first and align to its own actual
+  // top position rather than assuming the grid's height applies directly.
+  renderBookingFailures();
   if (!grid || !grid.childElementCount) {
     panel.style.height = '';
     return;
   }
-  panel.style.height = Math.ceil(grid.getBoundingClientRect().height) + 'px';
+  const gridBottom = grid.getBoundingClientRect().bottom;
+  const panelTop = panel.getBoundingClientRect().top;
+  panel.style.height = Math.max(0, Math.ceil(gridBottom - panelTop)) + 'px';
 }
 
 // ── Booking failure banner ────────────────────────────────────────────────────
