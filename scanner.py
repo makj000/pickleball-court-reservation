@@ -37,8 +37,8 @@ def _api_fetch_availability(
     return asyncio.run(fetch_availability_map(target_dates))
 
 
-_DAY_CAP = 10
-_RATE_CAP = 6      # max app-initiated bookings per rate window
+_DAY_CAP = 3
+_RATE_CAP = 3      # max app-initiated bookings per rate window
 _RATE_WINDOW_HOURS = 1  # daytime rolling window
 
 

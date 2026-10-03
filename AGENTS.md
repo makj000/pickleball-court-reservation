@@ -116,15 +116,15 @@ Runs once daily via `scan_interval_hours = 24.0` (10 PM PT, `_DAILY_SCAN_HOUR_PT
 
 Two guards run before every auto-book attempt to prevent runaway bookings:
 
-### Per-day cap (`_DAY_CAP = 2`)
-Before booking a slot on date D, the app counts existing `my_reservations` for D plus slots already booked in the current scan session. If the total is ≥ 2, that slot is skipped.
+### Per-day cap (`_DAY_CAP = 3`)
+Before booking a slot on date D, the app counts existing `my_reservations` for D plus slots already booked in the current scan session. If the total is ≥ 3, that slot is skipped.
 
-### Rate limit (`_RATE_CAP = 4`)
+### Rate limit (`_RATE_CAP = 3`)
 Tracks all app-initiated bookings in `state["app_booking_log"]` (each entry: `{booked_at, date, time, court}`). The rate window varies by time of day (PT):
 - **Daytime 8am–11pm**: rolling 1-hour window
 - **Nighttime 11pm–8am**: since the most recent 11pm PT
 
-If `_recent_booking_count(state) >= 4` before a booking attempt, the loop `break`s immediately and sends a Telegram alert. State is saved to S3 after every successful booking so the counter persists across Lambda invocations.
+If `_recent_booking_count(state) >= 3` before a booking attempt, the loop `break`s immediately and sends a Telegram alert. State is saved to S3 after every successful booking so the counter persists across Lambda invocations.
 
 ### Payment
 Bookings use rec.us credit first against the payable remaining amount (`totalAmountRemaining` when rec.us provides it, otherwise `total`); any remainder is charged to the credit card on file. There is no credit-only guard — partial credit + card is allowed.
