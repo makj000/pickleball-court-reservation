@@ -6,8 +6,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from config import (
     AUTO_BOOKING_DISABLED_MESSAGE, AUTO_BOOKING_ENABLED, COURT_PREFERENCE, LOOKAHEAD_DAYS, PT,
-    SCANS_DISABLED_MESSAGE, SCANS_ENABLED, SLOT_TIMES, SQS_DELAY_MAX_SECONDS,
-    SQS_STALE_GRACE_SECONDS, _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
+    SCANS_DISABLED_MESSAGE, SCANS_ENABLED, SLOT_TIMES, SQS_STALE_GRACE_SECONDS,
+    _RELEASE_END_S, _RELEASE_POST_INTERVAL_S,
 )
 from state import (
     _active_scan_started_at, _attach_history_results, _enqueue_work, _history_targets_from_map,
@@ -17,8 +17,7 @@ from state import (
 from notify import _alert_lines_for_open_targets, notify, send_telegram
 from rec_api import (
     _cache_jwt, _firebase_login, _get_cached_jwt, _rec_booking_sessions,
-    _stripe_confirm_payment_intent, book_slot_api, fetch_rec_my_reservations,
-    sync_rec_my_reservations,
+    _stripe_confirm_payment_intent, book_slot_api, sync_rec_my_reservations,
 )
 from scanner import _api_scan, _api_fetch_availability
 from booking import _apply_booked_slots, _notify_booked_slots
@@ -1281,171 +1280,6 @@ def _queue_release_probe_session_if_needed(state: dict, now_pt: datetime | None 
     return queued
 
 
-_MANUAL_RELEASE_LEAD_SECONDS = 120
-_MANUAL_RELEASE_EXPIRY_SECONDS = 600
-
-
-def _manual_release_reserved_slots(sessions: list[dict]) -> set[tuple[str, str]]:
-    def fetch(session: dict) -> list[dict]:
-        try:
-            return fetch_rec_my_reservations(
-                str(session["jwt"]), account_index=int(session["account_index"])
-            )
-        except Exception as exc:
-            print(f"Manual release: reservation fetch failed for account {session['account_index']}: {exc}")
-            return []
-
-    with ThreadPoolExecutor(max_workers=len(sessions)) as pool:
-        results = list(pool.map(fetch, sessions))
-    return {(slot["date"], slot["time"]) for slots in results for slot in slots}
-
-
-def _manual_release_attempt(session: dict, slot: tuple[str, str, str]) -> dict:
-    slot_date, slot_time, court = slot
-    transaction_log: dict = {}
-    try:
-        ok = book_slot_api(
-            str(session["jwt"]),
-            date.fromisoformat(slot_date),
-            slot_time,
-            court,
-            transaction_log=transaction_log,
-            participant_user_id=str(session.get("participant_user_id") or ""),
-        )
-    except Exception as exc:
-        transaction_log["error"] = str(exc)
-        ok = False
-    response = (transaction_log.get("reservation") or {}).get("response") or {}
-    return {
-        "date": slot_date,
-        "time": slot_time,
-        "court": court,
-        "account_index": int(session.get("account_index") or 1),
-        "ok": ok,
-        "status": response.get("status"),
-        "detail": transaction_log.get("error") or str(response.get("body") or "")[:200],
-    }
-
-
-def _run_manual_release_plan(message: dict) -> None:
-    """One-off ordered booking at a fixed time: explicit groups first, then the other courts, each court tried once."""
-    if not AUTO_BOOKING_ENABLED:
-        print(f"Skipping manual release plan: {AUTO_BOOKING_DISABLED_MESSAGE}")
-        return
-
-    plan_id = str(message["plan_id"])
-    fire_at = float(message["fire_at_epoch"])
-    remaining = fire_at - time.time()
-    if remaining < -_MANUAL_RELEASE_EXPIRY_SECONDS:
-        send_telegram(f"Manual release plan {plan_id} expired without running.")
-        return
-    if remaining > _MANUAL_RELEASE_LEAD_SECONDS + 30:
-        delay = min(SQS_DELAY_MAX_SECONDS, int(remaining - _MANUAL_RELEASE_LEAD_SECONDS))
-        if not _enqueue_work("manual_release_plan", message, delay_seconds=delay):
-            send_telegram(f"Manual release plan {plan_id} could not be re-queued.")
-        return
-
-    state = load_state()
-    started = list(state.get("manual_release_started") or [])
-    if plan_id in started:
-        print(f"Manual release plan {plan_id} already started.")
-        return
-    state["manual_release_started"] = (started + [plan_id])[-20:]
-    try:
-        sessions = _rec_booking_sessions(state)
-    except Exception as exc:
-        save_state(state)
-        send_telegram(f"Manual release plan {plan_id}: login failed: {exc}")
-        return
-    save_state(state)
-    if not sessions:
-        send_telegram(f"Manual release plan {plan_id}: no rec.us accounts configured.")
-        return
-
-    delay = fire_at - time.time()
-    if delay > 0:
-        time.sleep(delay)
-
-    groups = [[tuple(slot) for slot in group] for group in message["groups"]]
-    all_slots = list(dict.fromkeys((d, t) for group in groups for d, t, _ in group))
-    results: list[dict] = []
-    tried: dict[tuple[str, str], set[str]] = {}
-    booked_slots: set[tuple[str, str]] = set()
-
-    def record(new_results: list[dict]) -> None:
-        results.extend(new_results)
-        booked = []
-        for r in new_results:
-            tried.setdefault((r["date"], r["time"]), set()).add(r["court"])
-            if r["ok"]:
-                booked_slots.add((r["date"], r["time"]))
-                booked.append({"date": r["date"], "time": r["time"], "court": r["court"],
-                               "account_index": r["account_index"]})
-        st = load_state()
-        st["manual_release_log"] = (list(st.get("manual_release_log") or []) + [
-            {**r, "plan_id": plan_id, "at": _utc_now_iso()} for r in new_results
-        ])[-200:]
-        if booked:
-            booking_log = list(st.get("app_booking_log") or [])
-            for b in booked:
-                booking_log.insert(0, {"booked_at": _utc_now_iso(), **b})
-            st["app_booking_log"] = booking_log
-            _apply_booked_slots(st, booked)
-        save_state(st)
-        if booked:
-            _notify_booked_slots(booked)
-
-    def run_jobs(jobs: list[tuple[dict, tuple[str, str, str]]]) -> list[dict]:
-        if not jobs:
-            return []
-        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-            return list(pool.map(lambda job: _manual_release_attempt(*job), jobs))
-
-    for index, group in enumerate(groups):
-        reserved = _manual_release_reserved_slots(sessions) if index else set()
-        jobs = [
-            (sessions[i % len(sessions)], slot) for i, slot in enumerate(group)
-            if (slot[0], slot[1]) not in reserved and (slot[0], slot[1]) not in booked_slots
-        ]
-        record(run_jobs(jobs))
-
-    reserved = _manual_release_reserved_slots(sessions)
-    pending = [s for s in all_slots if s not in reserved and s not in booked_slots]
-
-    def fallback(item: tuple[int, tuple[str, str]]) -> list[dict]:
-        i, (slot_date, slot_time) = item
-        session = sessions[i % len(sessions)]
-        out: list[dict] = []
-        for court in COURT_PREFERENCE:
-            if court in tried.get((slot_date, slot_time), set()):
-                continue
-            result = _manual_release_attempt(session, (slot_date, slot_time, court))
-            out.append(result)
-            if result["ok"]:
-                break
-        return out
-
-    if pending:
-        with ThreadPoolExecutor(max_workers=len(pending)) as pool:
-            fallback_results = [r for out in pool.map(fallback, enumerate(pending)) for r in out]
-        record(fallback_results)
-
-    lines = [f"Manual release plan {plan_id} done."]
-    for slot_date, slot_time in all_slots:
-        won = [r for r in results if (r["date"], r["time"]) == (slot_date, slot_time) and r["ok"]]
-        if won:
-            lines.append(f"BOOKED {slot_date} {slot_time} Court {won[0]['court']}")
-        else:
-            attempts = [r for r in results if (r["date"], r["time"]) == (slot_date, slot_time)]
-            last = attempts[-1] if attempts else None
-            reason = f"{last['status']} {last['detail']}" if last else "skipped (already reserved)"
-            lines.append(f"NOT BOOKED {slot_date} {slot_time} ({len(attempts)} tries, last: {reason[:120]})")
-    try:
-        send_telegram("\n".join(lines))
-    except Exception as exc:
-        print(f"Manual release summary notification failed: {exc}")
-
-
 def _run_queue_work(message: dict) -> None:
     kind = message.get("kind")
     if kind == "scheduled_probe":
@@ -1465,8 +1299,6 @@ def _run_queue_work(message: dict) -> None:
             str(message.get("date") or ""),
             str(message.get("time") or ""),
         )
-    elif kind == "manual_release_plan":
-        _run_manual_release_plan(message)
     elif kind == "one_off_probe":
         _run_one_off_probe(
             str(message.get("date") or ""),
