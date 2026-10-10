@@ -13,6 +13,15 @@ from config import (
     WEEKEND_TARGET_TIMES, WORK_QUEUE_URL, _time_text_to_hhmm,
 )
 
+BOOKING_PAYMENT_ID_FIELDS = (
+    "order_id",
+    "invoice_number",
+    "transaction_number",
+    "facility_rental_id",
+    "payment_id",
+    "payment_intent_id",
+)
+
 
 def _empty_state() -> dict:
     return {
@@ -243,7 +252,10 @@ def _normalize_state(state: dict) -> dict:
         state.get("my_reservations"),
         expand_legacy=False,
         default_court=COURT_PREFERENCE[0],
-        preserve_fields=("account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id"),
+        preserve_fields=(
+            "account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id",
+            *BOOKING_PAYMENT_ID_FIELDS,
+        ),
     )
     normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
     normalized["my_reservations_source"] = state.get("my_reservations_source")
@@ -342,6 +354,9 @@ def _normalize_booking_history(history) -> list[dict]:
         }
         if account:
             record["account_index"] = account
+        for field in BOOKING_PAYMENT_ID_FIELDS:
+            if entry.get(field):
+                record[field] = entry[field]
         normalized.append(record)
     return sorted(normalized, key=lambda e: (e["date"], e["time"], e["court"]))[-1000:]
 
@@ -378,6 +393,9 @@ def record_booking_history_from_reservations(state: dict) -> bool:
         key = (slot_date, slot_time, court, account)
         if key in existing:
             existing[key]["last_seen_at"] = now
+            for field in BOOKING_PAYMENT_ID_FIELDS:
+                if slot.get(field):
+                    existing[key][field] = slot[field]
             changed = True
         else:
             record = {
@@ -391,6 +409,9 @@ def record_booking_history_from_reservations(state: dict) -> bool:
             }
             if account:
                 record["account_index"] = account
+            for field in BOOKING_PAYMENT_ID_FIELDS:
+                if slot.get(field):
+                    record[field] = slot[field]
             existing[key] = record
             changed = True
 

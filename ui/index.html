@@ -758,6 +758,13 @@
     #reservation-popover.show { display: block; }
     .reservation-popover-title { font-weight: 700; margin-bottom: 8px; }
     .reservation-popover-row { margin-top: 4px; color: #4b5563; line-height: 1.35; }
+    .reservation-popover-row code {
+      user-select: all;
+      color: #111827;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
     .reservation-popover-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
     .btn-danger {
       border-color: #dc2626;
@@ -2849,7 +2856,25 @@ function reservationAccountShortLabel(account) {
 function reservationAccountTitle(slot) {
   const accounts = reservationAccounts(slot);
   if (!accounts.length) return 'My reservation';
-  return 'Reserved by ' + accounts.map(a => a.email || a.label || reservationAccountShortLabel(a)).join(', ');
+  return accounts.map(a => {
+    const lines = ['Reserved by ' + (a.email || a.label || reservationAccountShortLabel(a))];
+    if (a.invoice_number) lines.push('Invoice #: ' + a.invoice_number);
+    if (a.transaction_number) lines.push('Transaction #: ' + a.transaction_number);
+    if (a.facility_rental_id) lines.push('Rental ID: ' + a.facility_rental_id);
+    return lines.join('\n');
+  }).join('\n\n');
+}
+
+function reservationIdRows(account) {
+  const rows = [
+    ['Invoice #', account.invoice_number],
+    ['Transaction #', account.transaction_number],
+    ['Rental ID', account.facility_rental_id],
+  ];
+  return rows.map(([label, value]) => {
+    const display = value ? `<code>${escHtml(value)}</code>` : 'Not recorded yet';
+    return `<div class="reservation-popover-row">${escHtml(label)}: ${display}</div>`;
+  }).join('');
 }
 
 function createMineLabel(slot) {
@@ -2921,6 +2946,7 @@ function openReservationPopover(slot, date, anchor) {
     <div class="reservation-popover-title">Reservation</div>
     <div class="reservation-popover-row">${escHtml(date)} ${escHtml(slot.time)} Court ${escHtml(slot.court)}</div>
     <div class="reservation-popover-row">Reserved by: ${escHtml(cancelAccountLabel({ account }))}</div>
+    ${reservationIdRows(account)}
     ${accounts.length > 1 ? '<div class="reservation-popover-row">Multiple accounts are attached. Sync first, then cancel one exact booking.</div>' : ''}
     ${!account.booking_id ? '<div class="reservation-popover-row">rec.us will be synced before canceling.</div>' : ''}
     <div class="reservation-popover-actions">

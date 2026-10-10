@@ -86,10 +86,10 @@ COURT_SITE_IDS: dict[str, str] = {
     "4": "ce22b935-aeb9-44ae-852d-bf2e7c91617c",
     "5": "445abe2b-cb2f-450d-a376-0f643890731c",
 }
-COURT_SPORT_IDS: dict[str, str] = {
-    "6": "e4def6e2-b46d-4d1f-a44f-6bb65f603198",
-    "4": "d3bfa8f9-03f4-4c80-ac27-fbb4dbfb9a15",
-    "5": "671d9687-dfa5-4f1c-8d29-de68baf12137",
+COURT_SITE_ACTIVITY_IDS: dict[str, str] = {
+    "6": "81a3ab35-8551-4d1c-9f68-711908b482cc",
+    "4": "6841e9aa-f8d5-40a9-9f6c-5e8f436a95f0",
+    "5": "839a4f04-8d03-4bfc-a1ea-82e4bcc1d7df",
 }
 PARTICIPANT_USER_ID   = os.environ.get("PARTICIPANT_USER_ID", "")
 PARTICIPANT_USER_ID2  = os.environ.get("PARTICIPANT_USER_ID2", "")

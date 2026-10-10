@@ -9,6 +9,7 @@ from config import (
 )
 from state import _preferred_open_court, _utc_now_iso, load_state, save_state
 from rec_api import _firebase_login, _get_cached_jwt, _rec_booking_sessions, book_slot_api
+from rec_api import BOOKING_PAYMENT_ID_FIELDS
 from notify import send_telegram
 
 
@@ -311,6 +312,10 @@ def _api_scan(
             if not booked_court:
                 break
             booked_item = {"date": date_str, "time": time_text, "court": booked_court}
+            identifiers = transaction_log.get("identifiers") if isinstance(transaction_log.get("identifiers"), dict) else {}
+            for field in BOOKING_PAYMENT_ID_FIELDS:
+                if identifiers.get(field):
+                    booked_item[field] = identifiers[field]
             if booked_account is not None:
                 booked_item["account_index"] = booked_account
                 used_accounts.add(booked_account)
@@ -332,6 +337,9 @@ def _api_scan(
             }
             if include_account_index and booked_account is not None:
                 entry["account_index"] = booked_account
+            for field in BOOKING_PAYMENT_ID_FIELDS:
+                if booked_item.get(field):
+                    entry[field] = booked_item[field]
             log.insert(0, entry)
             state_obj["app_booking_log"] = log
             save_state(state_obj)

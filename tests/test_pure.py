@@ -277,6 +277,8 @@ def test_normalize_state_preserves_my_reservation_account_metadata():
                 "booking_id": "booking-3",
                 "reservation_id": "reservation-3",
                 "facility_rental_id": "facility-3",
+                "invoice_number": "invoice-3",
+                "transaction_number": "transaction-3",
             },
         ],
     })
@@ -291,6 +293,8 @@ def test_normalize_state_preserves_my_reservation_account_metadata():
             "booking_id": "booking-3",
             "reservation_id": "reservation-3",
             "facility_rental_id": "facility-3",
+            "invoice_number": "invoice-3",
+            "transaction_number": "transaction-3",
         },
     ]
 
@@ -314,6 +318,9 @@ def test_state_route_exposes_reservation_accounts(monkeypatch):
                     "court": "6",
                     "account_index": 3,
                     "account_email": "player2@example.com",
+                    "facility_rental_id": "rental-3",
+                    "invoice_number": "invoice-3",
+                    "transaction_number": "transaction-3",
                 },
             ],
         },
@@ -332,6 +339,9 @@ def test_state_route_exposes_reservation_accounts(monkeypatch):
             "index": 3,
             "email": "player2@example.com",
             "label": "player2",
+            "facility_rental_id": "rental-3",
+            "invoice_number": "invoice-3",
+            "transaction_number": "transaction-3",
         },
     ]
 
@@ -656,6 +666,121 @@ def test_weekend_auto_book_uses_main_account_for_saturday_targets(monkeypatch):
         ("jwt-1", "user-1", "2026-06-13", "8:00 AM", "6"),
     ]
     assert len(saved_states[-1]["app_booking_log"]) == 2
+
+
+def test_auto_book_records_payment_identifiers(monkeypatch):
+    import copy
+    import scanner as scanner_mod
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 30)
+
+    state = {"my_reservations": [], "app_booking_log": [], "auto_book_failures": []}
+    saved_states = []
+
+    def fake_save_state(value):
+        saved_states.append(copy.deepcopy(value))
+
+    def fake_book_slot(jwt, slot_date, time_text, court, transaction_log=None, participant_user_id=None):
+        transaction_log["identifiers"] = {
+            "order_id": "order-123",
+            "invoice_number": "inv-456",
+            "transaction_number": "txn-789",
+            "facility_rental_id": "rental-012",
+            "payment_id": "pay-abc",
+            "payment_intent_id": "pi-def",
+        }
+        return True
+
+    monkeypatch.setattr(scanner_mod, "date", FixedDate)
+    monkeypatch.setattr(scanner_mod, "load_state", lambda: state)
+    monkeypatch.setattr(scanner_mod, "save_state", fake_save_state)
+    monkeypatch.setattr(scanner_mod, "_recent_booking_count", lambda state: 0)
+    monkeypatch.setattr(
+        scanner_mod,
+        "_api_fetch_availability",
+        lambda target_times_by_date=None: {
+            "2026-06-13": {"9:00 AM": {"6": True, "4": False, "5": False}},
+        },
+    )
+    monkeypatch.setattr(scanner_mod, "book_slot_api", fake_book_slot)
+    monkeypatch.setattr(scanner_mod, "send_telegram", lambda msg: None)
+
+    _, booked = scanner_mod._api_scan(
+        auto_book_slots=[{"date": "2026-06-13", "time": "9:00 AM"}],
+        jwt="test-jwt",
+    )
+
+    assert booked == [{
+        "date": "2026-06-13",
+        "time": "9:00 AM",
+        "court": "6",
+        "order_id": "order-123",
+        "invoice_number": "inv-456",
+        "transaction_number": "txn-789",
+        "facility_rental_id": "rental-012",
+        "payment_id": "pay-abc",
+        "payment_intent_id": "pi-def",
+    }]
+    assert saved_states[-1]["app_booking_log"][0]["invoice_number"] == "inv-456"
+    assert saved_states[-1]["app_booking_log"][0]["transaction_number"] == "txn-789"
+
+
+def test_booking_payment_identifiers_extracts_live_and_synced_ids():
+    import rec_api as rec_api_mod
+
+    live = rec_api_mod._booking_payment_identifiers({
+        "reservation": {"response": {"body": {"data": {
+            "id": "order-live",
+            "invoiceNumber": "inv-live",
+            "facilityRentalId": "rental-live",
+        }}}},
+        "payment": {
+            "response": {
+                "body": {
+                    "included": {
+                        "payments": [{
+                            "id": "pay-live",
+                            "gatewayData": {"paymentIntentId": "pi-live", "chargeId": "ch-live"},
+                        }],
+                    },
+                },
+            },
+        },
+    })
+    synced = rec_api_mod._booking_payment_identifiers({
+        "booking": {
+            "response": {
+                "body": {
+                    "data": {
+                        "orderId": "order-sync",
+                        "invoice_number": "inv-sync",
+                        "facility_rental_id": "rental-sync",
+                        "paymentId": "pay-sync",
+                        "transactionId": "txn-sync",
+                    },
+                },
+            },
+        },
+    })
+
+    assert live == {
+        "order_id": "order-live",
+        "invoice_number": "inv-live",
+        "payment_id": "pay-live",
+        "payment_intent_id": "pi-live",
+        "transaction_number": "ch-live",
+        "facility_rental_id": "rental-live",
+    }
+    assert synced == {
+        "order_id": "order-sync",
+        "invoice_number": "inv-sync",
+        "payment_id": "pay-sync",
+        "transaction_number": "txn-sync",
+        "facility_rental_id": "rental-sync",
+    }
 
 
 def test_weekend_auto_book_honors_per_slot_count(monkeypatch):
@@ -1059,6 +1184,86 @@ def test_one_off_probe_blind_books_exact_target(monkeypatch):
     assert len(state["app_booking_log"]) == 2
 
 
+def test_book_slot_api_reservation_body_uses_site_activity_ids(monkeypatch):
+    import rec_api as rec_api_mod
+
+    bodies = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        bodies.append(body)
+        return 409, {"type": "E_CONFLICT"}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+
+    assert rec_api_mod.book_slot_api(
+        "jwt", date(2026, 10, 25), "8:00 AM", "6", participant_user_id="user-1",
+    ) is False
+    assert bodies == [{
+        "customerUserId": "user-1",
+        "siteActivityIds": ["81a3ab35-8551-4d1c-9f68-711908b482cc"],
+        "from": {"date": "2026-10-25", "time": "08:00:00"},
+        "participantUserId": "user-1",
+        "to": {"date": "2026-10-25", "time": "09:00:00"},
+    }]
+
+
+def test_book_slot_api_payment_body_includes_cart_version(monkeypatch):
+    import rec_api as rec_api_mod
+
+    calls = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        calls.append((url, body))
+        if url.endswith("/reservations"):
+            return 201, {"data": {
+                "id": "order-id",
+                "total": 400,
+                "maxCreditAdjustmentAllowed": 0,
+                "updatedAt": "2026-10-11T15:00:03.433Z",
+                "items": [
+                    {"id": "item-1", "updatedAt": "2026-10-11T15:00:03.500Z"},
+                    {"id": "item-2", "updatedAt": "2026-10-11T15:00:03.100Z"},
+                ],
+            }}
+        return 200, {"data": {"status": "paid"}}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+
+    assert rec_api_mod.book_slot_api(
+        "jwt", date(2026, 10, 25), "8:00 AM", "6", participant_user_id="user-1",
+    ) is True
+    pay_body = calls[1][1]["data"]
+    assert pay_body["version"] == 1791730803500
+    assert pay_body["auditAffectedOrderItemIds"] == ["item-1", "item-2"]
+
+
+def test_book_slot_api_retries_without_customer_user_id_on_invalid_body(monkeypatch):
+    import rec_api as rec_api_mod
+
+    bodies = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        if url.endswith("/reservations"):
+            bodies.append(body)
+            if "customerUserId" in body:
+                return 422, {"type": "E_INVALID_BODY"}
+            return 201, {"data": {"id": "order-id", "total": 400, "maxCreditAdjustmentAllowed": 0}}
+        return 200, {"data": {"status": "paid"}}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+
+    transaction_log = {}
+    assert rec_api_mod.book_slot_api(
+        "jwt", date(2026, 10, 25), "8:00 AM", "6",
+        transaction_log=transaction_log, participant_user_id="user-1",
+    ) is True
+    assert len(bodies) == 2
+    assert "customerUserId" not in bodies[1]
+    assert bodies[1]["siteActivityIds"] == bodies[0]["siteActivityIds"]
+    assert transaction_log["reservation"]["response"]["status"] == 422
+    assert transaction_log["reservation_fallback"]["response"]["status"] == 201
+
+
 def test_book_slot_api_trusts_paid_payment_status(monkeypatch):
     import rec_api as rec_api_mod
 
@@ -1142,6 +1347,44 @@ def test_book_slot_api_trusts_successful_stripe_confirm(monkeypatch):
     ) is True
     assert transaction_log["stripe_confirm"]["body"]["status"] == "succeeded"
     assert transaction_log["verification"]["confirmed"] is True
+    assert transaction_log["verification"]["stripe_confirmed"] is True
+
+
+def test_book_slot_api_confirms_with_saved_card_when_gateway_data_lists_no_methods(monkeypatch):
+    import rec_api as rec_api_mod
+
+    confirms = []
+
+    def fake_rec_api(url, method="GET", body=None, jwt=""):
+        if url.endswith("/reservations"):
+            return 201, {"data": {"id": "order-id", "total": 400, "maxCreditAdjustmentAllowed": 0}}
+        if url.endswith("/payment-methods"):
+            assert "user-1" in url
+            return 200, {"data": [
+                {"id": "old", "archivedAt": "2026-01-01T00:00:00Z", "referenceId": "pm_archived"},
+                {"id": "cur", "archivedAt": None, "referenceId": "pm_saved"},
+            ]}
+        return 200, {
+            "data": {"status": "pending", "creatorUserId": "user-1"},
+            "included": {"payments": [{"gatewayData": {
+                "paymentIntentId": "pi_test", "clientSecret": "secret", "paymentMethods": [],
+            }}]},
+        }
+
+    def fake_confirm(pi, cs, pm):
+        confirms.append((pi, cs, pm))
+        return 200, {"status": "succeeded"}
+
+    monkeypatch.setattr(rec_api_mod, "_rec_api", fake_rec_api)
+    monkeypatch.setattr(rec_api_mod, "STRIPE_PUBLISHABLE_KEY", "pk_test")
+    monkeypatch.setattr(rec_api_mod, "_stripe_confirm_payment_intent", fake_confirm)
+
+    transaction_log = {}
+    assert rec_api_mod.book_slot_api(
+        "jwt", date(2026, 10, 25), "8:00 AM", "6",
+        transaction_log=transaction_log, participant_user_id="user-1",
+    ) is True
+    assert confirms == [("pi_test", "secret", "pm_saved")]
     assert transaction_log["verification"]["stripe_confirmed"] is True
 
 
@@ -1971,4 +2214,3 @@ def test_booking_history_records_synced_reservations():
             "account_index": "1",
         }
     ]
-

@@ -38,7 +38,10 @@ def handle_state(event) -> dict:
                 f"Account {account_index}" if account_index else "Mine"
             ),
         }
-        for field in ("booking_id", "reservation_id", "facility_rental_id"):
+        for field in (
+            "booking_id", "reservation_id", "facility_rental_id",
+            "invoice_number", "transaction_number", "order_id", "payment_id", "payment_intent_id",
+        ):
             if reservation.get(field):
                 account_entry[field] = reservation.get(field)
         mine_by_slot.setdefault(key, []).append(account_entry)

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
 from config import (
-    COURT_PREFERENCE, COURT_SPORT_IDS, EMAIL, EMAIL2, EMAIL3, FIREBASE_SIGN_IN_URL, PASSWORD,
+    COURT_PREFERENCE, COURT_SITE_ACTIVITY_IDS, EMAIL, EMAIL2, EMAIL3, FIREBASE_SIGN_IN_URL, PASSWORD,
     PASSWORD2, PASSWORD3, PARTICIPANT_USER_ID, PARTICIPANT_USER_ID2, PARTICIPANT_USER_ID3,
     SLOT_TIMES, STRIPE_PUBLISHABLE_KEY,
     _HHMM_TO_TIME_TEXT, _TIME_TEXT_TO_HHMMSS,
@@ -15,6 +15,15 @@ from config import (
 from state import (
     _normalize_court_number, _normalize_slot_records, _utc_now_iso,
     record_booking_history_from_reservations,
+)
+
+BOOKING_PAYMENT_ID_FIELDS = (
+    "order_id",
+    "invoice_number",
+    "transaction_number",
+    "facility_rental_id",
+    "payment_id",
+    "payment_intent_id",
 )
 
 
@@ -177,6 +186,8 @@ def _slot_from_rec_reservation(reservation: dict, court: str, booking: dict | No
     }
     if booking and booking.get("id"):
         slot["booking_id"] = booking.get("id")
+    if booking:
+        slot.update(_booking_payment_identifiers({"booking": {"response": {"body": {"data": booking}}}}))
     return slot
 
 
@@ -237,7 +248,7 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
     return _normalize_slot_records(
         slots,
         expand_legacy=False,
-        preserve_fields=("booking_id", "reservation_id", "facility_rental_id"),
+        preserve_fields=("booking_id", "reservation_id", "facility_rental_id", *BOOKING_PAYMENT_ID_FIELDS),
     )
 
 
@@ -272,7 +283,7 @@ def fetch_rec_my_reservations(
     normalized = _normalize_slot_records(
         all_slots,
         expand_legacy=False,
-        preserve_fields=("booking_id", "reservation_id", "facility_rental_id"),
+        preserve_fields=("booking_id", "reservation_id", "facility_rental_id", *BOOKING_PAYMENT_ID_FIELDS),
     )
     for slot in normalized:
         if account_index is not None:
@@ -318,7 +329,10 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     state["my_reservations"] = _normalize_slot_records(
         all_slots,
         expand_legacy=False,
-        preserve_fields=("account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id"),
+        preserve_fields=(
+            "account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id",
+            *BOOKING_PAYMENT_ID_FIELDS,
+        ),
     )
     state["my_reservations_synced_at"] = _utc_now_iso()
     state["my_reservations_source"] = "rec.us"
@@ -368,6 +382,136 @@ def _stripe_confirm_payment_intent(pi_id: str, client_secret: str, pm_id: str) -
         return e.code, body_r
 
 
+def _saved_stripe_payment_method_id(jwt: str, user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    status, body = _rec_api(f"https://api.rec.us/v1/users/{user_id}/payment-methods", jwt=jwt)
+    if status != 200:
+        return None
+    for method in (body.get("data") or []) if isinstance(body, dict) else []:
+        if not method.get("archivedAt") and method.get("referenceId"):
+            return method["referenceId"]
+    return None
+
+
+def _checkout_version(order: dict) -> int | None:
+    stamps = [order.get("updatedAt")] + [i.get("updatedAt") for i in order.get("items") or []]
+    millis = [
+        int(datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000)
+        for v in stamps if v
+    ]
+    return max(millis) if millis else None
+
+
+def _first_string(value, *paths: tuple[str, ...]) -> str | None:
+    for path in paths:
+        current = value
+        for part in path:
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list):
+                try:
+                    current = current[int(part)]
+                except (ValueError, IndexError):
+                    current = None
+            else:
+                current = None
+            if current is None:
+                break
+        if isinstance(current, str) and current:
+            return current
+        if isinstance(current, (int, float)):
+            return str(current)
+    return None
+
+
+def _booking_payment_identifiers(transaction_log: dict) -> dict[str, str]:
+    booking_body = ((transaction_log.get("booking") or {}).get("response") or {}).get("body") or {}
+    reservation_body = ((transaction_log.get("reservation") or {}).get("response") or {}).get("body") or {}
+    payment_body = ((transaction_log.get("payment") or {}).get("response") or {}).get("body") or {}
+    stripe_body = (transaction_log.get("stripe_confirm") or {}).get("body") or {}
+    payment = _first_string(
+        payment_body,
+        ("included", "payments", "0", "id"),
+        ("data", "paymentId"),
+        ("data", "payment", "id"),
+        ("payment", "id"),
+    ) or _first_string(booking_body, ("data", "paymentId"), ("paymentId",), ("data", "payment", "id"))
+    payment_intent = _first_string(
+        payment_body,
+        ("included", "payments", "0", "gatewayData", "paymentIntentId"),
+        ("data", "paymentIntentId"),
+    ) or _first_string(
+        booking_body,
+        ("data", "paymentIntentId"),
+        ("data", "gatewayData", "paymentIntentId"),
+        ("paymentIntentId",),
+        ("gatewayData", "paymentIntentId"),
+    ) or _first_string(stripe_body, ("id",))
+    transaction_number = _first_string(
+        payment_body,
+        ("data", "transactionNumber"),
+        ("data", "transactionId"),
+        ("data", "transaction_id"),
+        ("included", "payments", "0", "transactionNumber"),
+        ("included", "payments", "0", "transactionId"),
+        ("included", "payments", "0", "gatewayData", "chargeId"),
+    ) or _first_string(
+        booking_body,
+        ("data", "transactionNumber"),
+        ("data", "transactionId"),
+        ("data", "transaction_id"),
+        ("data", "gatewayData", "chargeId"),
+        ("transactionNumber",),
+        ("transactionId",),
+        ("transaction_id",),
+        ("gatewayData", "chargeId"),
+    ) or payment_intent or payment
+    identifiers = {
+        "order_id": _first_string(reservation_body, ("data", "id"), ("id",)) or _first_string(
+            booking_body,
+            ("data", "orderId"),
+            ("data", "order", "id"),
+            ("orderId",),
+            ("order", "id"),
+        ),
+        "invoice_number": _first_string(
+            reservation_body,
+            ("data", "invoiceNumber"),
+            ("data", "invoice_number"),
+            ("data", "orderNumber"),
+            ("data", "number"),
+            ("invoiceNumber",),
+            ("orderNumber",),
+        ) or _first_string(
+            booking_body,
+            ("data", "invoiceNumber"),
+            ("data", "invoice_number"),
+            ("data", "orderNumber"),
+            ("data", "number"),
+            ("invoiceNumber",),
+            ("orderNumber",),
+        ),
+        "payment_id": payment,
+        "payment_intent_id": payment_intent,
+        "transaction_number": transaction_number,
+        "facility_rental_id": _first_string(
+            reservation_body,
+            ("data", "facilityRentalId"),
+            ("data", "facility_rental_id"),
+            ("facilityRentalId",),
+            ("facility_rental_id",),
+        ) or _first_string(
+            booking_body,
+            ("data", "facilityRentalId"),
+            ("data", "facility_rental_id"),
+            ("facilityRentalId",),
+            ("facility_rental_id",),
+        ),
+    }
+    return {key: value for key, value in identifiers.items() if value}
+
+
 def book_slot_api(
     jwt: str,
     target_date: date,
@@ -386,8 +530,8 @@ def book_slot_api(
         transaction_log["error"] = f"Unknown time_text: {time_text}"
         return False
 
-    court_sport_id = COURT_SPORT_IDS.get(court)
-    if not court_sport_id:
+    site_activity_id = COURT_SITE_ACTIVITY_IDS.get(court)
+    if not site_activity_id:
         print(f"  book_slot_api: unknown court '{court}'")
         transaction_log["error"] = f"Unknown court: {court}"
         return False
@@ -396,10 +540,12 @@ def book_slot_api(
     start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
     end_str = (start_dt + timedelta(hours=1)).strftime("%H:%M:%S")
     reservation_url = "https://api.rec.us/v1/reservations"
+    participant_id = participant_user_id or PARTICIPANT_USER_ID or _rec_user_id(jwt)
     reservation_body = {
-        "courtSportIds": [court_sport_id],
+        "customerUserId": participant_id,
+        "siteActivityIds": [site_activity_id],
         "from": {"date": date_str, "time": time_str},
-        "participantUserId": participant_user_id or PARTICIPANT_USER_ID or _rec_user_id(jwt),
+        "participantUserId": participant_id,
         "to": {"date": date_str, "time": end_str},
     }
 
@@ -418,6 +564,20 @@ def book_slot_api(
         },
         "response": {"status": s, "body": order},
     }
+    if s == 422 and order.get("type") == "E_INVALID_BODY":
+        # customerUserId was added from the web app's code without confirming rec.us requires it.
+        fallback_body = {k: v for k, v in reservation_body.items() if k != "customerUserId"}
+        print("  Invalid body; retrying without customerUserId…")
+        s, order = _rec_api(
+            reservation_url,
+            method="POST",
+            body=fallback_body,
+            jwt=jwt,
+        )
+        transaction_log["reservation_fallback"] = {
+            "request": {"method": "POST", "url": reservation_url, "body": fallback_body},
+            "response": {"status": s, "body": order},
+        }
     if s not in (200, 201):
         print(f"  API booking failed [{s}]: {json.dumps(order)[:200]}")
         return False
@@ -439,7 +599,12 @@ def book_slot_api(
         payments.append({"paymentMethodType": "free", "amountCents": 0})
 
     payment_url = f"https://api.rec.us/v1/orders/{order_id}/pay"
-    payment_body = {"data": {"payments": payments}}
+    payment_data: dict = {"payments": payments}
+    version = _checkout_version(od)
+    if version is not None:
+        payment_data["version"] = version
+        payment_data["auditAffectedOrderItemIds"] = [i["id"] for i in od.get("items") or [] if i.get("id")]
+    payment_body = {"data": payment_data}
     s2, result = _rec_api(
         payment_url,
         method="POST",
@@ -468,6 +633,9 @@ def book_slot_api(
             cs     = gd.get("clientSecret")
             pms    = gd.get("paymentMethods") or []
             pm_id_stripe = pms[0].get("id") if pms else None
+            if not pm_id_stripe and pi_id and cs:
+                # rec.us no longer lists the saved card in gatewayData; read it from the account instead.
+                pm_id_stripe = _saved_stripe_payment_method_id(jwt, data_obj.get("creatorUserId"))
             if pi_id and cs and pm_id_stripe and STRIPE_PUBLISHABLE_KEY:
                 print(f"  Confirming Stripe PI {pi_id[:28]}…")
                 s_stripe, stripe_body = _stripe_confirm_payment_intent(pi_id, cs, pm_id_stripe)
@@ -476,6 +644,7 @@ def book_slot_api(
                 stripe_confirmed = s_stripe == 200 and stripe_body.get("status") == "succeeded"
 
         payment_confirmed = payment_status in {"paid", "succeeded", "settled", "complete", "completed"} or stripe_confirmed
+        transaction_log["identifiers"] = _booking_payment_identifiers(transaction_log)
         transaction_log["verification"] = {
             "expected": {"date": date_str, "time": time_text, "court": court},
             "confirmed": payment_confirmed,
