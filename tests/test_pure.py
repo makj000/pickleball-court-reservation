@@ -299,6 +299,55 @@ def test_normalize_state_preserves_my_reservation_account_metadata():
     ]
 
 
+def test_normalize_state_strips_past_reservation_artifacts(monkeypatch):
+    import state as state_mod
+
+    monkeypatch.setattr(state_mod, "date", type("FixedDate", (date,), {
+        "today": classmethod(lambda cls: cls(2026, 10, 14)),
+    }))
+    normalized = state_mod._normalize_state({
+        "my_reservations": [
+            {
+                "date": "2026-10-13",
+                "time": "8:00 AM",
+                "court": "6",
+                "confirmation_invoice_screenshot_url": "https://example.com/past.png",
+                "confirmation_invoice_pdf_url": "https://example.com/past.pdf",
+            },
+            {
+                "date": "2026-10-14",
+                "time": "8:00 AM",
+                "court": "4",
+                "confirmation_invoice_screenshot_url": "https://example.com/today.png",
+            },
+        ],
+    })
+
+    past, today_slot = normalized["my_reservations"]
+    assert "confirmation_invoice_screenshot_url" not in past
+    assert "confirmation_invoice_pdf_url" not in past
+    assert today_slot["confirmation_invoice_screenshot_url"] == "https://example.com/today.png"
+
+
+def test_reservation_artifact_s3_key_only_accepts_owned_prefix(monkeypatch):
+    import state as state_mod
+
+    monkeypatch.setattr(state_mod, "STATE_BUCKET", "pickleball-monitor-kma")
+
+    assert state_mod._reservation_artifact_s3_key(
+        "https://pickleball-monitor-kma.s3.us-west-2.amazonaws.com/img/reservation-artifacts/a.png"
+    ) == "img/reservation-artifacts/a.png"
+    assert state_mod._reservation_artifact_s3_key(
+        "https://pickleball-monitor-kma.s3.us-west-2.amazonaws.com/reservation-artifacts/legacy.png"
+    ) == "reservation-artifacts/legacy.png"
+    assert state_mod._reservation_artifact_s3_key(
+        "https://pickleball-monitor-kma.s3.us-west-2.amazonaws.com/index.html"
+    ) is None
+    assert state_mod._reservation_artifact_s3_key(
+        "https://other-bucket.s3.us-west-2.amazonaws.com/reservation-artifacts/a.png"
+    ) is None
+
+
 def test_state_route_exposes_reservation_accounts(monkeypatch):
     import json
     import routes as routes_mod
@@ -321,6 +370,9 @@ def test_state_route_exposes_reservation_accounts(monkeypatch):
                     "facility_rental_id": "rental-3",
                     "invoice_number": "invoice-3",
                     "transaction_number": "transaction-3",
+                    "confirmation_invoice_screenshot_url": "https://example.com/invoice.png",
+                    "confirmation_invoice_pdf_url": "https://example.com/invoice.pdf",
+                    "confirmation_email_screenshot_url": "https://example.com/confirmation.png",
                 },
             ],
         },
@@ -342,6 +394,9 @@ def test_state_route_exposes_reservation_accounts(monkeypatch):
             "facility_rental_id": "rental-3",
             "invoice_number": "invoice-3",
             "transaction_number": "transaction-3",
+            "confirmation_invoice_screenshot_url": "https://example.com/invoice.png",
+            "confirmation_invoice_pdf_url": "https://example.com/invoice.pdf",
+            "confirmation_email_screenshot_url": "https://example.com/confirmation.png",
         },
     ]
 

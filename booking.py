@@ -1,5 +1,5 @@
 from state import _utc_now_iso
-from state import BOOKING_PAYMENT_ID_FIELDS
+from state import BOOKING_PAYMENT_ID_FIELDS, RESERVATION_CONFIRMATION_IMAGE_FIELDS
 from notify import notify
 from calendar_sync import enqueue_calendar_event
 
@@ -14,7 +14,10 @@ def _apply_booked_slots(state: dict, booked_slots: list[dict]) -> None:
         key = (b["date"], b["time"], b["court"])
         if key not in existing_reservations:
             reservation = {"date": b["date"], "time": b["time"], "court": b["court"]}
-            for field in ("account_index", "booking_id", "reservation_id", "facility_rental_id", *BOOKING_PAYMENT_ID_FIELDS):
+            for field in (
+                "account_index", "booking_id", "reservation_id", "facility_rental_id",
+                *BOOKING_PAYMENT_ID_FIELDS, *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
+            ):
                 if b.get(field):
                     reservation[field] = b[field]
             state.setdefault("my_reservations", []).append(reservation)

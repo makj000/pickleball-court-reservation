@@ -765,6 +765,16 @@
       border-radius: 4px;
       padding: 1px 4px;
     }
+    .reservation-confirmation-image {
+      display: block;
+      width: 100%;
+      max-height: 300px;
+      object-fit: contain;
+      margin-top: 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #f9fafb;
+    }
     .reservation-popover-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
     .btn-danger {
       border-color: #dc2626;
@@ -1638,6 +1648,11 @@ function addProgressLog(summary, details = '') {
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+function escAttr(s) {
+  return escHtml(s).replace(/"/g,'&quot;');
+}
+
 
 function clearLog() {
   document.getElementById('log-entries').innerHTML = '';
@@ -2877,6 +2892,46 @@ function reservationIdRows(account) {
   }).join('');
 }
 
+function reservationConfirmationImageUrl(account) {
+  if (!account) return '';
+  return account.confirmation_invoice_screenshot_url
+    || account.confirmation_email_screenshot_url
+    || account.confirmation_email_screenshot_data_url
+    || account.confirmation_email_image_url
+    || account.confirmation_screenshot_url
+    || '';
+}
+
+function reservationConfirmationPdfUrl(account) {
+  if (!account) return '';
+  return account.confirmation_invoice_pdf_url || '';
+}
+
+function isSafeReservationImageUrl(url) {
+  return typeof url === 'string' && (
+    url.startsWith('https://')
+    || url.startsWith('http://')
+    || url.startsWith('data:image/')
+  );
+}
+
+function reservationConfirmationImageHtml(account) {
+  const url = reservationConfirmationImageUrl(account);
+  if (!isSafeReservationImageUrl(url)) return '';
+  const pdfUrl = reservationConfirmationPdfUrl(account);
+  const safePdfUrl = typeof pdfUrl === 'string' && (pdfUrl.startsWith('https://') || pdfUrl.startsWith('http://')) ? pdfUrl : '';
+  const filename = [
+    'pickleball-invoice',
+    account.invoice_number || account.transaction_number || account.facility_rental_id || 'reservation',
+  ].join('-') + '.png';
+  return `
+    <img class="reservation-confirmation-image" src="${escAttr(url)}" alt="Invoice screenshot">
+    <div class="reservation-popover-actions">
+      ${safePdfUrl ? `<a class="btn" href="${escAttr(safePdfUrl)}" download>Download PDF</a>` : ''}
+      <a class="btn" href="${escAttr(url)}" download="${escAttr(filename)}">Download screenshot</a>
+    </div>`;
+}
+
 function createMineLabel(slot) {
   const label = document.createElement('span');
   label.className = 'cell-mine-label';
@@ -2947,6 +3002,7 @@ function openReservationPopover(slot, date, anchor) {
     <div class="reservation-popover-row">${escHtml(date)} ${escHtml(slot.time)} Court ${escHtml(slot.court)}</div>
     <div class="reservation-popover-row">Reserved by: ${escHtml(cancelAccountLabel({ account }))}</div>
     ${reservationIdRows(account)}
+    ${reservationConfirmationImageHtml(account)}
     ${accounts.length > 1 ? '<div class="reservation-popover-row">Multiple accounts are attached. Sync first, then cancel one exact booking.</div>' : ''}
     ${!account.booking_id ? '<div class="reservation-popover-row">rec.us will be synced before canceling.</div>' : ''}
     <div class="reservation-popover-actions">

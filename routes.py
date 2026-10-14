@@ -8,7 +8,7 @@ from config import (
 from state import (
     _auto_book_slot_is_too_close, _has_future_watched_slots, _load_telegram_usage,
     _normalize_court_number, _normalize_slot_records, _normalize_time_availability,
-    _utc_now_iso, load_state, save_state,
+    _utc_now_iso, RESERVATION_CONFIRMATION_IMAGE_FIELDS, load_state, save_state,
 )
 from http_utils import get_body
 from rec_api import _configured_rec_accounts, _firebase_login, _get_cached_jwt, _cache_jwt, cancel_booking_api, sync_rec_my_reservations
@@ -41,6 +41,7 @@ def handle_state(event) -> dict:
         for field in (
             "booking_id", "reservation_id", "facility_rental_id",
             "invoice_number", "transaction_number", "order_id", "payment_id", "payment_intent_id",
+            *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
         ):
             if reservation.get(field):
                 account_entry[field] = reservation.get(field)

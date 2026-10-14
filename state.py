@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import boto3
 from botocore.exceptions import ClientError
@@ -159,6 +160,68 @@ def _normalize_slot_records(
     return normalized
 
 
+RESERVATION_CONFIRMATION_IMAGE_FIELDS = (
+    "confirmation_invoice_screenshot_url",
+    "confirmation_invoice_pdf_url",
+    "confirmation_email_screenshot_url",
+    "confirmation_email_screenshot_data_url",
+    "confirmation_email_image_url",
+    "confirmation_screenshot_url",
+)
+
+RESERVATION_ARTIFACT_PREFIX = "img/reservation-artifacts/"
+RESERVATION_ARTIFACT_PREFIXES = (
+    RESERVATION_ARTIFACT_PREFIX,
+    "reservation-artifacts/",
+)
+
+
+def _reservation_artifact_s3_key(value: str | None) -> str | None:
+    if not value or not STATE_BUCKET:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = parsed.netloc
+    key = parsed.path.lstrip("/")
+    if host == f"{STATE_BUCKET}.s3.us-west-2.amazonaws.com" and key.startswith(RESERVATION_ARTIFACT_PREFIXES):
+        return key
+    if host == "s3.us-west-2.amazonaws.com":
+        prefix = f"{STATE_BUCKET}/"
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+            if key.startswith(RESERVATION_ARTIFACT_PREFIXES):
+                return key
+    return None
+
+
+def _strip_expired_reservation_artifacts(reservations: list[dict], *, today: date | None = None) -> list[dict]:
+    today_str = (today or date.today()).isoformat()
+    cleaned: list[dict] = []
+    for reservation in reservations:
+        if reservation.get("date") < today_str:
+            reservation = {
+                key: value
+                for key, value in reservation.items()
+                if key not in RESERVATION_CONFIRMATION_IMAGE_FIELDS
+            }
+        cleaned.append(reservation)
+    return cleaned
+
+
+def _expired_reservation_artifact_keys(state: dict, *, today: date | None = None) -> set[str]:
+    today_str = (today or date.today()).isoformat()
+    keys: set[str] = set()
+    for reservation in state.get("my_reservations") or []:
+        if not isinstance(reservation, dict) or reservation.get("date") >= today_str:
+            continue
+        for field in RESERVATION_CONFIRMATION_IMAGE_FIELDS:
+            key = _reservation_artifact_s3_key(reservation.get(field))
+            if key:
+                keys.add(key)
+    return keys
+
+
 def _normalize_notified_slots(notified_slots) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -254,9 +317,10 @@ def _normalize_state(state: dict) -> dict:
         default_court=COURT_PREFERENCE[0],
         preserve_fields=(
             "account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id",
-            *BOOKING_PAYMENT_ID_FIELDS,
+            *BOOKING_PAYMENT_ID_FIELDS, *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
         ),
     )
+    normalized["my_reservations"] = _strip_expired_reservation_artifacts(normalized["my_reservations"])
     normalized["my_reservations_synced_at"] = state.get("my_reservations_synced_at")
     normalized["my_reservations_source"] = state.get("my_reservations_source")
     normalized["friend_reservations"] = _normalize_slot_records(
@@ -489,7 +553,13 @@ def save_state(state: dict) -> None:
     if not STATE_BUCKET:
         return
     s3 = boto3.client("s3", region_name="us-west-2")
+    expired_artifact_keys = _expired_reservation_artifact_keys(state)
     state = _normalize_state(state)
+    for key in expired_artifact_keys:
+        try:
+            s3.delete_object(Bucket=STATE_BUCKET, Key=key)
+        except ClientError as exc:
+            print(f"expired reservation artifact delete failed for {key}: {exc}")
     s3.put_object(
         Bucket=STATE_BUCKET,
         Key=STATE_KEY,

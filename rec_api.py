@@ -14,7 +14,7 @@ from config import (
 )
 from state import (
     _normalize_court_number, _normalize_slot_records, _utc_now_iso,
-    record_booking_history_from_reservations,
+    RESERVATION_CONFIRMATION_IMAGE_FIELDS, record_booking_history_from_reservations,
 )
 
 BOOKING_PAYMENT_ID_FIELDS = (
@@ -248,7 +248,10 @@ def _extract_my_reservations_from_rec_bookings(page: dict) -> list[dict]:
     return _normalize_slot_records(
         slots,
         expand_legacy=False,
-        preserve_fields=("booking_id", "reservation_id", "facility_rental_id", *BOOKING_PAYMENT_ID_FIELDS),
+        preserve_fields=(
+            "booking_id", "reservation_id", "facility_rental_id",
+            *BOOKING_PAYMENT_ID_FIELDS, *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
+        ),
     )
 
 
@@ -283,7 +286,10 @@ def fetch_rec_my_reservations(
     normalized = _normalize_slot_records(
         all_slots,
         expand_legacy=False,
-        preserve_fields=("booking_id", "reservation_id", "facility_rental_id", *BOOKING_PAYMENT_ID_FIELDS),
+        preserve_fields=(
+            "booking_id", "reservation_id", "facility_rental_id",
+            *BOOKING_PAYMENT_ID_FIELDS, *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
+        ),
     )
     for slot in normalized:
         if account_index is not None:
@@ -331,7 +337,7 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
         expand_legacy=False,
         preserve_fields=(
             "account_index", "account_email", "booking_id", "reservation_id", "facility_rental_id",
-            *BOOKING_PAYMENT_ID_FIELDS,
+            *BOOKING_PAYMENT_ID_FIELDS, *RESERVATION_CONFIRMATION_IMAGE_FIELDS,
         ),
     )
     state["my_reservations_synced_at"] = _utc_now_iso()
