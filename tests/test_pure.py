@@ -348,6 +348,33 @@ def test_reservation_artifact_s3_key_only_accepts_owned_prefix(monkeypatch):
     ) is None
 
 
+def test_sync_rec_my_reservations_preserves_invoice_artifacts(monkeypatch):
+    import rec_api as rec_api_mod
+
+    monkeypatch.setattr(rec_api_mod, "_configured_rec_accounts", lambda: [{"index": 1}])
+    monkeypatch.setattr(rec_api_mod, "fetch_rec_my_reservations", lambda: [{
+        "date": "2026-10-25",
+        "time": "9:00 AM",
+        "court": "6",
+        "booking_id": "booking-9",
+    }])
+    monkeypatch.setattr(rec_api_mod, "record_booking_history_from_reservations", lambda state: False)
+    state = {
+        "my_reservations": [{
+            "date": "2026-10-25",
+            "time": "9:00 AM",
+            "court": "6",
+            "booking_id": "booking-9",
+            "invoice_number": "INV-9",
+            "confirmation_invoice_screenshot_url": "https://example.com/invoice.jpg",
+        }],
+    }
+
+    assert rec_api_mod.sync_rec_my_reservations(state) is True
+    assert state["my_reservations"][0]["invoice_number"] == "INV-9"
+    assert state["my_reservations"][0]["confirmation_invoice_screenshot_url"] == "https://example.com/invoice.jpg"
+
+
 def test_state_route_exposes_reservation_accounts(monkeypatch):
     import json
     import routes as routes_mod

@@ -308,6 +308,11 @@ def fetch_rec_my_reservations(
 
 def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
     accounts = _configured_rec_accounts()
+    existing_by_booking_id = {
+        str(slot.get("booking_id")): slot
+        for slot in state.get("my_reservations") or []
+        if isinstance(slot, dict) and slot.get("booking_id")
+    }
     all_slots: list[dict] = []
     try:
         if len(accounts) <= 1:
@@ -331,6 +336,14 @@ def sync_rec_my_reservations(state: dict, *, strict: bool = False) -> bool:
         if strict:
             raise
         return False
+
+    for slot in all_slots:
+        existing = existing_by_booking_id.get(str(slot.get("booking_id")))
+        if not existing:
+            continue
+        for field in ("invoice_number", *RESERVATION_CONFIRMATION_IMAGE_FIELDS):
+            if not slot.get(field) and existing.get(field):
+                slot[field] = existing[field]
 
     state["my_reservations"] = _normalize_slot_records(
         all_slots,
