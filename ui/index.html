@@ -528,6 +528,12 @@
       height: 3px;
     }
     /* Watched un-scanned cells keep a stable box; only the dots animate. */
+    .ampm-divider {
+      border-left: 2px solid #64748b;
+      margin-left: -2px;
+      pointer-events: none;
+      z-index: 2;
+    }
     .week-separator {
       grid-column: 1 / -1;
       height: 14px;
@@ -2795,6 +2801,15 @@ function renderGrid() {
         cell.addEventListener('mouseout', onCellMouseOut);
         grid.appendChild(cell);
       }
+    }
+  }
+  for (let timeIndex = 1; timeIndex < appState.slot_times.length; timeIndex++) {
+    if (/AM$/i.test(appState.slot_times[timeIndex - 1].trim()) && /PM$/i.test(appState.slot_times[timeIndex].trim())) {
+      const divider = document.createElement('div');
+      divider.className = 'ampm-divider';
+      divider.style.gridColumn = String(2 + timeIndex * courtCount);
+      divider.style.gridRow = `1 / ${headerRows + appState.grid.length + extraRows + 1}`;
+      grid.appendChild(divider);
     }
   }
   syncTelegramCallsPanelHeight();

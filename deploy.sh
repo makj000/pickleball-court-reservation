@@ -3,6 +3,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 set -a; source "$SCRIPT_DIR/.env" 2>/dev/null || true; set +a
+export AWS_PROFILE="${AWS_PROFILE:-pickleball}"
 
 trap 'echo ""; echo "==> FAILED at line $LINENO" >&2' ERR
 

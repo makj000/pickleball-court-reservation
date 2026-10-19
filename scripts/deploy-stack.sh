@@ -4,6 +4,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 set -a; source "$ROOT_DIR/.env" 2>/dev/null || true; set +a
+export AWS_PROFILE="${AWS_PROFILE:-pickleball}"
 
 REGION="${REGION:-us-west-2}"
 STACK_NAME="${STACK_NAME:-pickleball-monitor-infra}"
