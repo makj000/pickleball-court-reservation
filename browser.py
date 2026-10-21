@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from datetime import date
 
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
@@ -28,7 +29,11 @@ _SESSION_FILE = "/tmp/pl_session.json"
 
 
 def _browser_args() -> list[str]:
-    return ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+    args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    # Needed in the Linux container; on macOS it folds the whole browser into one leaky process.
+    if sys.platform != "darwin":
+        args.append("--single-process")
+    return args
 
 
 def _user_agent() -> str:
@@ -231,11 +236,13 @@ async def fetch_availability_map(
     result: dict[str, dict[str, dict[str, bool | None]]] = {}
     async with async_playwright() as pw:
         browser, context, page = await _new_page(pw)
-        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
-        for target in targets:
-            slots = await scan_day(page, target)
-            result[target.isoformat()] = _slots_to_availability(slots)
-        await browser.close()
+        try:
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+            for target in targets:
+                slots = await scan_day(page, target)
+                result[target.isoformat()] = _slots_to_availability(slots)
+        finally:
+            await browser.close()
     return result
 
 
@@ -245,23 +252,24 @@ async def main(*, targets=None, target_time=None) -> dict[str, list[dict]]:
     from config import load_check_dates as _lcd
     async with async_playwright() as pw:
         browser, context, page = await _new_page(pw)
-        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+        try:
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
 
-        all_results: dict[str, list[dict]] = {}
-        targets = targets or _lcd()
-        if not targets:
-            print("No dates to check.")
-            return {}
+            all_results: dict[str, list[dict]] = {}
+            targets = targets or _lcd()
+            if not targets:
+                print("No dates to check.")
+                return {}
 
-        labels = ", ".join(t.strftime("%a %b %-d") for t in targets)
-        print(f"Scanning {labels} for {target_time or 'all slots'}…\n")
+            labels = ", ".join(t.strftime("%a %b %-d") for t in targets)
+            print(f"Scanning {labels} for {target_time or 'all slots'}…\n")
 
-        for target in targets:
-            slots = await scan_day(page, target, target_time=target_time)
-            if slots:
-                all_results[target.strftime("%A, %B %-d")] = slots
-
-        await browser.close()
+            for target in targets:
+                slots = await scan_day(page, target, target_time=target_time)
+                if slots:
+                    all_results[target.strftime("%A, %B %-d")] = slots
+        finally:
+            await browser.close()
 
     print()
     print("=" * 60)

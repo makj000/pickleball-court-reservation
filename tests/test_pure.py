@@ -2296,3 +2296,46 @@ def test_booking_history_records_synced_reservations():
             "account_index": "1",
         }
     ]
+
+
+# ── browser ───────────────────────────────────────────────────────────────────
+
+def test_browser_args_single_process_only_off_macos(monkeypatch):
+    import browser
+
+    monkeypatch.setattr(browser.sys, "platform", "darwin")
+    assert "--single-process" not in browser._browser_args()
+    monkeypatch.setattr(browser.sys, "platform", "linux")
+    assert "--single-process" in browser._browser_args()
+
+
+def test_fetch_availability_map_closes_browser_on_error(monkeypatch):
+    import asyncio
+    import browser
+
+    closed = []
+
+    class FakePage:
+        async def goto(self, *args, **kwargs):
+            raise RuntimeError("navigation failed")
+
+    class FakeBrowser:
+        async def close(self):
+            closed.append(True)
+
+    class FakePlaywright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def fake_new_page(pw):
+        return FakeBrowser(), None, FakePage()
+
+    monkeypatch.setattr(browser, "async_playwright", lambda: FakePlaywright())
+    monkeypatch.setattr(browser, "_new_page", fake_new_page)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(browser.fetch_availability_map([date(2026, 8, 15)]))
+    assert closed == [True]
